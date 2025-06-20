@@ -21,7 +21,7 @@ agent:
 
 # Server connection (connecting to public server)
 server:
-  address: "195.201.146.166:8443"      # Public server IP address
+  address: "<server public ip>:8443" # Public server IP address
   ca_cert: "/config/certs/ca.crt"
   cert: "/config/certs/agent.crt"
   key: "/config/certs/agent.key"
@@ -33,10 +33,10 @@ services:
   - id: "traefik"
     name: "Internal Proxy Traefik"
     hosts:
-      - portal.local.example.com         # Main dashboard
+      - portal.local.example.com # Main dashboard
     protocol: http
     upstreams:
-      - address: "traefik:80"           # Internal Traefik container
+      - address: "traefik:80" # Internal Traefik container
     routes:
       - match:
           path: "/*"
@@ -49,10 +49,10 @@ services:
     name: "Home Assistant"
     hosts:
       - assistant.local.example.com
-    websocket: true                     # Essential for Home Assistant real-time features
+    websocket: true # Essential for Home Assistant real-time features
     protocol: http
     upstreams:
-      - address: "172.30.10.120:8123"   # Direct IP to Home Assistant
+      - address: "172.30.10.120:8123" # Direct IP to Home Assistant
     routes:
       - match:
           path: "/*"
@@ -65,11 +65,11 @@ services:
     name: "Pi-hole DNS"
     hosts:
       - pihole.local.example.com
-    websocket: true                     # Real-time query monitoring
+    websocket: true # Real-time query monitoring
     protocol: "https"
-    listen_on: "https"                 # redirect http to https
+    listen_on: "https" # redirect http to https
     upstreams:
-      - address: "172.30.13.254:80"     # Pi-hole server IP
+      - address: "172.30.13.254:80" # Pi-hole server IP
     routes:
       - match:
           path: "/*"
@@ -81,14 +81,14 @@ services:
   - id: "synology"
     name: "Synology NAS"
     hosts:
-      - nas.local.example.com                 # Main NAS interface
-      - drive.local.example.com               # Synology Drive
-      - file.local.example.com                # File Station
-      - photo.local.example.com               # Synology Photos
-    websocket: true                     # Required for real-time NAS features
-    protocol: https                     # NAS uses HTTPS internally
+      - nas.local.example.com # Main NAS interface
+      - drive.local.example.com # Synology Drive
+      - file.local.example.com # File Station
+      - photo.local.example.com # Synology Photos
+    websocket: true # Required for real-time NAS features
+    protocol: https # NAS uses HTTPS internally
     upstreams:
-      - address: "172.23.0.1:443"       # Synology NAS HTTPS port
+      - address: "172.23.0.1:443" # Synology NAS HTTPS port
     routes:
       - match:
           path: "/*"
@@ -101,13 +101,13 @@ services:
     name: "Plex Media Server"
     hosts:
       - plex.local.example.com
-    websocket: true                     # Real-time media streaming features
+    websocket: true # Real-time media streaming features
     protocol: "https"
-    listen_on: "https"                # Only listen on HTTPS port 443
+    listen_on: "https" # Only listen on HTTPS port 443
     upstreams:
-      - address: "172.23.0.1:32400"     # Standard Plex port on NAS
+      - address: "172.23.0.1:32400" # Standard Plex port on NAS
     routes:
       - match:
           path: "/*"
         handle:
-          - type: "reverse_proxy" 
+          - type: "reverse_proxy"

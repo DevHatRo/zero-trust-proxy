@@ -47,8 +47,7 @@ go build -o bin/certgen ./cmd/certgen
 ### 2. Generate Certificates
 ```bash
 # Generate CA and certificates
-./bin/certgen --ca certs/ca.crt --ca-key certs/ca.key --out certs --name server --type server
-./bin/certgen --ca certs/ca.crt --ca-key certs/ca.key --out certs --name agent1 --type agent
+./bin/certgen -client-ca -client-id test1 -intermediate-ca -root-ca -server-ca -server-ip 127.0.0.1,8.8.8.8
 ```
 
 ### 3. Start Server

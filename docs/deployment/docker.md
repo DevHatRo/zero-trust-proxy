@@ -218,7 +218,7 @@ agent:
     - "synology"
 
 server:
-  address: "195.201.146.166:8443"  # Public server IP
+  address: "<server public ip>:8443"  # Public server IP
   ca_cert: "/config/certs/ca.crt"
   cert: "/config/certs/agent.crt"
   key: "/config/certs/agent.key"
