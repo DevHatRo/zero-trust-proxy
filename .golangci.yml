@@ -1,0 +1,67 @@
+# Simplified Go linting configuration compatible with older Go versions
+run:
+  timeout: 5m
+  tests: true
+  skip-dirs:
+    - vendor
+    - testdata
+
+output:
+  formats:
+    - format: line-number
+      path: stdout
+  sort-results: true
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  
+  gocyclo:
+    min-complexity: 15
+  
+  govet:
+    enable-all: true
+  
+  staticcheck:
+    checks: ["all"]
+  
+  unused:
+    check-exported: false
+  
+  misspell:
+    locale: US
+
+linters:
+  disable-all: true
+  enable:
+    # Essential linters that work with older Go versions
+    - errcheck      # Check for unchecked errors
+    - gosimple      # Simplify Go code
+    - govet         # Go vet examiner
+    - ineffassign   # Detect ineffectual assignments
+    - staticcheck   # Advanced static analysis
+    - unused        # Find unused code
+    - typecheck     # Type-check Go code
+    
+    # Code quality
+    - gocyclo       # Cyclomatic complexity
+    - gofmt         # Check whether code was gofmt-ed
+    - goimports     # Check import formatting
+    
+    # Style
+    - misspell      # Find commonly misspelled English words
+    - unparam       # Find unused function parameters
+    - unconvert     # Remove unnecessary type conversions
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  
+  exclude-rules:
+    # Allow unused code in test files
+    - path: _test\.go
+      linters:
+        - unused
+        - unparam

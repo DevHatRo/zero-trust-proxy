@@ -1,0 +1,93 @@
+# Zero Trust Agent Configuration
+# This configuration defines agent identity, server connection, and backend services
+
+# Hot reload configuration
+hot_reload:
+  enabled: true
+  watch_config: true
+
+# Log level
+log_level: "INFO"  # Options: DEBUG, INFO, WARN, ERROR, FATAL
+
+# Agent identity and metadata
+agent:
+  id: "docker-agent"        # Unique agent identifier (must match certificate CN)
+  name: "Docker Agent"      # Human-readable agent name
+  region: "local"           # Optional: geographic region
+  tags:                     # Optional: tags for organization
+    - "docker"
+    - "homelab"
+
+# Server connection settings
+server:
+  address: "zero-trust-server:8443"    # Server address (use container name for Docker)
+  ca_cert: "/config/certs/ca.crt"      # Certificate Authority certificate
+  cert: "/config/certs/agent.crt"      # Agent client certificate
+  key: "/config/certs/agent.key"       # Agent private key
+
+# Service definitions - backend services to proxy
+services:
+  # Basic web application
+  - id: "web-app"
+    name: "Web Application"
+    hosts:
+      - "app.example.com"
+    protocol: "http"
+    upstreams:
+      - address: "web-app:3000"        # Backend service address
+        weight: 100                   # Load balancing weight
+        health_check:                 # Optional health checking
+          path: "/health"
+          interval: "30s"
+          timeout: "5s"
+    routes:
+      - match:
+          path: "/*"                  # Match all paths
+        handle:
+          - type: "reverse_proxy"     # Simple reverse proxy
+
+  # WebSocket-enabled service
+  - id: "websocket-app"
+    name: "WebSocket Application"
+    hosts:
+      - "ws.example.com"
+    websocket: true                   # Enable WebSocket support
+    protocol: "http"
+    upstreams:
+      - address: "websocket-app:4000"
+    routes:
+      - match:
+          path: "/*"
+        handle:
+          - type: "reverse_proxy"
+
+  # Load balanced service with multiple upstreams
+  - id: "api-service"
+    name: "API Service"
+    hosts:
+      - "api.example.com"
+    protocol: "https"
+    upstreams:
+      - address: "api-1:8080"
+        weight: 70
+        health_check:
+          path: "/health"
+          interval: "30s"
+      - address: "api-2:8080"
+        weight: 30
+        health_check:
+          path: "/health"
+          interval: "30s"
+    load_balancing:
+      policy: "weighted_round_robin"
+      health_check_required: true
+    routes:
+      - match:
+          path: "/api/*"
+        handle:
+          - type: "headers"
+            config:
+              request:
+                set:
+                  X-API-Version: "v1"
+          - type: "reverse_proxy" 

@@ -1,0 +1,133 @@
+name: Release Pipelines
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build App
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Update Go dependencies
+        run: |
+          go mod tidy
+
+      - name: Build Binary
+        run: |
+          ./scripts/build.sh
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: bin/
+          retention-days: 1
+
+  docker-build:
+    name: Build Docker Image (${{ matrix.component }} - linux/${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      matrix:
+        component: [server, agent]
+        platform: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set lowercase repo owner
+        run: echo "REPO_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: bin/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.component }} image for linux/${{ matrix.platform }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./cmd/${{ matrix.component }}/Dockerfile
+          platforms: linux/${{ matrix.platform }}
+          push: true
+          tags: ghcr.io/${{ env.REPO_OWNER_LOWER }}/zero-trust-proxy-${{ matrix.component }}:${{ github.ref_name }}-linux-${{ matrix.platform }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+          build-args: |
+            TARGETARCH=${{ matrix.platform }}
+
+  create-manifests:
+    name: Create Multi-Arch Manifests
+    runs-on: ubuntu-latest
+    needs: docker-build
+    strategy:
+      matrix:
+        component: [server, agent]
+    steps:
+      - name: Set lowercase repo owner
+        run: echo "REPO_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest for ${{ matrix.component }}
+        run: |
+          docker manifest create ghcr.io/${{ env.REPO_OWNER_LOWER }}/zero-trust-proxy-${{ matrix.component }}:${{ github.ref_name }} \
+            ghcr.io/${{ env.REPO_OWNER_LOWER }}/zero-trust-proxy-${{ matrix.component }}:${{ github.ref_name }}-linux-amd64 \
+            ghcr.io/${{ env.REPO_OWNER_LOWER }}/zero-trust-proxy-${{ matrix.component }}:${{ github.ref_name }}-linux-arm64
+          docker manifest push ghcr.io/${{ env.REPO_OWNER_LOWER }}/zero-trust-proxy-${{ matrix.component }}:${{ github.ref_name }}
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build, create-manifests]
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: bin/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bin/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

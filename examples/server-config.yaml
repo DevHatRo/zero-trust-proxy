@@ -1,0 +1,30 @@
+# Zero Trust Server Configuration
+# This configuration file defines server settings, API endpoints, and Caddy integration
+
+# Log level configuration
+log_level: "INFO"  # Options: DEBUG, INFO, WARN, ERROR, FATAL
+
+# Hot reload configuration - allows dynamic config updates
+hot_reload:
+  enabled: true                  # Enable hot configuration reloading
+  watch_config: true            # Watch config file for changes
+  debounce_delay: "100ms"       # Delay before reloading after file change
+  graceful_timeout: "30s"       # Timeout for graceful reload operations
+  reload_signal: "SIGHUP"       # Optional: reload on signal (not implemented yet)
+
+# Core server settings - handles agent connections
+server:
+  listen_addr: ":8443"                        # Port for agent connections (mTLS)
+  cert_file: "/config/certs/server.crt"       # Server TLS certificate
+  key_file: "/config/certs/server.key"        # Server TLS private key
+  ca_file: "/config/certs/ca.crt"             # Certificate Authority for agent validation
+
+# API server settings - internal API for Caddy integration
+api:
+  listen_addr: "localhost:9443"               # Internal API endpoint (should be localhost for security)
+
+# Caddy reverse proxy integration settings
+caddy:
+  admin_api: "http://localhost:2019"          # Caddy admin API endpoint
+  config_dir: "/config/caddy"                 # Directory for Caddy configuration
+  storage_dir: "/config/caddy/storage"        # Directory for Caddy persistent storage (certificates, etc.) 

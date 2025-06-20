@@ -1,0 +1,90 @@
+# .github/release.yml
+# Configuration for automatically generated release notes
+# See: https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
+
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+      - duplicate
+      - question
+      - invalid
+      - wontfix
+      - skip-changelog
+    authors:
+      - dependabot[bot]
+      - github-actions[bot]
+  
+  categories:
+    - title: 🚨 Breaking Changes
+      labels:
+        - breaking-change
+        - major
+        - breaking
+        - semver-major
+    
+    - title: 🎉 New Features
+      labels:
+        - feature
+        - enhancement
+        - new-feature
+        - minor
+        - semver-minor
+    
+    - title: 🐛 Bug Fixes
+      labels:
+        - bug
+        - bugfix
+        - fix
+        - patch
+        - semver-patch
+    
+    - title: 🔒 Security Updates
+      labels:
+        - security
+        - vulnerability
+        - cve
+        - security-fix
+    
+    - title: 📖 Documentation
+      labels:
+        - documentation
+        - docs
+        - readme
+    
+    - title: 🏗️ Infrastructure & CI/CD
+      labels:
+        - ci
+        - cd
+        - workflow
+        - infrastructure
+        - build
+        - deployment
+        - github-actions
+    
+    - title: 📦 Dependencies
+      labels:
+        - dependencies
+        - deps
+        - go-mod
+        - update-deps
+    
+    - title: 🧹 Code Quality & Refactoring
+      labels:
+        - refactor
+        - cleanup
+        - lint
+        - code-quality
+        - performance
+    
+    - title: 🧪 Testing
+      labels:
+        - test
+        - testing
+        - tests
+        - unit-test
+        - integration-test
+    
+    - title: 📝 Other Changes
+      labels:
+        - "*" 

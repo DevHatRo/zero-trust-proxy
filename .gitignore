@@ -1,0 +1,48 @@
+# Go build artifacts
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test artifacts
+*.test
+*.out
+
+# Go coverage artifacts
+*.cover
+
+# Go dependency directories
+/vendor/
+
+# Go workspace files
+go.work
+
+# Certificates and keys
+/certs/*.crt
+/certs/*.key
+/certs/*.csr
+/certs/*.srl
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
+
+# Temporary files
+*.tmp
+*.temp 

@@ -1,0 +1,21 @@
+# 0Trust Server Configuration
+
+# Log level configuration
+log_level: "INFO"
+
+# Core server settings
+server:
+  listen_addr: ":8443"
+  cert_file: "/config/certs/server.crt"
+  key_file: "/config/certs/server.key"
+  ca_file: "/config/certs/ca.crt"
+
+# API server settings (for HTTP proxy from Caddy)
+api:
+  listen_addr: "localhost:9443"
+
+# Caddy reverse proxy settings
+caddy:
+  admin_api: "http://localhost:2019"
+  config_dir: "/config/caddy"
+  storage_dir: "/config/caddy/storage" 

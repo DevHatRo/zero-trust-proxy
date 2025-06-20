@@ -1,0 +1,28 @@
+---
+# Real-world Homelab Example
+# This is based on a production Synology homelab setup
+version: '3.8'
+
+services:
+  # Zero Trust Server (deployed on public VPS/cloud)
+  zero-trust-server:
+    image: ghcr.io/devhatro/zero-trust-proxy/server:latest
+    container_name: zero-trust-server
+    restart: unless-stopped
+    ports:
+      - "8443:8443"    # Agent connections from homelab
+      - "80:80"        # HTTP traffic from internet
+      - "443:443"      # HTTPS traffic from internet
+    volumes:
+      - /root/docker/config:/config
+      - /root/docker/config/certs:/certs:ro
+  
+  # Zero Trust Agent (deployed on-premises in homelab)
+  zero-trust-agent:
+    image: ghcr.io/devhatro/zero-trust-proxy/agent:latest
+    container_name: zero-trust-agent
+    restart: unless-stopped
+    volumes:
+      - /volume1/docker/config:/config  # Synology volume path
+    environment:
+      - LOG_LEVEL=WARN

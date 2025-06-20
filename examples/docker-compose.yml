@@ -1,0 +1,45 @@
+---
+services:
+  # Zero Trust Server - Public-facing component
+  zero-trust-server:
+    image: ghcr.io/devhatro/zero-trust-proxy/server:latest
+    container_name: zero-trust-server
+    restart: unless-stopped
+    ports:
+      - "8443:8443"    # Agent connections (mTLS)
+      - "80:80"        # HTTP traffic (Caddy integration)
+      - "443:443"      # HTTPS traffic (Caddy integration)
+      - "9443:9443"    # Internal API (optional, for debugging)
+    volumes:
+      - ./config:/config:ro
+      - ./config/certs:/certs:ro
+      - caddy-data:/config/caddy/storage
+      - caddy-config:/config/caddy
+    environment:
+      - LOG_LEVEL=INFO
+      - TZ=UTC
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Zero Trust Agent - On-premises component
+  zero-trust-agent:
+    image: ghcr.io/devhatro/zero-trust-proxy/agent:latest
+    container_name: zero-trust-agent
+    restart: unless-stopped
+    volumes:
+      - ./config:/config:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # Persistent storage for Caddy data and configuration
+  caddy-data:
+    driver: local
+  caddy-config:
+    driver: local

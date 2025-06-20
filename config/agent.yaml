@@ -1,0 +1,86 @@
+# Enhanced Agent Configuration
+# Supports multiple services, advanced routing, middleware, and Caddy-style features
+
+# Log level configuration
+log_level: "INFO"
+
+# Global agent settings
+agent:
+  id: "synology"
+  name: "Synology Agent"
+  region: "local"
+  tags:
+    - "homelab"
+
+server:
+  address: "<public ip of the server>:8443"
+  ca_cert: "config/certs/ca.crt"
+  cert: "config/certs/agent.crt"
+  key: "config/certs/agent.key"
+
+# Service definitions with enhanced capabilities
+services:
+  - id: "traefik"
+    name: "Internal Proxy traefik"
+    hosts:
+      - portal.local.example.com
+    protocol: "http"
+    upstreams:
+      - address: "http://traefik:80"
+    routes:
+      - match:
+          path: "/*"  # Match ALL paths, not just root
+        handle:
+          - type: "reverse_proxy"
+
+  - id: "homeassistant"
+    name: "Home Assistant with WebSocket"
+    hosts:
+      - assistant.local.example.com
+    protocol: "http"
+    websocket: true  # Enable WebSocket for real-time features
+    upstreams:
+      - address: "http://172.30.10.120:8123"
+    routes:
+      - match:
+          path: "/*"  # Match ALL paths, not just root
+        handle:
+          - type: "reverse_proxy"
+
+  - id: "pihole"
+    name: "Pi-hole with WebSocket"
+    hosts:
+      - pihole.local.example.com
+    protocol: "http"
+    websocket: true  # Enable WebSocket for real-time graphs
+    upstreams:
+      - address: "http://172.30.13.254:80"
+    routes:
+      - match:
+          path: "/*"  # Match ALL paths, not just root
+        handle:
+          - type: "reverse_proxy"
+
+  - id: "synology"
+    name: "Synology with WebSocket"
+    hosts:
+      - nas.local.example.com
+      - drive.local.example.com
+      - file.local.example.com
+      - photo.local.example.com
+    protocol: "https"
+    websocket: true  # Enable WebSocket for real-time features
+    upstreams:
+      - address: "https://172.23.0.1:443"
+    routes:
+      - match:
+          path: "/*"  # Match ALL paths, not just root
+        handle:
+          - type: "reverse_proxy"
+
+# Hot reload configuration
+hot_reload:
+  enabled: true
+  watch_config: true
+  reload_signal: "SIGHUP"
+  graceful_timeout: "30s"

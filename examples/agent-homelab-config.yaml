@@ -1,0 +1,113 @@
+# Production Homelab Agent Configuration
+# Real-world example from a Synology homelab setup
+# This demonstrates multi-service configuration with various protocols and WebSocket support
+
+# Hot reload configuration
+hot_reload:
+  enabled: true
+  watch_config: true
+
+# Log level (WARN for production to reduce noise)
+log_level: WARN
+
+# Agent identity
+agent:
+  id: "synology"
+  name: "Synology Agent"
+  region: "local"
+  tags:
+    - "homelab"
+    - "synology"
+
+# Server connection (connecting to public server)
+server:
+  address: "195.201.146.166:8443"      # Public server IP address
+  ca_cert: "/config/certs/ca.crt"
+  cert: "/config/certs/agent.crt"
+  key: "/config/certs/agent.key"
+
+# Service definitions - multiple homelab services
+services:
+  # Media Management Services via Traefik
+  # Multiple hostnames pointing to the same internal Traefik instance
+  - id: "traefik"
+    name: "Internal Proxy Traefik"
+    hosts:
+      - portal.local.example.com         # Main dashboard
+    protocol: http
+    upstreams:
+      - address: "traefik:80"           # Internal Traefik container
+    routes:
+      - match:
+          path: "/*"
+        handle:
+          - type: "reverse_proxy"
+
+  # Home Assistant with WebSocket Support
+  # Requires WebSocket for real-time updates
+  - id: "homeassistant"
+    name: "Home Assistant"
+    hosts:
+      - assistant.local.example.com
+    websocket: true                     # Essential for Home Assistant real-time features
+    protocol: http
+    upstreams:
+      - address: "172.30.10.120:8123"   # Direct IP to Home Assistant
+    routes:
+      - match:
+          path: "/*"
+        handle:
+          - type: "reverse_proxy"
+
+  # Pi-hole DNS Admin Interface
+  # WebSocket needed for real-time query logs and graphs
+  - id: "pihole"
+    name: "Pi-hole DNS"
+    hosts:
+      - pihole.local.example.com
+    websocket: true                     # Real-time query monitoring
+    protocol: "https"
+    listen_on: "https"                 # redirect http to https
+    upstreams:
+      - address: "172.30.13.254:80"     # Pi-hole server IP
+    routes:
+      - match:
+          path: "/*"
+        handle:
+          - type: "reverse_proxy"
+
+  # Synology NAS Services
+  # Multiple NAS applications with different subdomains
+  - id: "synology"
+    name: "Synology NAS"
+    hosts:
+      - nas.local.example.com                 # Main NAS interface
+      - drive.local.example.com               # Synology Drive
+      - file.local.example.com                # File Station
+      - photo.local.example.com               # Synology Photos
+    websocket: true                     # Required for real-time NAS features
+    protocol: https                     # NAS uses HTTPS internally
+    upstreams:
+      - address: "172.23.0.1:443"       # Synology NAS HTTPS port
+    routes:
+      - match:
+          path: "/*"
+        handle:
+          - type: "reverse_proxy"
+
+  # Plex Media Server
+  # WebSocket needed for real-time transcoding status and remote control
+  - id: "plex"
+    name: "Plex Media Server"
+    hosts:
+      - plex.local.example.com
+    websocket: true                     # Real-time media streaming features
+    protocol: "https"
+    listen_on: "https"                # Only listen on HTTPS port 443
+    upstreams:
+      - address: "172.23.0.1:32400"     # Standard Plex port on NAS
+    routes:
+      - match:
+          path: "/*"
+        handle:
+          - type: "reverse_proxy" 
