@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+    paths-ignore:
+      - 'docs/**'
+      - 'examples/**'
+      - 'README.md'
+      - 'README'
 
 jobs:
   build:

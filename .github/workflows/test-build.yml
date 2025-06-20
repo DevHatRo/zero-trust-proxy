@@ -4,9 +4,19 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - 'docs/**'
+      - 'examples/**'
+      - 'README.md'
+      - 'README'
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - 'docs/**'
+      - 'examples/**'
+      - 'README.md'
+      - 'README'
 
 jobs:
   build:
