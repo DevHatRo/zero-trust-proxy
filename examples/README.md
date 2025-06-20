@@ -60,7 +60,7 @@ cp examples/server-config.yaml ./config/server.yaml
 ./examples/generate-certificates.sh
 
 # Update server address in agent config
-sed -i 's/195.201.146.166:8443/YOUR_SERVER_IP:8443/' config/agent.yaml
+sed -i 's/<server public ip>:8443/YOUR_SERVER_IP:8443/' config/agent.yaml
 
 # Deploy
 docker-compose up -d
@@ -121,43 +121,7 @@ The homelab example ([`agent-homelab-config.yaml`](agent-homelab-config.yaml)) d
 Use the provided script for easy certificate generation:
 
 ```bash
-# Make script executable (if not already)
-chmod +x examples/generate-certificates.sh
-
-# Generate all certificates
-./examples/generate-certificates.sh
-```
-
-This script will:
-1. Create `config/certs/` directory
-2. Generate CA certificate and key
-3. Generate server certificate and key
-4. Generate agent certificate and key
-5. Set proper file permissions
-6. Verify certificate validity
-
-### **Manual Certificate Generation**
-
-If you prefer manual generation:
-
-```bash
-# Generate CA
-docker run --rm -v $(pwd)/config/certs:/certs \
-  ghcr.io/devhatro/zero-trust-proxy/certgen:latest \
-  --ca /certs/ca.crt --ca-key /certs/ca.key \
-  --out /certs --name root --type ca
-
-# Generate server certificate
-docker run --rm -v $(pwd)/config/certs:/certs \
-  ghcr.io/devhatro/zero-trust-proxy/certgen:latest \
-  --ca /certs/ca.crt --ca-key /certs/ca.key \
-  --out /certs --name server --type server
-
-# Generate agent certificate
-docker run --rm -v $(pwd)/config/certs:/certs \
-  ghcr.io/devhatro/zero-trust-proxy/certgen:latest \
-  --ca /certs/ca.crt --ca-key /certs/ca.key \
-  --out /certs --name agent --type agent
+./bin/certgen -client-ca -client-id test1 -intermediate-ca -root-ca -server-ca -server-ip 127.0.0.1,<server public ip>
 ```
 
 ## 🌐 Service Configuration Examples
