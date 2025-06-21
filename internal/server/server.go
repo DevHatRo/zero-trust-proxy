@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/devhatro/zero-trust-proxy/internal/agent"
+	"github.com/devhatro/zero-trust-proxy/internal/caddy"
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
 	"github.com/google/uuid"
@@ -30,7 +31,7 @@ type Server struct {
 	agents           map[string]*Agent
 	mu               sync.RWMutex
 	caddyAdminAPI    string
-	caddyManager     *CaddyManager
+	caddyManager     *caddy.Manager
 	caddyProcess     *os.Process
 	responseHandlers sync.Map
 	certFile         string
@@ -128,8 +129,8 @@ func (s *Server) Start() error {
 	s.wsManager = common.NewWebSocketManager()
 
 	// Initialize CaddyManager
-	s.caddyManager = NewCaddyManager("http://localhost:2019")
-	logger.Info("⚙️  Caddy manager initialized")
+	s.caddyManager = caddy.NewManager("http://localhost:2019")
+	logger.Info("⚙️ Caddy manager initialized")
 
 	// Start Caddy
 	if err := s.startCaddy(); err != nil {
@@ -881,7 +882,9 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		if isEnhanced {
 			// Convert common.EnhancedServiceConfig to agent.ServiceConfig for Caddy manager
 			agentServiceConfig := s.convertCommonToAgentServiceConfig(msg.EnhancedService)
-			if err := s.caddyManager.AddEnhancedService(agentServiceConfig); err != nil {
+			// Convert agent.ServiceConfig to caddy.EnhancedServiceConfig
+			caddyServiceConfig := s.convertAgentToCaddyServiceConfig(agentServiceConfig)
+			if err := s.caddyManager.AddEnhancedService(caddyServiceConfig); err != nil {
 				return fmt.Errorf("❌ failed to add enhanced service to Caddy: %v", err)
 			}
 
@@ -897,8 +900,8 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 			logger.Info("✅ Enhanced service %s added to Caddy successfully with %d upstreams, HTTP redirect: %s, Listen on: %s",
 				hostname, len(msg.EnhancedService.Upstreams), redirectStatus, listenOn)
 		} else {
-			// Use full service configuration for simple services too
-			if err := s.caddyManager.AddFullServiceConfig(
+			// Use simple service configuration
+			if err := s.caddyManager.AddSimpleService(
 				msg.Service.Hostname,
 				msg.Service.Backend,
 				msg.Service.Protocol,
@@ -939,8 +942,8 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		// Update service configuration
 		agent.Services[msg.Service.Hostname] = msg.Service
 
-		// Update service in Caddy with full configuration support
-		if err := s.caddyManager.AddFullServiceConfig(
+		// Update service in Caddy with simple service configuration
+		if err := s.caddyManager.AddSimpleService(
 			msg.Service.Hostname,
 			msg.Service.Backend,
 			msg.Service.Protocol,
@@ -1216,6 +1219,127 @@ func (s *Server) startHTTPProxyServer() error {
 		}
 		go s.handleAPIRequest(conn)
 	}
+}
+
+// convertAgentToCaddyServiceConfig converts agent.ServiceConfig to caddy.EnhancedServiceConfig
+func (s *Server) convertAgentToCaddyServiceConfig(agentConfig *agent.ServiceConfig) *caddy.EnhancedServiceConfig {
+	caddyConfig := &caddy.EnhancedServiceConfig{
+		ID:           agentConfig.ID,
+		Name:         agentConfig.Name,
+		Hostname:     agentConfig.Hostname,
+		Hosts:        agentConfig.Hosts,
+		Protocol:     agentConfig.Protocol,
+		WebSocket:    agentConfig.WebSocket,
+		HTTPRedirect: agentConfig.HTTPRedirect,
+		ListenOn:     agentConfig.ListenOn,
+	}
+
+	// Convert upstreams
+	for _, upstream := range agentConfig.Upstreams {
+		caddyUpstream := caddy.UpstreamConfig{
+			Address: upstream.Address,
+			Weight:  upstream.Weight,
+		}
+
+		// Convert health check if present
+		if upstream.HealthCheck != nil {
+			caddyUpstream.HealthCheck = &caddy.HealthCheckConfig{
+				Path:     upstream.HealthCheck.Path,
+				Interval: upstream.HealthCheck.Interval,
+				Timeout:  upstream.HealthCheck.Timeout,
+				Method:   upstream.HealthCheck.Method,
+				Headers:  upstream.HealthCheck.Headers,
+			}
+		}
+
+		caddyConfig.Upstreams = append(caddyConfig.Upstreams, caddyUpstream)
+	}
+
+	// Convert load balancing config if present
+	if agentConfig.LoadBalancing != nil {
+		caddyConfig.LoadBalancing = &caddy.LoadBalancingConfig{
+			Policy:              agentConfig.LoadBalancing.Policy,
+			HealthCheckRequired: agentConfig.LoadBalancing.HealthCheckRequired,
+			SessionAffinity:     agentConfig.LoadBalancing.SessionAffinity,
+			AffinityDuration:    agentConfig.LoadBalancing.AffinityDuration,
+		}
+	}
+
+	// Convert routes
+	for _, route := range agentConfig.Routes {
+		caddyRoute := caddy.RouteConfig{
+			Match: caddy.MatchConfig{
+				Path:    route.Match.Path,
+				Method:  route.Match.Method,
+				Headers: route.Match.Headers,
+				Query:   route.Match.Query,
+			},
+		}
+
+		// Convert middleware handlers
+		for _, handler := range route.Handle {
+			caddyHandler := caddy.MiddlewareConfig{
+				Type:   handler.Type,
+				Config: handler.Config,
+			}
+			caddyRoute.Handle = append(caddyRoute.Handle, caddyHandler)
+		}
+
+		caddyConfig.Routes = append(caddyConfig.Routes, caddyRoute)
+	}
+
+	// Convert TLS config if present
+	if agentConfig.TLS != nil {
+		caddyConfig.TLS = &caddy.TLSConfig{
+			CertFile:     agentConfig.TLS.CertFile,
+			KeyFile:      agentConfig.TLS.KeyFile,
+			CAFile:       agentConfig.TLS.CAFile,
+			MinVersion:   agentConfig.TLS.MinVersion,
+			Ciphers:      agentConfig.TLS.Ciphers,
+			ClientAuth:   agentConfig.TLS.ClientAuth,
+			ClientCAFile: agentConfig.TLS.ClientCAFile,
+		}
+	}
+
+	// Convert security config if present
+	if agentConfig.Security != nil {
+		caddyConfig.Security = &caddy.SecurityConfig{}
+
+		if agentConfig.Security.CORS != nil {
+			caddyConfig.Security.CORS = &caddy.CORSConfig{
+				Origins: agentConfig.Security.CORS.Origins,
+				Methods: agentConfig.Security.CORS.Methods,
+				Headers: agentConfig.Security.CORS.Headers,
+			}
+		}
+
+		if agentConfig.Security.Auth != nil {
+			caddyConfig.Security.Auth = &caddy.AuthConfig{
+				Type:   agentConfig.Security.Auth.Type,
+				Config: agentConfig.Security.Auth.Config,
+			}
+		}
+	}
+
+	// Convert monitoring config if present
+	if agentConfig.Monitoring != nil {
+		caddyConfig.Monitoring = &caddy.MonitoringConfig{
+			MetricsEnabled: agentConfig.Monitoring.MetricsEnabled,
+			LoggingFormat:  agentConfig.Monitoring.LoggingFormat,
+			LoggingFields:  agentConfig.Monitoring.LoggingFields,
+		}
+	}
+
+	// Convert traffic shaping config if present
+	if agentConfig.TrafficShaping != nil {
+		caddyConfig.TrafficShaping = &caddy.TrafficShapingConfig{
+			UploadLimit:   agentConfig.TrafficShaping.UploadLimit,
+			DownloadLimit: agentConfig.TrafficShaping.DownloadLimit,
+			PerIPLimit:    agentConfig.TrafficShaping.PerIPLimit,
+		}
+	}
+
+	return caddyConfig
 }
 
 // convertCommonToAgentServiceConfig converts common.EnhancedServiceConfig to agent.ServiceConfig

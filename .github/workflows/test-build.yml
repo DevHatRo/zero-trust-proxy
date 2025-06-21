@@ -37,6 +37,10 @@ jobs:
         run: |
           go mod tidy
 
+      - name: Run Tests
+        run: |
+          go test ./...
+
       - name: Build Binary
         run: |
           ./scripts/build.sh

@@ -14,6 +14,7 @@ import (
 
 	"bytes"
 
+	"github.com/devhatro/zero-trust-proxy/internal/caddy"
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
 )
@@ -1631,6 +1632,35 @@ func (a *Agent) runHealthCheckServer(endpoints []HealthCheckEndpoint) {
 
 // ConfigureService configures a service on the server with enhanced configuration support
 func (a *Agent) ConfigureService(config *common.ServiceConfig) error {
+	// Create Caddy validator (no admin API available on agent side)
+	validator := caddy.NewValidator("")
+
+	// Log validation method being used
+	if validator.IsCaddyAvailable() {
+		logger.Info("🔧 Using Caddy CLI validation for service: %s", config.Hostname)
+	} else {
+		logger.Info("🔧 Using structural validation for service: %s (Caddy CLI not available)", config.Hostname)
+	}
+
+	// Validate the service configuration by generating and validating the Caddy config
+	if err := validator.ValidateServiceConfig(
+		config.Hostname,     // serviceName
+		config.Hostname,     // hostname
+		config.Backend,      // backend
+		config.Protocol,     // protocol
+		config.WebSocket,    // websocket
+		config.HTTPRedirect, // httpRedirect
+		config.ListenOn,     // listenOn
+	); err != nil {
+		return fmt.Errorf("❌ Caddy configuration validation failed for service %s: %w", config.Hostname, err)
+	}
+
+	if validator.IsCaddyAvailable() {
+		logger.Info("✅ Caddy CLI validation passed for service: %s", config.Hostname)
+	} else {
+		logger.Info("✅ Structural validation passed for service: %s", config.Hostname)
+	}
+
 	return a.configureServiceWithRetry(config, 3) // Allow up to 3 attempts
 }
 
