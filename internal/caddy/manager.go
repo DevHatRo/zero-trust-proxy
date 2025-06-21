@@ -633,27 +633,27 @@ func (m *Manager) buildSimpleServiceHandlers(service *ServiceConfig) []map[strin
 		},
 	}
 
-	// Configure WebSocket transport if needed
-	if service.WebSocket {
-		proxyHandler["transport"] = map[string]interface{}{
-			"protocol": "http",
-			"versions": []string{"1.1"},
-		}
-	}
+	// Configure transport (combining WebSocket and zero-trust requirements)
+	needsTransport := service.WebSocket || strings.HasPrefix(service.Backend, "127.0.0.1:") || strings.HasPrefix(service.Backend, "localhost:")
 
-	// Configure transport for zero-trust (if backend is internal)
-	if strings.HasPrefix(service.Backend, "127.0.0.1:") || strings.HasPrefix(service.Backend, "localhost:") {
+	if needsTransport {
 		transport := map[string]interface{}{
 			"protocol": "http",
-			"tls": map[string]interface{}{
-				"server_name":          "127.0.0.1",
-				"insecure_skip_verify": true,
-			},
 		}
 
-		// Merge WebSocket versions if needed
+		// Add WebSocket configuration
 		if service.WebSocket {
 			transport["versions"] = []string{"1.1"}
+			logger.Debug("🔌 Configured WebSocket transport with HTTP/1.1")
+		}
+
+		// Add zero-trust TLS configuration for internal backends
+		if strings.HasPrefix(service.Backend, "127.0.0.1:") || strings.HasPrefix(service.Backend, "localhost:") {
+			transport["tls"] = map[string]interface{}{
+				"server_name":          "127.0.0.1",
+				"insecure_skip_verify": true,
+			}
+			logger.Debug("🔐 Configured zero-trust TLS transport for internal backend")
 		}
 
 		proxyHandler["transport"] = transport
