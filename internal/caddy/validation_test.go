@@ -227,7 +227,19 @@ func TestGenerateAndValidateServiceConfig(t *testing.T) {
 				}
 
 				// Check WebSocket-specific configuration
-				versions, ok := proxyHandler["versions"].([]string)
+				transport, ok := proxyHandler["transport"].(map[string]interface{})
+				if !ok {
+					t.Error("Missing transport configuration for WebSocket")
+					return
+				}
+
+				protocol, ok := transport["protocol"].(string)
+				if !ok || protocol != "http" {
+					t.Errorf("Expected http protocol in transport, got %v", protocol)
+					return
+				}
+
+				versions, ok := transport["versions"].([]string)
 				if !ok {
 					t.Error("Missing versions configuration for WebSocket")
 					return
