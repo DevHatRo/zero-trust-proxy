@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/devhatro/zero-trust-proxy/internal/agent"
+	"github.com/devhatro/zero-trust-proxy/internal/caddy"
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
 	"github.com/google/uuid"
@@ -30,7 +31,7 @@ type Server struct {
 	agents           map[string]*Agent
 	mu               sync.RWMutex
 	caddyAdminAPI    string
-	caddyManager     *CaddyManager
+	caddyManager     *caddy.Manager
 	caddyProcess     *os.Process
 	responseHandlers sync.Map
 	certFile         string
@@ -128,7 +129,7 @@ func (s *Server) Start() error {
 	s.wsManager = common.NewWebSocketManager()
 
 	// Initialize CaddyManager
-	s.caddyManager = NewCaddyManager("http://localhost:2019")
+	s.caddyManager = caddy.NewManager("http://localhost:2019")
 	logger.Info("⚙️  Caddy manager initialized")
 
 	// Start Caddy
