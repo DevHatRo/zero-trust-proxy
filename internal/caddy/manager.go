@@ -11,14 +11,16 @@ import (
 
 	"github.com/devhatro/zero-trust-proxy/internal/agent"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
+	"github.com/devhatro/zero-trust-proxy/internal/types"
 )
 
-// NewManager creates a new enhanced Caddy manager
+// NewManager creates a new enhanced Caddy manager with validation
 func NewManager(adminAPI string) *Manager {
 	return &Manager{
 		adminAPI:         adminAPI,
 		config:           make(map[string]*ServiceConfig),
 		enhancedServices: make(map[string]*agent.ServiceConfig),
+		validator:        NewValidator(),
 	}
 }
 
@@ -42,7 +44,8 @@ func (cm *Manager) AddFullServiceConfig(hostname, backend, protocol string, webS
 		listenOn = "both"
 	}
 
-	cm.config[hostname] = &ServiceConfig{
+	// Create service config for validation
+	serviceConfig := &ServiceConfig{
 		Hostname:     hostname,
 		Backend:      "127.0.0.1:9443", // Always proxy to server's internal API
 		Protocol:     protocol,
@@ -50,6 +53,32 @@ func (cm *Manager) AddFullServiceConfig(hostname, backend, protocol string, webS
 		HTTPRedirect: httpRedirect,
 		ListenOn:     listenOn,
 	}
+
+	// SERVER-SIDE VALIDATION: Validate configuration before applying
+	logger.Debug("🔍 Server-side validation for service: %s", hostname)
+
+	// Convert to types.ServiceConfig for validation
+	typesConfig := convertServiceConfigToTypes(serviceConfig)
+	validationResult := cm.validator.ValidateServiceConfig(typesConfig)
+
+	if !validationResult.Valid {
+		var errorMessages []string
+		for _, err := range validationResult.Errors {
+			errorMessages = append(errorMessages, err.Error())
+		}
+		logger.Error("❌ Server-side validation failed for service %s: %s",
+			hostname, strings.Join(errorMessages, "; "))
+		return fmt.Errorf("server-side validation failed for service %s: %s",
+			hostname, strings.Join(errorMessages, "; "))
+	}
+
+	logger.Info("✅ Server-side validation passed for service: %s", hostname)
+
+	// Store configuration after validation passes
+	cm.config[hostname] = serviceConfig
+
+	// Track service for future conflict detection
+	cm.validator.AddExistingService(hostname, typesConfig)
 
 	return cm.reloadConfig()
 }
@@ -59,11 +88,11 @@ func (cm *Manager) AddEnhancedService(serviceConfig *agent.ServiceConfig) error 
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	// Store enhanced config for advanced Caddy features
-	cm.enhancedServices[serviceConfig.Hostname] = serviceConfig
+	// SERVER-SIDE VALIDATION: Validate enhanced configuration before applying
+	logger.Debug("🔍 Server-side validation for enhanced service: %s", serviceConfig.Hostname)
 
-	// Also create simple config for the core proxy functionality
-	cm.config[serviceConfig.Hostname] = &ServiceConfig{
+	// Create simple config for validation
+	simpleConfig := &ServiceConfig{
 		Hostname:     serviceConfig.Hostname,
 		Backend:      "127.0.0.1:9443", // Always proxy to server's internal API
 		Protocol:     serviceConfig.Protocol,
@@ -71,6 +100,32 @@ func (cm *Manager) AddEnhancedService(serviceConfig *agent.ServiceConfig) error 
 		HTTPRedirect: serviceConfig.HTTPRedirect, // Copy HTTP redirect setting
 		ListenOn:     serviceConfig.ListenOn,     // Copy protocol binding setting
 	}
+
+	// Convert to types.ServiceConfig for validation
+	typesConfig := convertServiceConfigToTypes(simpleConfig)
+	validationResult := cm.validator.ValidateServiceConfig(typesConfig)
+
+	if !validationResult.Valid {
+		var errorMessages []string
+		for _, err := range validationResult.Errors {
+			errorMessages = append(errorMessages, err.Error())
+		}
+		logger.Error("❌ Server-side validation failed for enhanced service %s: %s",
+			serviceConfig.Hostname, strings.Join(errorMessages, "; "))
+		return fmt.Errorf("server-side validation failed for enhanced service %s: %s",
+			serviceConfig.Hostname, strings.Join(errorMessages, "; "))
+	}
+
+	logger.Info("✅ Server-side validation passed for enhanced service: %s", serviceConfig.Hostname)
+
+	// Store enhanced config for advanced Caddy features
+	cm.enhancedServices[serviceConfig.Hostname] = serviceConfig
+
+	// Also create simple config for the core proxy functionality
+	cm.config[serviceConfig.Hostname] = simpleConfig
+
+	// Track service for future conflict detection
+	cm.validator.AddExistingService(serviceConfig.Hostname, typesConfig)
 
 	return cm.reloadConfig()
 }
@@ -82,6 +137,12 @@ func (cm *Manager) RemoveService(hostname string) error {
 
 	delete(cm.config, hostname)
 	delete(cm.enhancedServices, hostname)
+
+	// Remove from validator tracking
+	cm.validator.RemoveExistingService(hostname)
+
+	logger.Info("🗑️  Removed service %s from Caddy configuration and validator tracking", hostname)
+
 	return cm.reloadConfig()
 }
 
@@ -746,5 +807,17 @@ func (cm *Manager) buildRequestHeadersHandler(service *ServiceConfig, enhancedSe
 		"response": map[string]interface{}{
 			"delete": []string{"Server"},
 		},
+	}
+}
+
+// convertServiceConfigToTypes converts internal ServiceConfig to types.ServiceConfig
+func convertServiceConfigToTypes(config *ServiceConfig) *types.ServiceConfig {
+	return &types.ServiceConfig{
+		Hostname:     config.Hostname,
+		Backend:      config.Backend,
+		Protocol:     config.Protocol,
+		WebSocket:    config.WebSocket,
+		HTTPRedirect: config.HTTPRedirect,
+		ListenOn:     config.ListenOn,
 	}
 }

@@ -22,6 +22,7 @@ type Manager struct {
 	mu               sync.RWMutex                    // Protects config and enhancedServices
 	config           map[string]*ServiceConfig       // hostname -> simple service config
 	enhancedServices map[string]*agent.ServiceConfig // hostname -> enhanced agent service config
+	validator        *Validator                      // Server-side configuration validator
 }
 
 // ManagerConfig holds configuration for creating a new Manager

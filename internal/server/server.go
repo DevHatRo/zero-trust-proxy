@@ -20,6 +20,7 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/caddy"
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
+	"github.com/devhatro/zero-trust-proxy/internal/types"
 	"github.com/google/uuid"
 )
 
@@ -870,10 +871,12 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		} else {
 			// Create simple service config from enhanced for backward compatibility
 			simpleConfig := &common.ServiceConfig{
-				Hostname:  msg.EnhancedService.Hostname,
-				Backend:   "127.0.0.1:9443", // Always points to server's internal API
-				Protocol:  msg.EnhancedService.Protocol,
-				WebSocket: msg.EnhancedService.WebSocket, // Copy WebSocket flag
+				ServiceConfig: types.ServiceConfig{
+					Hostname:  msg.EnhancedService.Hostname,
+					Backend:   "127.0.0.1:9443", // Always points to server's internal API
+					Protocol:  msg.EnhancedService.Protocol,
+					WebSocket: msg.EnhancedService.WebSocket, // Copy WebSocket flag
+				},
 			}
 			agent.Services[hostname] = simpleConfig
 		}
