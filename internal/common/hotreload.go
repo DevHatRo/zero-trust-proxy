@@ -92,7 +92,7 @@ func (fw *FileWatcher) Start() error {
 	}
 
 	fw.running = true
-	fw.lastReloadTime = time.Now()
+	// Don't set lastReloadTime here - let the first actual reload set it
 
 	// Start watching in background
 	go fw.watchLoop()
@@ -140,11 +140,21 @@ func (fw *FileWatcher) watchLoop() {
 
 	configPath := fw.reloader.GetConfigPath()
 
+	// Capture watcher reference to avoid race condition
+	fw.mu.RLock()
+	watcher := fw.watcher
+	fw.mu.RUnlock()
+
+	if watcher == nil {
+		logger.Debug("🔥 File watcher is nil, exiting loop for %s", fw.reloader.GetComponentName())
+		return
+	}
+
 	for {
 		select {
-		case event, ok := <-fw.watcher.Events:
+		case event, ok := <-watcher.Events:
 			if !ok {
-				logger.Error("🔥 Config watcher channel closed for %s", fw.reloader.GetComponentName())
+				logger.Debug("🔥 Config watcher events channel closed for %s", fw.reloader.GetComponentName())
 				return
 			}
 
@@ -160,9 +170,9 @@ func (fw *FileWatcher) watchLoop() {
 				}
 			}
 
-		case err, ok := <-fw.watcher.Errors:
+		case err, ok := <-watcher.Errors:
 			if !ok {
-				logger.Error("🔥 Config watcher error channel closed for %s", fw.reloader.GetComponentName())
+				logger.Debug("🔥 Config watcher errors channel closed for %s", fw.reloader.GetComponentName())
 				return
 			}
 			logger.Error("🔥 Config watcher error for %s: %v", fw.reloader.GetComponentName(), err)
@@ -193,6 +203,11 @@ func (fw *FileWatcher) performReload() error {
 		return nil
 	}
 
+	return fw.performReloadImmediate()
+}
+
+// performReloadImmediate executes the actual configuration reload without rate limiting
+func (fw *FileWatcher) performReloadImmediate() error {
 	logger.Info("🔄 Reloading configuration for %s from %s",
 		fw.reloader.GetComponentName(), fw.reloader.GetConfigPath())
 
@@ -313,7 +328,8 @@ func (hrm *HotReloadManager) TriggerReload(componentName string) error {
 	}
 
 	logger.Info("🔄 Manually triggering reload for %s", componentName)
-	return watcher.performReload()
+	// Bypass rate limiting for manual triggers
+	return watcher.performReloadImmediate()
 }
 
 // DefaultHotReloadConfig returns default hot reload configuration

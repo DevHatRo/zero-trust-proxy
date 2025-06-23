@@ -44,7 +44,7 @@ func (cm *Manager) AddFullServiceConfig(hostname, backend, protocol string, webS
 
 	cm.config[hostname] = &ServiceConfig{
 		Hostname:     hostname,
-		Backend:      backend, // Still points to server internal API
+		Backend:      "127.0.0.1:9443", // Always proxy to server's internal API
 		Protocol:     protocol,
 		WebSocket:    webSocket,
 		HTTPRedirect: httpRedirect,
