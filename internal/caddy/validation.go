@@ -135,6 +135,15 @@ func (v *Validator) validateBasics(config *types.ServiceConfig) *types.Validatio
 		}
 	}
 
+	// Validate backend address format
+	if err := v.validateBackendAddress(config.Backend); err != nil {
+		return &types.ValidationError{
+			Field:   "backend",
+			Message: fmt.Sprintf("invalid backend address format: %v", err),
+			Code:    "INVALID_BACKEND_FORMAT",
+		}
+	}
+
 	if config.Protocol == "" {
 		return &types.ValidationError{
 			Field:   "protocol",
@@ -161,6 +170,108 @@ func (v *Validator) validateBasics(config *types.ServiceConfig) *types.Validatio
 	}
 
 	return nil
+}
+
+// validateBackendAddress validates the backend address format
+func (v *Validator) validateBackendAddress(backend string) error {
+	// Check for obviously invalid patterns
+	if strings.Contains(backend, " ") || strings.Contains(backend, "\t") || strings.Contains(backend, "\n") {
+		return fmt.Errorf("backend address contains invalid whitespace characters")
+	}
+
+	// Handle IPv6 addresses in brackets like [::1]:8080
+	if strings.HasPrefix(backend, "[") {
+		closeBracket := strings.Index(backend, "]:")
+		if closeBracket == -1 {
+			return fmt.Errorf("IPv6 backend address missing closing bracket and port")
+		}
+		host := backend[1:closeBracket]
+		port := backend[closeBracket+2:]
+
+		if host == "" {
+			return fmt.Errorf("IPv6 backend address has empty host")
+		}
+		if port == "" {
+			return fmt.Errorf("IPv6 backend address has empty port")
+		}
+		if !isValidPort(port) {
+			return fmt.Errorf("IPv6 backend address has invalid port: %s", port)
+		}
+		return nil
+	}
+
+	// Count colons for regular host:port format
+	colonCount := strings.Count(backend, ":")
+	if colonCount == 0 {
+		return fmt.Errorf("backend address missing port (expected format: host:port)")
+	}
+	if colonCount > 1 {
+		return fmt.Errorf("backend address has too many colons (found %d, expected 1 for host:port format)", colonCount)
+	}
+
+	// Split into exactly two parts: host and port
+	parts := strings.SplitN(backend, ":", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("backend address could not be split into host and port")
+	}
+
+	host := parts[0]
+	port := parts[1]
+
+	// Validate host part
+	if host == "" {
+		return fmt.Errorf("backend address has empty host")
+	}
+
+	// Validate port part
+	if port == "" {
+		return fmt.Errorf("backend address has empty port")
+	}
+
+	if !isValidPort(port) {
+		return fmt.Errorf("backend address has invalid port: %s", port)
+	}
+
+	return nil
+}
+
+// isValidPort checks if a port string is valid (numeric or known service name)
+func isValidPort(port string) bool {
+	// Check if it's a number
+	if len(port) == 0 {
+		return false
+	}
+
+	// Check for obviously invalid characters that shouldn't be in ports
+	if strings.Contains(port, ":") || strings.Contains(port, " ") ||
+		strings.Contains(port, "\t") || strings.Contains(port, "\n") {
+		return false
+	}
+
+	// Check if it's all numeric
+	isNumeric := true
+	for _, char := range port {
+		if char < '0' || char > '9' {
+			isNumeric = false
+			break
+		}
+	}
+
+	if isNumeric {
+		// If it's all numeric, check the range
+		num := 0
+		for _, char := range port {
+			num = num*10 + int(char-'0')
+			if num > 65535 {
+				return false // Port number too high
+			}
+		}
+		return num > 0 // Port must be positive
+	}
+
+	// If it contains non-numeric characters, it might be a service name
+	// Allow service names like "http", "https", etc. but catch obvious errors
+	return len(port) > 0 && len(port) <= 15 // Reasonable length for service names
 }
 
 // validateWithCaddyBinary uses the actual Caddy binary to validate the configuration

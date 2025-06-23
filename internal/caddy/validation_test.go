@@ -290,85 +290,211 @@ func BenchmarkValidator_ValidateServiceConfig(b *testing.B) {
 	}
 }
 
+// TestValidator_CaddyBinaryIntegration tests the integration between basic validation and Caddy binary validation
 func TestValidator_CaddyBinaryIntegration(t *testing.T) {
 	if !isCaddyAvailable() {
-		t.Skip("Skipping Caddy binary integration test - caddy binary not available")
+		t.Skip("Skipping Caddy binary integration tests - caddy binary not available")
 	}
 
 	validator := NewValidator()
 
-	t.Run("valid config with binary validation", func(t *testing.T) {
-		config := &types.ServiceConfig{
-			Hostname: "integration-test.example.com",
-			Backend:  "127.0.0.1:8080",
-			Protocol: "https",
-		}
-
-		result := validator.ValidateServiceConfig(config)
-
-		if !result.Valid {
-			t.Errorf("Expected validation to pass with Caddy binary, got errors: %v", result.Errors)
-		}
-
-		// Verify no validation errors
-		if len(result.Errors) > 0 {
-			t.Errorf("Expected no validation errors, got: %v", result.Errors)
-		}
-	})
-
-	t.Run("invalid config caught by binary validation", func(t *testing.T) {
-		config := &types.ServiceConfig{
-			Hostname: "test.example.com",
-			Backend:  "invalid-backend-format",
-			Protocol: "https",
-		}
-
-		result := validator.ValidateServiceConfig(config)
-
-		// This should pass basic validation but might be caught by Caddy binary validation
-		// The exact behavior depends on what Caddy considers invalid
-		t.Logf("Validation result for invalid backend: Valid=%v, Errors=%v", result.Valid, result.Errors)
-	})
-}
-
-func TestValidator_BinaryVsBasicValidation(t *testing.T) {
-	if !isCaddyAvailable() {
-		t.Skip("Skipping binary vs basic validation comparison - caddy binary not available")
+	tests := []struct {
+		name        string
+		config      *types.ServiceConfig
+		expectValid bool
+		description string
+	}{
+		{
+			name: "valid config with binary validation",
+			config: &types.ServiceConfig{
+				Hostname: "valid.example.com",
+				Backend:  "127.0.0.1:8080",
+				Protocol: "https",
+			},
+			expectValid: true,
+			description: "should pass both basic and binary validation",
+		},
+		{
+			name: "invalid config caught by binary validation",
+			config: &types.ServiceConfig{
+				Hostname: "invalid.example.com",
+				Backend:  "invalid-backend-format",
+				Protocol: "https",
+			},
+			expectValid: false,
+			description: "should be caught by basic validation before reaching binary validation",
+		},
 	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := validator.ValidateServiceConfig(tt.config)
+
+			t.Logf("Validation result for %s: Valid=%t, Errors=%v", tt.config.Backend, result.Valid, result.Errors)
+
+			if result.Valid != tt.expectValid {
+				t.Errorf("Expected validation result %v, got %v for %s", tt.expectValid, result.Valid, tt.description)
+				if !result.Valid {
+					for _, err := range result.Errors {
+						t.Logf("Error: %s", err.Message)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestValidator_BinaryVsBasicValidation tests the difference between basic and binary validation
+func TestValidator_BinaryVsBasicValidation(t *testing.T) {
 	config := &types.ServiceConfig{
-		Hostname: "comparison-test.example.com",
+		Hostname: "test.example.com",
 		Backend:  "127.0.0.1:8080",
 		Protocol: "https",
 	}
 
 	t.Run("basic validation only", func(t *testing.T) {
 		validator := NewValidator()
-		validator.SetSkipBinaryValidation(true) // Skip binary validation
-
+		validator.SetSkipBinaryValidation(true)
 		result := validator.ValidateServiceConfig(config)
+		t.Logf("Basic validation result: Valid=%t, Errors=%v", result.Valid, result.Errors)
 
-		t.Logf("Basic validation result: Valid=%v, Errors=%v", result.Valid, result.Errors)
-
-		// Basic validation should pass for this simple config
 		if !result.Valid {
-			t.Errorf("Expected basic validation to pass, got errors: %v", result.Errors)
+			t.Errorf("Basic validation should pass for valid config")
 		}
 	})
 
 	t.Run("binary validation enabled", func(t *testing.T) {
+		if !isCaddyAvailable() {
+			t.Skip("Skipping binary validation test - caddy binary not available")
+		}
+
 		validator := NewValidator()
-		// Binary validation enabled by default
-
+		validator.SetSkipBinaryValidation(false)
 		result := validator.ValidateServiceConfig(config)
+		t.Logf("Binary validation result: Valid=%t, Errors=%v", result.Valid, result.Errors)
 
-		t.Logf("Binary validation result: Valid=%v, Errors=%v", result.Valid, result.Errors)
-
-		// Binary validation should also pass for this valid config
 		if !result.Valid {
-			t.Errorf("Expected binary validation to pass, got errors: %v", result.Errors)
+			t.Errorf("Binary validation should pass for valid config")
 		}
 	})
 
 	t.Log("✅ Both basic and binary validation completed successfully")
+}
+
+// TestValidator_BackendValidation tests the enhanced backend address validation
+func TestValidator_BackendValidation(t *testing.T) {
+	validator := NewValidator()
+	validator.SetSkipBinaryValidation(true) // Focus on basic validation
+
+	tests := []struct {
+		name          string
+		backend       string
+		expectValid   bool
+		expectedError string
+	}{
+		{
+			name:        "valid IPv4 address with port",
+			backend:     "127.0.0.1:8080",
+			expectValid: true,
+		},
+		{
+			name:        "valid hostname with port",
+			backend:     "localhost:3000",
+			expectValid: true,
+		},
+		{
+			name:        "valid service name port",
+			backend:     "example.com:http",
+			expectValid: true,
+		},
+		{
+			name:          "invalid multiple colons",
+			backend:       "invalid:backend:format",
+			expectValid:   false,
+			expectedError: "too many colons",
+		},
+		{
+			name:          "missing port",
+			backend:       "example.com",
+			expectValid:   false,
+			expectedError: "missing port",
+		},
+		{
+			name:          "empty host",
+			backend:       ":8080",
+			expectValid:   false,
+			expectedError: "empty host",
+		},
+		{
+			name:          "empty port",
+			backend:       "example.com:",
+			expectValid:   false,
+			expectedError: "empty port",
+		},
+		{
+			name:          "port with spaces",
+			backend:       "example.com:80 80",
+			expectValid:   false,
+			expectedError: "invalid whitespace characters",
+		},
+		{
+			name:          "backend with whitespace",
+			backend:       "example.com: 8080",
+			expectValid:   false,
+			expectedError: "invalid whitespace characters",
+		},
+		{
+			name:        "valid IPv6 address",
+			backend:     "[::1]:8080",
+			expectValid: true,
+		},
+		{
+			name:          "invalid IPv6 missing bracket",
+			backend:       "::1:8080",
+			expectValid:   false,
+			expectedError: "too many colons",
+		},
+		{
+			name:          "high port number",
+			backend:       "example.com:99999",
+			expectValid:   false,
+			expectedError: "invalid port",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &types.ServiceConfig{
+				Hostname: "test.example.com",
+				Backend:  tt.backend,
+				Protocol: "https",
+			}
+
+			result := validator.ValidateServiceConfig(config)
+
+			if result.Valid != tt.expectValid {
+				t.Errorf("Expected validation result %v for backend '%s', got %v",
+					tt.expectValid, tt.backend, result.Valid)
+				if !result.Valid {
+					for _, err := range result.Errors {
+						t.Logf("Error: %s", err.Message)
+					}
+				}
+			}
+
+			if !tt.expectValid && tt.expectedError != "" {
+				found := false
+				for _, err := range result.Errors {
+					if strings.Contains(err.Message, tt.expectedError) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Expected error containing '%s' for backend '%s', but got errors: %v",
+						tt.expectedError, tt.backend, result.Errors)
+				}
+			}
+		})
+	}
 }
