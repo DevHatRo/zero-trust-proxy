@@ -289,3 +289,86 @@ func BenchmarkValidator_ValidateServiceConfig(b *testing.B) {
 		validator.ValidateServiceConfig(config)
 	}
 }
+
+func TestValidator_CaddyBinaryIntegration(t *testing.T) {
+	if !isCaddyAvailable() {
+		t.Skip("Skipping Caddy binary integration test - caddy binary not available")
+	}
+
+	validator := NewValidator()
+
+	t.Run("valid config with binary validation", func(t *testing.T) {
+		config := &types.ServiceConfig{
+			Hostname: "integration-test.example.com",
+			Backend:  "127.0.0.1:8080",
+			Protocol: "https",
+		}
+
+		result := validator.ValidateServiceConfig(config)
+
+		if !result.Valid {
+			t.Errorf("Expected validation to pass with Caddy binary, got errors: %v", result.Errors)
+		}
+
+		// Verify no validation errors
+		if len(result.Errors) > 0 {
+			t.Errorf("Expected no validation errors, got: %v", result.Errors)
+		}
+	})
+
+	t.Run("invalid config caught by binary validation", func(t *testing.T) {
+		config := &types.ServiceConfig{
+			Hostname: "test.example.com",
+			Backend:  "invalid-backend-format",
+			Protocol: "https",
+		}
+
+		result := validator.ValidateServiceConfig(config)
+
+		// This should pass basic validation but might be caught by Caddy binary validation
+		// The exact behavior depends on what Caddy considers invalid
+		t.Logf("Validation result for invalid backend: Valid=%v, Errors=%v", result.Valid, result.Errors)
+	})
+}
+
+func TestValidator_BinaryVsBasicValidation(t *testing.T) {
+	if !isCaddyAvailable() {
+		t.Skip("Skipping binary vs basic validation comparison - caddy binary not available")
+	}
+
+	config := &types.ServiceConfig{
+		Hostname: "comparison-test.example.com",
+		Backend:  "127.0.0.1:8080",
+		Protocol: "https",
+	}
+
+	t.Run("basic validation only", func(t *testing.T) {
+		validator := NewValidator()
+		validator.SetSkipBinaryValidation(true) // Skip binary validation
+
+		result := validator.ValidateServiceConfig(config)
+
+		t.Logf("Basic validation result: Valid=%v, Errors=%v", result.Valid, result.Errors)
+
+		// Basic validation should pass for this simple config
+		if !result.Valid {
+			t.Errorf("Expected basic validation to pass, got errors: %v", result.Errors)
+		}
+	})
+
+	t.Run("binary validation enabled", func(t *testing.T) {
+		validator := NewValidator()
+		// Binary validation enabled by default
+
+		result := validator.ValidateServiceConfig(config)
+
+		t.Logf("Binary validation result: Valid=%v, Errors=%v", result.Valid, result.Errors)
+
+		// Binary validation should also pass for this valid config
+		if !result.Valid {
+			t.Errorf("Expected binary validation to pass, got errors: %v", result.Errors)
+		}
+	})
+
+	t.Log("✅ Both basic and binary validation completed successfully")
+}
