@@ -124,6 +124,8 @@ func TestValidator_CaddyBinaryValidation(t *testing.T) {
 	}
 
 	validator := NewValidator()
+	// Enable binary validation (which is now the default)
+	validator.SetSkipBinaryValidation(false)
 
 	tests := []struct {
 		name        string
@@ -152,13 +154,14 @@ func TestValidator_CaddyBinaryValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validator.validateWithCaddyBinary(tt.config)
+			// Use full validation pipeline instead of calling validateWithCaddyBinary directly
+			result := validator.ValidateServiceConfig(tt.config)
 
-			if tt.expectValid && err != nil {
-				t.Errorf("Expected validation to pass, but got error: %v", err)
+			if tt.expectValid && !result.Valid {
+				t.Errorf("Expected validation to pass, but got errors: %v", result.Errors)
 			}
 
-			if !tt.expectValid && err == nil {
+			if !tt.expectValid && result.Valid {
 				t.Errorf("Expected validation to fail, but it passed")
 			}
 		})
