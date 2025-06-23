@@ -36,6 +36,10 @@ jobs:
       - name: Update Go dependencies
         run: |
           go mod tidy
+      
+      - name: Run Tests
+        run: |
+          go test ./... -v
 
       - name: Build Binary
         run: |
