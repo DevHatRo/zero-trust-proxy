@@ -1,11 +1,13 @@
 package caddy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"regexp"
+	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
 	"github.com/devhatro/zero-trust-proxy/internal/types"
@@ -25,27 +27,45 @@ type Validator struct {
 	existingServices map[string]*types.ServiceConfig
 	// Validation context (agent or server)
 	context ValidationContext
+	// Path to caddy binary (defaults to "caddy" in PATH)
+	caddyBinary string
+	// Skip Caddy binary validation (useful for testing)
+	skipBinaryValidation bool
 }
 
 // NewValidator creates a new Caddy configuration validator
 func NewValidator() *Validator {
 	return &Validator{
-		existingServices: make(map[string]*types.ServiceConfig),
-		context:          ServerValidation, // Default to server validation for backward compatibility
+		existingServices:     make(map[string]*types.ServiceConfig),
+		context:              ServerValidation, // Default to server validation for backward compatibility
+		caddyBinary:          "caddy",          // Use caddy from PATH
+		skipBinaryValidation: false,            // Enable binary validation by default
 	}
 }
 
 // NewValidatorWithContext creates a new Caddy configuration validator with specific context
 func NewValidatorWithContext(context ValidationContext) *Validator {
 	return &Validator{
-		existingServices: make(map[string]*types.ServiceConfig),
-		context:          context,
+		existingServices:     make(map[string]*types.ServiceConfig),
+		context:              context,
+		caddyBinary:          "caddy",
+		skipBinaryValidation: false,
 	}
 }
 
 // SetContext updates the validation context
 func (v *Validator) SetContext(context ValidationContext) {
 	v.context = context
+}
+
+// SetCaddyBinary sets the path to the caddy binary (useful for testing or custom installations)
+func (v *Validator) SetCaddyBinary(path string) {
+	v.caddyBinary = path
+}
+
+// SetSkipBinaryValidation enables or disables Caddy binary validation
+func (v *Validator) SetSkipBinaryValidation(skip bool) {
+	v.skipBinaryValidation = skip
 }
 
 // ValidateServiceConfig validates a service configuration for Caddy compatibility
@@ -55,28 +75,11 @@ func (v *Validator) ValidateServiceConfig(config *types.ServiceConfig) *types.Va
 		Errors: []types.ValidationError{},
 	}
 
-	// Validate hostname
-	if err := v.validateHostname(config.Hostname); err != nil {
+	// Basic validation (still useful for early error detection)
+	if err := v.validateBasics(config); err != nil {
 		result.Valid = false
 		result.Errors = append(result.Errors, *err)
-	}
-
-	// Validate backend address
-	if err := v.validateBackend(config.Backend); err != nil {
-		result.Valid = false
-		result.Errors = append(result.Errors, *err)
-	}
-
-	// Validate protocol
-	if err := v.validateProtocol(config.Protocol); err != nil {
-		result.Valid = false
-		result.Errors = append(result.Errors, *err)
-	}
-
-	// Validate listen_on value
-	if err := v.validateListenOn(config.ListenOn); err != nil {
-		result.Valid = false
-		result.Errors = append(result.Errors, *err)
+		return result // Don't proceed with Caddy validation if basics fail
 	}
 
 	// Check for hostname conflicts
@@ -85,30 +88,38 @@ func (v *Validator) ValidateServiceConfig(config *types.ServiceConfig) *types.Va
 		result.Errors = append(result.Errors, *err)
 	}
 
-	// Validate WebSocket configuration
-	if err := v.validateWebSocketConfig(config); err != nil {
-		result.Valid = false
-		result.Errors = append(result.Errors, *err)
+	// Only warn about backend address during server-side validation
+	// Agent-side validation naturally has different backend addresses
+	if v.context == ServerValidation {
+		expectedBackend := "127.0.0.1:9443"
+		if config.Backend != expectedBackend {
+			logger.Warn("⚠️  Backend %s does not match expected server API address %s", config.Backend, expectedBackend)
+		}
 	}
 
-	// Test Caddy configuration generation
-	if result.Valid {
-		if err := v.testCaddyConfigGeneration(config); err != nil {
-			result.Valid = false
-			result.Errors = append(result.Errors, types.ValidationError{
-				Field:   "caddy_config",
-				Message: fmt.Sprintf("failed to generate valid Caddy configuration: %v", err),
-				Code:    "CADDY_CONFIG_GENERATION_FAILED",
-			})
+	// **Use Caddy binary for comprehensive validation (if enabled and available)**
+	if result.Valid && !v.skipBinaryValidation {
+		// Check if Caddy binary is available
+		if _, err := exec.LookPath(v.caddyBinary); err != nil {
+			logger.Debug("⚠️  Caddy binary not found at '%s', skipping binary validation: %v", v.caddyBinary, err)
+		} else {
+			if err := v.validateWithCaddyBinary(config); err != nil {
+				result.Valid = false
+				result.Errors = append(result.Errors, types.ValidationError{
+					Field:   "caddy_config",
+					Message: fmt.Sprintf("Caddy validation failed: %v", err),
+					Code:    "CADDY_VALIDATION_FAILED",
+				})
+			}
 		}
 	}
 
 	return result
 }
 
-// validateHostname validates the hostname format
-func (v *Validator) validateHostname(hostname string) *types.ValidationError {
-	if hostname == "" {
+// validateBasics performs basic validation that doesn't require Caddy
+func (v *Validator) validateBasics(config *types.ServiceConfig) *types.ValidationError {
+	if config.Hostname == "" {
 		return &types.ValidationError{
 			Field:   "hostname",
 			Message: "hostname cannot be empty",
@@ -116,55 +127,7 @@ func (v *Validator) validateHostname(hostname string) *types.ValidationError {
 		}
 	}
 
-	// Handle wildcard patterns first
-	if strings.Contains(hostname, "*") {
-		// Simple wildcard validation: *.domain.com format
-		if strings.HasPrefix(hostname, "*.") {
-			// Remove the wildcard and validate the rest as a normal hostname
-			domainPart := hostname[2:] // Remove "*."
-			if domainPart == "" {
-				return &types.ValidationError{
-					Field:   "hostname",
-					Message: fmt.Sprintf("invalid wildcard hostname format: %s", hostname),
-					Code:    "INVALID_HOSTNAME_FORMAT",
-				}
-			}
-			// Validate the domain part
-			hostnameRegex := regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
-			if !hostnameRegex.MatchString(domainPart) {
-				return &types.ValidationError{
-					Field:   "hostname",
-					Message: fmt.Sprintf("invalid wildcard hostname format: %s", hostname),
-					Code:    "INVALID_HOSTNAME_FORMAT",
-				}
-			}
-		} else {
-			// Wildcard not at the beginning is invalid
-			return &types.ValidationError{
-				Field:   "hostname",
-				Message: fmt.Sprintf("invalid wildcard hostname format: %s", hostname),
-				Code:    "INVALID_HOSTNAME_FORMAT",
-			}
-		}
-		return nil // Valid wildcard
-	}
-
-	// Validate regular hostname format (RFC 1123)
-	hostnameRegex := regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
-	if !hostnameRegex.MatchString(hostname) {
-		return &types.ValidationError{
-			Field:   "hostname",
-			Message: fmt.Sprintf("invalid hostname format: %s", hostname),
-			Code:    "INVALID_HOSTNAME_FORMAT",
-		}
-	}
-
-	return nil
-}
-
-// validateBackend validates the backend address format
-func (v *Validator) validateBackend(backend string) *types.ValidationError {
-	if backend == "" {
+	if config.Backend == "" {
 		return &types.ValidationError{
 			Field:   "backend",
 			Message: "backend address cannot be empty",
@@ -172,42 +135,7 @@ func (v *Validator) validateBackend(backend string) *types.ValidationError {
 		}
 	}
 
-	// Check if it's a URL format
-	if strings.HasPrefix(backend, "http://") || strings.HasPrefix(backend, "https://") {
-		if _, err := url.Parse(backend); err != nil {
-			return &types.ValidationError{
-				Field:   "backend",
-				Message: fmt.Sprintf("invalid backend URL format: %s", backend),
-				Code:    "INVALID_BACKEND_URL",
-			}
-		}
-	} else {
-		// Check if it's a valid host:port format
-		hostPortRegex := regexp.MustCompile(`^[a-zA-Z0-9\.\-]+:[0-9]+$`)
-		if !hostPortRegex.MatchString(backend) {
-			return &types.ValidationError{
-				Field:   "backend",
-				Message: fmt.Sprintf("invalid backend host:port format: %s", backend),
-				Code:    "INVALID_BACKEND_FORMAT",
-			}
-		}
-	}
-
-	// Only warn about backend address during server-side validation
-	// Agent-side validation naturally has different backend addresses
-	if v.context == ServerValidation {
-		expectedBackend := "127.0.0.1:9443"
-		if backend != expectedBackend {
-			logger.Warn("⚠️  Backend %s does not match expected server API address %s", backend, expectedBackend)
-		}
-	}
-
-	return nil
-}
-
-// validateProtocol validates the protocol value
-func (v *Validator) validateProtocol(protocol string) *types.ValidationError {
-	if protocol == "" {
+	if config.Protocol == "" {
 		return &types.ValidationError{
 			Field:   "protocol",
 			Message: "protocol cannot be empty",
@@ -215,39 +143,134 @@ func (v *Validator) validateProtocol(protocol string) *types.ValidationError {
 		}
 	}
 
+	// Basic protocol validation
 	supportedProtocols := []string{"http", "https", "tcp", "udp"}
+	protocolValid := false
 	for _, supported := range supportedProtocols {
-		if protocol == supported {
-			return nil
+		if config.Protocol == supported {
+			protocolValid = true
+			break
+		}
+	}
+	if !protocolValid {
+		return &types.ValidationError{
+			Field:   "protocol",
+			Message: fmt.Sprintf("unsupported protocol: %s (supported: %s)", config.Protocol, strings.Join(supportedProtocols, ", ")),
+			Code:    "UNSUPPORTED_PROTOCOL",
 		}
 	}
 
-	return &types.ValidationError{
-		Field:   "protocol",
-		Message: fmt.Sprintf("unsupported protocol: %s (supported: %s)", protocol, strings.Join(supportedProtocols, ", ")),
-		Code:    "UNSUPPORTED_PROTOCOL",
+	return nil
+}
+
+// validateWithCaddyBinary uses the actual Caddy binary to validate the configuration
+func (v *Validator) validateWithCaddyBinary(config *types.ServiceConfig) error {
+	// Generate a complete Caddy configuration for validation
+	caddyConfig := v.generateTestCaddyConfig(config)
+
+	// Create temporary file for validation
+	tempFile, err := v.createTempCaddyConfig(caddyConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create temp config file: %w", err)
+	}
+	defer os.Remove(tempFile)
+
+	// Run caddy validate command
+	return v.runCaddyValidate(tempFile)
+}
+
+// generateTestCaddyConfig generates a complete Caddy configuration for validation
+func (v *Validator) generateTestCaddyConfig(config *types.ServiceConfig) map[string]interface{} {
+	return map[string]interface{}{
+		"admin": map[string]interface{}{
+			"disabled": false,
+		},
+		"apps": map[string]interface{}{
+			"http": map[string]interface{}{
+				"servers": map[string]interface{}{
+					"validation_server": map[string]interface{}{
+						"listen": []string{":443"},
+						"routes": []map[string]interface{}{
+							{
+								"match": []map[string]interface{}{
+									{
+										"host": []string{config.Hostname},
+									},
+								},
+								"handle": []map[string]interface{}{
+									{
+										"handler": "reverse_proxy",
+										"upstreams": []map[string]interface{}{
+											{
+												"dial": config.Backend,
+											},
+										},
+										"headers": map[string]interface{}{
+											"request": map[string]interface{}{
+												"set": map[string][]string{
+													"Host":              {config.Hostname},
+													"X-Forwarded-Proto": {config.Protocol},
+													"X-Forwarded-Host":  {"{http.request.host}"},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
-// validateListenOn validates the listen_on value
-func (v *Validator) validateListenOn(listenOn string) *types.ValidationError {
-	// Empty or default values are valid
-	if listenOn == "" || listenOn == "both" {
-		return nil
+// createTempCaddyConfig creates a temporary file with the Caddy configuration
+func (v *Validator) createTempCaddyConfig(config map[string]interface{}) (string, error) {
+	configJSON, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal config to JSON: %w", err)
 	}
 
-	validValues := []string{"http", "https", "both"}
-	for _, valid := range validValues {
-		if listenOn == valid {
-			return nil
+	// Create temp file in system temp directory
+	tempFile, err := os.CreateTemp("", "caddy-validate-*.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer tempFile.Close()
+
+	if _, err := tempFile.Write(configJSON); err != nil {
+		os.Remove(tempFile.Name())
+		return "", fmt.Errorf("failed to write config to temp file: %w", err)
+	}
+
+	return tempFile.Name(), nil
+}
+
+// runCaddyValidate executes the caddy validate command
+func (v *Validator) runCaddyValidate(configFile string) error {
+	// Set timeout for validation (should be fast)
+	timeout := 10 * time.Second
+
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// Prepare command with context: caddy validate --config <file>
+	cmd := exec.CommandContext(ctx, v.caddyBinary, "validate", "--config", configFile)
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		// Parse Caddy's error output for meaningful error messages
+		outputStr := string(output)
+		if strings.Contains(outputStr, "validation") || strings.Contains(outputStr, "error") {
+			return fmt.Errorf("caddy validation error: %s", outputStr)
 		}
+		return fmt.Errorf("caddy validate command failed: %w (output: %s)", err, outputStr)
 	}
 
-	return &types.ValidationError{
-		Field:   "listen_on",
-		Message: fmt.Sprintf("invalid listen_on value: %s (supported: %s)", listenOn, strings.Join(validValues, ", ")),
-		Code:    "INVALID_LISTEN_ON",
-	}
+	logger.Debug("✅ Caddy binary validation passed for hostname: %s", configFile)
+	return nil
 }
 
 // checkHostnameConflicts checks for conflicts with existing services
@@ -268,56 +291,6 @@ func (v *Validator) checkHostnameConflicts(hostname string, newConfig *types.Ser
 	}
 
 	return nil
-}
-
-// validateWebSocketConfig validates WebSocket-specific configuration
-func (v *Validator) validateWebSocketConfig(config *types.ServiceConfig) *types.ValidationError {
-	if !config.WebSocket {
-		return nil // No WebSocket validation needed
-	}
-
-	// WebSocket requires HTTP/1.1, which is compatible with both http and https
-	// No specific validation errors for WebSocket at this time
-	return nil
-}
-
-// testCaddyConfigGeneration tests if we can generate a valid Caddy configuration
-func (v *Validator) testCaddyConfigGeneration(config *types.ServiceConfig) error {
-	// Create a simple test configuration
-	testConfig := map[string]interface{}{
-		"apps": map[string]interface{}{
-			"http": map[string]interface{}{
-				"servers": map[string]interface{}{
-					"test": map[string]interface{}{
-						"listen": []string{":443"},
-						"routes": []map[string]interface{}{
-							{
-								"match": []map[string]interface{}{
-									{
-										"host": []string{config.Hostname},
-									},
-								},
-								"handle": []map[string]interface{}{
-									{
-										"handler": "reverse_proxy",
-										"upstreams": []map[string]interface{}{
-											{
-												"dial": config.Backend,
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	// Try to marshal to JSON to test validity
-	_, err := json.Marshal(testConfig)
-	return err
 }
 
 // AddExistingService tracks a service for conflict detection
