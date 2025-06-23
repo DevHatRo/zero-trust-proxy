@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -365,13 +366,62 @@ func (s *Server) sendMessage(agent *Agent, msg *common.Message) error {
 func (s *Server) handleAPIRequest(conn net.Conn) {
 	defer conn.Close()
 
+	// Get client information for logging
+	remoteAddr := conn.RemoteAddr().String()
+
 	// Create a buffered reader for the connection
 	reader := bufio.NewReader(conn)
+
+	// Peek at raw data to help diagnose non-HTTP requests
+	rawData, err := reader.Peek(256) // Look at first 256 bytes
+	if err != nil && err != io.EOF {
+		logger.Error("❌ Failed to peek at request data from %s: %v", remoteAddr, err)
+		return
+	}
 
 	// Read the HTTP request
 	req, err := http.ReadRequest(reader)
 	if err != nil {
-		logger.Error("❌ Failed to read API request: %v", err)
+		// Enhanced error logging with context
+		rawPreview := string(rawData)
+		if len(rawPreview) > 100 {
+			rawPreview = rawPreview[:100] + "..."
+		}
+
+		// Clean up raw preview for logging (remove non-printable characters)
+		cleanPreview := ""
+		for _, r := range rawPreview {
+			if r >= 32 && r <= 126 || r == '\r' || r == '\n' || r == '\t' {
+				cleanPreview += string(r)
+			} else {
+				cleanPreview += fmt.Sprintf("\\x%02x", r)
+			}
+		}
+
+		logger.Error("❌ Failed to read API request from %s: %v", remoteAddr, err)
+		logger.Debug("📋 Request details - Error: %T, Raw data (%d bytes): %q",
+			err, len(rawData), cleanPreview)
+
+		// Try to categorize the error for better insights
+		if len(rawData) == 0 {
+			logger.Debug("📊 Analysis: Empty request (client closed connection immediately)")
+		} else if !strings.HasPrefix(strings.ToUpper(cleanPreview), "GET") &&
+			!strings.HasPrefix(strings.ToUpper(cleanPreview), "POST") &&
+			!strings.HasPrefix(strings.ToUpper(cleanPreview), "PUT") &&
+			!strings.HasPrefix(strings.ToUpper(cleanPreview), "DELETE") &&
+			!strings.HasPrefix(strings.ToUpper(cleanPreview), "HEAD") &&
+			!strings.HasPrefix(strings.ToUpper(cleanPreview), "OPTIONS") {
+			logger.Debug("📊 Analysis: Non-HTTP request (doesn't start with HTTP method)")
+		} else if strings.Contains(cleanPreview, "\\x") {
+			logger.Debug("📊 Analysis: Binary data detected (likely non-HTTP protocol)")
+		} else if strings.Contains(strings.ToLower(cleanPreview), "favicon") {
+			logger.Debug("📊 Analysis: Likely favicon request")
+		} else if strings.Contains(strings.ToLower(cleanPreview), "health") {
+			logger.Debug("📊 Analysis: Likely health check request")
+		} else {
+			logger.Debug("📊 Analysis: Malformed HTTP request")
+		}
+
 		return
 	}
 
@@ -425,10 +475,32 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 	// Read request body
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		logger.Error("❌ Failed to read request body: %v", err)
+		// Enhanced error logging for request body reading
+		contentLength := req.Header.Get("Content-Length")
+		transferEncoding := req.Header.Get("Transfer-Encoding")
+
+		logger.Error("❌ Failed to read request body from %s: %v", remoteAddr, err)
+		logger.Debug("📋 Request details - Method: %s, URL: %s, Host: %s, Content-Length: %s, Transfer-Encoding: %s, User-Agent: %s",
+			req.Method, req.URL.String(), host, contentLength, transferEncoding, req.Header.Get("User-Agent"))
+
+		// Try to categorize the body reading error
+		if contentLength != "" {
+			logger.Debug("📊 Analysis: Request declares Content-Length: %s bytes", contentLength)
+		}
+		if transferEncoding != "" {
+			logger.Debug("📊 Analysis: Request uses Transfer-Encoding: %s", transferEncoding)
+		}
+		if strings.Contains(err.Error(), "timeout") {
+			logger.Debug("📊 Analysis: Body reading timeout (slow client or network)")
+		} else if strings.Contains(err.Error(), "connection reset") {
+			logger.Debug("📊 Analysis: Client disconnected while sending body")
+		} else if strings.Contains(err.Error(), "unexpected EOF") {
+			logger.Debug("📊 Analysis: Incomplete body data (client disconnected early)")
+		}
+
 		// Create a response writer
 		resp := &http.Response{
-			StatusCode: http.StatusInternalServerError,
+			StatusCode: http.StatusBadRequest,
 			Status:     "Failed to read request body",
 			Proto:      "HTTP/1.1",
 			ProtoMajor: 1,
@@ -1186,7 +1258,24 @@ func (s *Server) startAgentAPIServer() error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			logger.Error("❌ Failed to accept agent connection: %v", err)
+			// Enhanced error logging for agent connection acceptance
+			logger.Error("❌ Failed to accept agent connection on %s: %v", s.listenAddr, err)
+
+			// Categorize the error for better insights
+			if strings.Contains(err.Error(), "too many open files") {
+				logger.Debug("📊 Analysis: System file descriptor limit reached")
+			} else if strings.Contains(err.Error(), "connection reset") {
+				logger.Debug("📊 Analysis: Client disconnected during handshake")
+			} else if strings.Contains(err.Error(), "timeout") {
+				logger.Debug("📊 Analysis: TLS handshake timeout (likely port scan or invalid client)")
+			} else if strings.Contains(err.Error(), "certificate") {
+				logger.Debug("📊 Analysis: TLS certificate validation failed (invalid client cert)")
+			} else if strings.Contains(err.Error(), "protocol") {
+				logger.Debug("📊 Analysis: TLS protocol error (non-TLS client or incompatible version)")
+			} else if strings.Contains(err.Error(), "remote error") {
+				logger.Debug("📊 Analysis: Client rejected server certificate or TLS handshake")
+			}
+
 			continue
 		}
 		go s.handleAgentConnection(conn)
@@ -1215,7 +1304,24 @@ func (s *Server) startHTTPProxyServer() error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			logger.Error("❌ Failed to accept HTTP proxy connection: %v", err)
+			// Enhanced error logging for HTTP proxy connection acceptance
+			logger.Error("❌ Failed to accept HTTP proxy connection on %s: %v", s.apiAddr, err)
+
+			// Categorize the error for better insights
+			if strings.Contains(err.Error(), "too many open files") {
+				logger.Debug("📊 Analysis: System file descriptor limit reached")
+			} else if strings.Contains(err.Error(), "connection reset") {
+				logger.Debug("📊 Analysis: Client disconnected during TLS handshake")
+			} else if strings.Contains(err.Error(), "timeout") {
+				logger.Debug("📊 Analysis: TLS handshake timeout (likely non-HTTPS client)")
+			} else if strings.Contains(err.Error(), "protocol") {
+				logger.Debug("📊 Analysis: TLS protocol error (non-TLS client or HTTP on HTTPS port)")
+			} else if strings.Contains(err.Error(), "remote error") {
+				logger.Debug("📊 Analysis: Client rejected server certificate")
+			} else if strings.Contains(err.Error(), "first record does not look like a TLS handshake") {
+				logger.Debug("📊 Analysis: Non-TLS client attempting connection (likely HTTP client on HTTPS port)")
+			}
+
 			continue
 		}
 		go s.handleAPIRequest(conn)
