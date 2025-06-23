@@ -33,6 +33,17 @@ jobs:
           go-version: "1.23"
           cache: true
 
+      - name: Install Caddy Binary
+        run: |
+          # Install Caddy for binary validation tests
+          echo "Installing Caddy binary for testing..."
+          curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+          curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+          sudo apt update
+          sudo apt install caddy
+          caddy version
+          echo "Caddy installed successfully"
+
       - name: Update Go dependencies
         run: |
           go mod tidy
