@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/devhatro/zero-trust-proxy/internal/agent"
+	"github.com/devhatro/zero-trust-proxy/internal/caddy"
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
 )
@@ -112,8 +113,11 @@ func main() {
 
 	logger.Debug("🔒 TLS configuration loaded successfully")
 
+	// Create Caddy validator for agent-side validation
+	validator := caddy.NewValidatorWithContext(caddy.AgentValidation)
+
 	// Create agent with configuration (configPath is now stored in config.ConfigPath)
-	a := agent.NewAgentWithConfig(config, tlsConfig)
+	a := agent.NewAgentWithConfig(config, tlsConfig, validator)
 
 	// Start agent
 	logger.Info("🚀 Starting agent %s", config.Agent.ID)

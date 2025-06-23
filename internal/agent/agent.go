@@ -16,6 +16,7 @@ import (
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
+	"github.com/devhatro/zero-trust-proxy/internal/types"
 )
 
 // Message types
@@ -153,6 +154,8 @@ type Agent struct {
 	reconnectMu         sync.Mutex
 	// Hot reload management
 	hotReloadManager *common.HotReloadManager
+	// Caddy configuration validation
+	caddyValidator types.ServiceValidator
 }
 
 // Config holds the agent configuration
@@ -165,9 +168,25 @@ type Config struct {
 	ServiceAddr string
 }
 
-// NewAgentWithConfig creates a new agent instance using configuration struct
-func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config) *Agent {
+// NewAgent creates a new agent instance
+func NewAgent(id, serverAddress string, tlsConfig *tls.Config, validator types.ServiceValidator) *Agent {
 	return &Agent{
+		id:                  id,
+		serverAddr:          serverAddress,
+		tlsConfig:           tlsConfig,
+		services:            make(map[string]*common.ServiceConfig),
+		conn:                nil,
+		registered:          false,
+		reconnectInProgress: false,
+		reconnectMu:         sync.Mutex{},
+		hotReloadManager:    common.NewHotReloadManager(),
+		caddyValidator:      validator,
+	}
+}
+
+// NewAgentWithConfig creates a new agent instance using configuration struct
+func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config, validator types.ServiceValidator) *Agent {
+	agent := &Agent{
 		id:                  config.Agent.ID,
 		serverAddr:          config.Server.Address,
 		certFile:            config.Server.Cert,
@@ -189,6 +208,31 @@ func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config) *Agent {
 		reconnectInProgress: false,
 		reconnectMu:         sync.Mutex{},
 		hotReloadManager:    common.NewHotReloadManager(),
+		caddyValidator:      validator,
+	}
+
+	// Store config path in config object for hot reload
+	config.ConfigPath = config.ConfigPath
+
+	return agent
+}
+
+// convertCommonToTypes converts common.ServiceConfig to types.ServiceConfig
+func convertCommonToTypes(config *common.ServiceConfig) *types.ServiceConfig {
+	return &types.ServiceConfig{
+		Hostname:     config.Hostname,
+		Backend:      config.Backend,
+		Protocol:     config.Protocol,
+		WebSocket:    config.WebSocket,
+		HTTPRedirect: config.HTTPRedirect,
+		ListenOn:     config.ListenOn,
+	}
+}
+
+// convertTypesToCommon converts types.ServiceConfig to common.ServiceConfig
+func convertTypesToCommon(config *types.ServiceConfig) *common.ServiceConfig {
+	return &common.ServiceConfig{
+		ServiceConfig: *config,
 	}
 }
 
@@ -1395,6 +1439,25 @@ func (a *Agent) loadAndRegisterServices() error {
 
 		// Register each host separately with the server
 		for _, hostname := range allHosts {
+			// Validate service configuration BEFORE processing
+			logger.Debug("🔍 Validating service configuration for host: %s", hostname)
+
+			// Convert enhanced config to common ServiceConfig for validation
+			commonServiceForValidation := a.convertToCommonServiceConfig(&serviceConfig, hostname)
+			typesServiceForValidation := convertCommonToTypes(commonServiceForValidation)
+			validationResult := a.caddyValidator.ValidateServiceConfig(typesServiceForValidation)
+
+			if !validationResult.Valid {
+				var errorMessages []string
+				for _, err := range validationResult.Errors {
+					errorMessages = append(errorMessages, err.Error())
+				}
+				return fmt.Errorf("❌ Caddy configuration validation failed for service %s (host: %s): %s",
+					serviceConfig.ID, hostname, strings.Join(errorMessages, "; "))
+			}
+
+			logger.Info("✅ Caddy configuration validation passed for service %s (host: %s)", serviceConfig.ID, hostname)
+
 			// Convert enhanced config to common ServiceConfig for server registration
 			commonService := a.convertToCommonServiceConfig(&serviceConfig, hostname)
 
@@ -1405,7 +1468,7 @@ func (a *Agent) loadAndRegisterServices() error {
 
 			logger.Info("📌 Registering host: %s -> %s", hostname, a.getPrimaryUpstream(&serviceConfig))
 
-			// Register with server
+			// Register with server (this will perform basic validation again but that's OK for safety)
 			if err := a.ConfigureService(commonService); err != nil {
 				return fmt.Errorf("❌ failed to register service %s for host %s: %w", serviceConfig.ID, hostname, err)
 			}
@@ -1431,12 +1494,14 @@ func (a *Agent) convertToCommonServiceConfig(service *ServiceConfig, hostname st
 	primaryUpstream := a.getPrimaryUpstream(service)
 
 	return &common.ServiceConfig{
-		Hostname:     hostname,
-		Backend:      primaryUpstream,
-		Protocol:     service.Protocol,
-		WebSocket:    service.WebSocket,    // CRITICAL: Copy WebSocket flag for server/Caddy configuration
-		HTTPRedirect: service.HTTPRedirect, // Copy HTTP redirect setting
-		ListenOn:     service.ListenOn,     // Copy protocol binding setting
+		ServiceConfig: types.ServiceConfig{
+			Hostname:     hostname,
+			Backend:      primaryUpstream,
+			Protocol:     service.Protocol,
+			WebSocket:    service.WebSocket,    // CRITICAL: Copy WebSocket flag for server/Caddy configuration
+			HTTPRedirect: service.HTTPRedirect, // Copy HTTP redirect setting
+			ListenOn:     service.ListenOn,     // Copy protocol binding setting
+		},
 	}
 }
 
@@ -1637,6 +1702,25 @@ func (a *Agent) ConfigureService(config *common.ServiceConfig) error {
 // configureServiceWithRetry configures a service with retry logic
 func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttempts int) error {
 	var lastErr error
+
+	// Validate configuration BEFORE attempting to send to server
+	logger.Debug("🔍 Validating Caddy configuration for service: %s", config.Hostname)
+	typesConfig := convertCommonToTypes(config)
+	validationResult := a.caddyValidator.ValidateServiceConfig(typesConfig)
+
+	if !validationResult.Valid {
+		var errorMessages []string
+		for _, err := range validationResult.Errors {
+			errorMessages = append(errorMessages, err.Error())
+		}
+		return fmt.Errorf("❌ Caddy configuration validation failed for service %s: %s",
+			config.Hostname, strings.Join(errorMessages, "; "))
+	}
+
+	logger.Info("✅ Caddy configuration validation passed for service: %s", config.Hostname)
+
+	// Track this service for future conflict detection
+	a.caddyValidator.AddExistingService(config.Hostname, typesConfig)
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// Check registration status before each attempt
@@ -2621,8 +2705,23 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 		}
 	}
 
-	// Add new services
+	// Add new services (with validation)
 	for host, service := range hostsToAdd {
+		// Validate service configuration for new services
+		logger.Debug("🔍 Validating new service configuration for host: %s", host)
+		commonServiceToValidate := a.convertToCommonServiceConfig(service, host)
+		typesServiceToValidate := convertCommonToTypes(commonServiceToValidate)
+		validationResult := a.caddyValidator.ValidateServiceConfig(typesServiceToValidate)
+
+		if !validationResult.Valid {
+			var errorMessages []string
+			for _, err := range validationResult.Errors {
+				errorMessages = append(errorMessages, err.Error())
+			}
+			logger.Error("❌ Validation failed for new service %s: %s", host, strings.Join(errorMessages, "; "))
+			continue // Skip this service but continue with others
+		}
+
 		commonService := a.convertToCommonServiceConfig(service, host)
 		if err := a.ConfigureService(commonService); err != nil {
 			logger.Error("❌ Failed to add service %s: %v", host, err)
@@ -2636,16 +2735,51 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 		}
 	}
 
-	// Update existing services
+	// Update existing services (with validation)
 	for host, service := range hostsToUpdate {
+		// IMPORTANT: Remove the old service from validator tracking temporarily
+		// to avoid false hostname conflicts when validating the updated service
+		a.caddyValidator.RemoveExistingService(host)
+
+		// Validate service configuration for updated services
+		logger.Debug("🔍 Validating updated service configuration for host: %s", host)
+		commonServiceToValidate := a.convertToCommonServiceConfig(service, host)
+		typesServiceToValidate := convertCommonToTypes(commonServiceToValidate)
+		validationResult := a.caddyValidator.ValidateServiceConfig(typesServiceToValidate)
+
+		if !validationResult.Valid {
+			var errorMessages []string
+			for _, err := range validationResult.Errors {
+				errorMessages = append(errorMessages, err.Error())
+			}
+			logger.Error("❌ Validation failed for updated service %s: %s", host, strings.Join(errorMessages, "; "))
+
+			// Re-add the old service back to validator tracking since validation failed
+			if currentService, exists := currentServices[host]; exists {
+				oldTypesService := convertCommonToTypes(currentService)
+				a.caddyValidator.AddExistingService(host, oldTypesService)
+			}
+			continue // Skip this service but continue with others
+		}
+
 		commonService := a.convertToCommonServiceConfig(service, host)
 		if err := a.ConfigureService(commonService); err != nil {
 			logger.Error("❌ Failed to update service %s: %v", host, err)
+
+			// Re-add the old service back to validator tracking since update failed
+			if currentService, exists := currentServices[host]; exists {
+				oldTypesService := convertCommonToTypes(currentService)
+				a.caddyValidator.AddExistingService(host, oldTypesService)
+			}
 		} else {
 			// Store updated service config locally
 			a.mu.Lock()
 			a.services[host] = commonService
 			a.mu.Unlock()
+
+			// Add the new service to validator tracking (replaces the temporarily removed one)
+			a.caddyValidator.AddExistingService(host, typesServiceToValidate)
+
 			logger.Info("🔄 Updated service: %s -> %s", host, a.getPrimaryUpstream(service))
 			changeCount++
 		}
@@ -2667,9 +2801,12 @@ func (a *Agent) removeService(hostname string) error {
 	delete(a.services, hostname)
 	a.mu.Unlock()
 
+	// Remove from validator tracking
+	a.caddyValidator.RemoveExistingService(hostname)
+
 	// Send remove message to server (if we have this functionality)
 	// For now, we'll just log since the current protocol focuses on adding services
-	logger.Debug("🗑️  Service %s removed from local storage", hostname)
+	logger.Debug("🗑️  Service %s removed from local storage and validator tracking", hostname)
 
 	return nil
 }

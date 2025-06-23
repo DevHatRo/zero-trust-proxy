@@ -5,16 +5,26 @@ import (
 	"fmt"
 	"io"
 	"net"
+
+	"github.com/devhatro/zero-trust-proxy/internal/types"
 )
 
-// ServiceConfig represents the configuration for a service (simple format for backward compatibility)
+// ServiceConfig represents a service configuration (kept for backward compatibility)
+// Note: This now embeds types.ServiceConfig for consistency
 type ServiceConfig struct {
-	Hostname     string `json:"hostname"`
-	Backend      string `json:"backend"`
-	Protocol     string `json:"protocol"`
-	WebSocket    bool   `json:"websocket,omitempty"`     // Enable WebSocket support
-	HTTPRedirect bool   `json:"http_redirect,omitempty"` // Enable HTTP to HTTPS redirect
-	ListenOn     string `json:"listen_on,omitempty"`     // Protocol binding: "http", "https", "both"
+	types.ServiceConfig
+}
+
+// NewServiceConfig creates a new ServiceConfig from types.ServiceConfig
+func NewServiceConfig(typesConfig *types.ServiceConfig) *ServiceConfig {
+	return &ServiceConfig{
+		ServiceConfig: *typesConfig,
+	}
+}
+
+// ToTypes converts common.ServiceConfig to types.ServiceConfig
+func (sc *ServiceConfig) ToTypes() *types.ServiceConfig {
+	return &sc.ServiceConfig
 }
 
 // EnhancedServiceConfig represents an enhanced service configuration

@@ -6,6 +6,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/devhatro/zero-trust-proxy/internal/types"
 )
 
 // mockConnection implements net.Conn for testing
@@ -51,12 +53,11 @@ func TestMessageSerialization(t *testing.T) {
 				Type: "service_add",
 				ID:   "service1",
 				Service: &ServiceConfig{
-					Hostname:     "example.com",
-					Backend:      "127.0.0.1:8080",
-					Protocol:     "http",
-					WebSocket:    true,
-					HTTPRedirect: false,
-					ListenOn:     "both",
+					ServiceConfig: types.ServiceConfig{
+						Hostname: "example.com",
+						Backend:  "127.0.0.1:8080",
+						Protocol: "http",
+					},
 				},
 			},
 		},
@@ -305,9 +306,11 @@ func TestReadMessage(t *testing.T) {
 			expectedMsg: &Message{
 				Type: "service_add",
 				Service: &ServiceConfig{
-					Hostname: "example.com",
-					Backend:  "127.0.0.1:8080",
-					Protocol: "http",
+					ServiceConfig: types.ServiceConfig{
+						Hostname: "example.com",
+						Backend:  "127.0.0.1:8080",
+						Protocol: "http",
+					},
 				},
 			},
 		},
@@ -380,9 +383,11 @@ func TestWriteMessage(t *testing.T) {
 			msg: &Message{
 				Type: "service_add",
 				Service: &ServiceConfig{
-					Hostname: "example.com",
-					Backend:  "127.0.0.1:8080",
-					Protocol: "http",
+					ServiceConfig: types.ServiceConfig{
+						Hostname: "example.com",
+						Backend:  "127.0.0.1:8080",
+						Protocol: "http",
+					},
 				},
 			},
 		},
@@ -434,12 +439,14 @@ func TestMessageRoundTrip(t *testing.T) {
 		Type: "service_update",
 		ID:   "update-123",
 		Service: &ServiceConfig{
-			Hostname:     "api.example.com",
-			Backend:      "192.168.1.100:8080",
-			Protocol:     "https",
-			WebSocket:    true,
-			HTTPRedirect: true,
-			ListenOn:     "both",
+			ServiceConfig: types.ServiceConfig{
+				Hostname:     "api.example.com",
+				Backend:      "192.168.1.100:8080",
+				Protocol:     "https",
+				WebSocket:    true,
+				HTTPRedirect: true,
+				ListenOn:     "both",
+			},
 		},
 		HTTP: &HTTPData{
 			Method: "PUT",
@@ -556,9 +563,11 @@ func TestMessageTypes(t *testing.T) {
 			switch msgType {
 			case "service_add", "service_remove", "service_update":
 				msg.Service = &ServiceConfig{
-					Hostname: "test.example.com",
-					Backend:  "127.0.0.1:8080",
-					Protocol: "http",
+					ServiceConfig: types.ServiceConfig{
+						Hostname: "test.example.com",
+						Backend:  "127.0.0.1:8080",
+						Protocol: "http",
+					},
 				}
 			case "enhanced_service_add", "enhanced_service_remove", "enhanced_service_update":
 				msg.EnhancedService = &EnhancedServiceConfig{
