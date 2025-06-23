@@ -198,6 +198,124 @@ func (s *Server) startCaddy() error {
 		},
 	}
 
+	// Add logging configuration if enabled
+	s.configMu.RLock()
+	loggingConfig := s.config.Caddy.Logging
+	s.configMu.RUnlock()
+
+	if loggingConfig.Enabled {
+		logger.Info("🔧 Configuring Caddy logging: level=%s, format=%s, output=%s",
+			loggingConfig.Level, loggingConfig.Format, loggingConfig.Output)
+
+		caddyLogging := map[string]interface{}{
+			"logs": map[string]interface{}{
+				"default": map[string]interface{}{},
+			},
+		}
+
+		// Set log level
+		if loggingConfig.Level != "" {
+			caddyLogging["logs"].(map[string]interface{})["default"].(map[string]interface{})["level"] = strings.ToUpper(loggingConfig.Level)
+		}
+
+		// Configure encoder (format)
+		encoderConfig := map[string]interface{}{}
+
+		switch strings.ToLower(loggingConfig.Format) {
+		case "json":
+			encoderConfig["format"] = "json"
+		case "console":
+			encoderConfig["format"] = "console"
+		case "single_field":
+			encoderConfig["format"] = "single_field"
+		case "filter":
+			encoderConfig["format"] = "filter"
+		default:
+			encoderConfig["format"] = "console" // Default to console
+		}
+
+		// Add custom fields if specified
+		if len(loggingConfig.Fields) > 0 {
+			encoderConfig["fields"] = loggingConfig.Fields
+		}
+
+		// Set encoder configuration
+		caddyLogging["logs"].(map[string]interface{})["default"].(map[string]interface{})["encoder"] = encoderConfig
+
+		// Configure writer (output)
+		writerConfig := map[string]interface{}{}
+
+		switch strings.ToLower(loggingConfig.Output) {
+		case "stdout":
+			writerConfig["output"] = "stdout"
+		case "stderr":
+			writerConfig["output"] = "stderr"
+		case "discard":
+			writerConfig["output"] = "discard"
+		default:
+			// Assume it's a file path if not one of the standard outputs
+			if loggingConfig.Output != "" && !strings.Contains(strings.ToLower(loggingConfig.Output), "std") {
+				writerConfig["output"] = "file"
+				writerConfig["filename"] = loggingConfig.Output
+			} else {
+				writerConfig["output"] = "stdout" // Default to stdout
+			}
+		}
+
+		caddyLogging["logs"].(map[string]interface{})["default"].(map[string]interface{})["writer"] = writerConfig
+
+		// Configure HTTP server access logs (always enable when logging is enabled)
+		accessLogConfig := map[string]interface{}{
+			"default_logger_name": "default", // Use the main logger
+		}
+
+		// Add include/exclude fields if specified
+		if len(loggingConfig.Include) > 0 {
+			accessLogConfig["include"] = loggingConfig.Include
+		}
+
+		if len(loggingConfig.Exclude) > 0 {
+			accessLogConfig["exclude"] = loggingConfig.Exclude
+		}
+
+		// Apply access logging to ALL HTTP servers that exist
+		if httpApp, ok := config["apps"].(map[string]interface{})["http"].(map[string]interface{}); ok {
+			if servers, ok := httpApp["servers"].(map[string]interface{}); ok {
+				// Apply to srv0 (if it exists from initial startup)
+				if srv0, ok := servers["srv0"].(map[string]interface{}); ok {
+					srv0["logs"] = accessLogConfig
+					logger.Debug("🔧 Applied access logging to srv0")
+				}
+
+				// Also apply to any dynamically created servers (https, http)
+				for serverName, serverConfig := range servers {
+					if serverMap, ok := serverConfig.(map[string]interface{}); ok {
+						serverMap["logs"] = accessLogConfig
+						logger.Debug("🔧 Applied access logging to server: %s", serverName)
+					}
+				}
+			}
+		}
+
+		// Add sampling configuration if specified
+		if loggingConfig.SamplingFirst > 0 || loggingConfig.SamplingThereafter > 0 {
+			samplingConfig := map[string]interface{}{}
+
+			if loggingConfig.SamplingFirst > 0 {
+				samplingConfig["first"] = loggingConfig.SamplingFirst
+			}
+
+			if loggingConfig.SamplingThereafter > 0 {
+				samplingConfig["thereafter"] = loggingConfig.SamplingThereafter
+			}
+
+			caddyLogging["logs"].(map[string]interface{})["default"].(map[string]interface{})["sampling"] = samplingConfig
+		}
+
+		// Add logging configuration to main config
+		config["logging"] = caddyLogging
+	}
+
 	// Add custom storage configuration if we have permissions
 	if configDir != "" {
 		config["storage"] = map[string]interface{}{
@@ -1578,6 +1696,21 @@ func (s *Server) applyConfigChanges(oldConfig, newConfig *ServerConfig) error {
 		logger.Warn("⚠️  Caddy admin API change requires server restart for full effect")
 	}
 
+	// Check for Caddy logging configuration changes
+	oldLogging := oldConfig.Caddy.Logging
+	newLogging := newConfig.Caddy.Logging
+
+	if s.shouldUpdateCaddyLogging(oldLogging, newLogging) {
+		logger.Info("🔧 Caddy logging configuration changed, updating Caddy config...")
+
+		if err := s.updateCaddyLoggingConfig(newLogging); err != nil {
+			logger.Warn("⚠️  Failed to update Caddy logging config: %v", err)
+			// Continue with other config changes - logging update failure shouldn't stop the reload
+		} else {
+			logger.Info("✅ Caddy logging configuration updated successfully")
+		}
+	}
+
 	// Note: TLS certificate changes and port changes would require a server restart
 	// For now, we log warnings about these changes
 	if oldConfig.Server.CertFile != newConfig.Server.CertFile ||
@@ -1607,7 +1740,303 @@ func (s *Server) logConfigChanges(oldConfig, newConfig *ServerConfig) {
 		changes = append(changes, fmt.Sprintf("caddy_admin_api: %s → %s", oldConfig.Caddy.AdminAPI, newConfig.Caddy.AdminAPI))
 	}
 
+	// Check for Caddy logging changes
+	if s.shouldUpdateCaddyLogging(oldConfig.Caddy.Logging, newConfig.Caddy.Logging) {
+		oldEnabled := "disabled"
+		newEnabled := "disabled"
+		if oldConfig.Caddy.Logging.Enabled {
+			oldEnabled = fmt.Sprintf("enabled(%s:%s)", oldConfig.Caddy.Logging.Level, oldConfig.Caddy.Logging.Format)
+		}
+		if newConfig.Caddy.Logging.Enabled {
+			newEnabled = fmt.Sprintf("enabled(%s:%s)", newConfig.Caddy.Logging.Level, newConfig.Caddy.Logging.Format)
+		}
+		changes = append(changes, fmt.Sprintf("caddy_logging: %s → %s", oldEnabled, newEnabled))
+	}
+
 	if len(changes) > 0 {
 		logger.Info("📝 Server config changes: %s", fmt.Sprintf("[%s]", fmt.Sprintf("%v", changes)))
 	}
+}
+
+// shouldUpdateCaddyLogging checks if Caddy logging configuration needs to be updated
+func (s *Server) shouldUpdateCaddyLogging(oldLogging, newLogging CaddyLogging) bool {
+	// Check if logging was enabled/disabled
+	if oldLogging.Enabled != newLogging.Enabled {
+		return true
+	}
+
+	// If logging is disabled, no need to check other fields
+	if !newLogging.Enabled {
+		return false
+	}
+
+	// Check individual logging settings
+	if oldLogging.Level != newLogging.Level ||
+		oldLogging.Format != newLogging.Format ||
+		oldLogging.Output != newLogging.Output ||
+		oldLogging.SamplingFirst != newLogging.SamplingFirst ||
+		oldLogging.SamplingThereafter != newLogging.SamplingThereafter {
+		return true
+	}
+
+	// Check include/exclude slices
+	if !stringSlicesEqual(oldLogging.Include, newLogging.Include) ||
+		!stringSlicesEqual(oldLogging.Exclude, newLogging.Exclude) {
+		return true
+	}
+
+	// Check custom fields map
+	if !mapsEqual(oldLogging.Fields, newLogging.Fields) {
+		return true
+	}
+
+	return false
+}
+
+// updateCaddyLoggingConfig updates Caddy's logging configuration via the admin API
+func (s *Server) updateCaddyLoggingConfig(loggingConfig CaddyLogging) error {
+	// Build the logging configuration
+	loggingPayload := map[string]interface{}{}
+
+	if loggingConfig.Enabled {
+		// Configure general logging first
+		logs := map[string]interface{}{
+			"default": map[string]interface{}{},
+		}
+
+		// Set log level
+		if loggingConfig.Level != "" {
+			logs["default"].(map[string]interface{})["level"] = strings.ToUpper(loggingConfig.Level)
+		}
+
+		// Configure encoder (format)
+		encoderConfig := map[string]interface{}{}
+
+		switch strings.ToLower(loggingConfig.Format) {
+		case "json":
+			encoderConfig["format"] = "json"
+		case "console":
+			encoderConfig["format"] = "console"
+		case "single_field":
+			encoderConfig["format"] = "single_field"
+		case "filter":
+			encoderConfig["format"] = "filter"
+		default:
+			encoderConfig["format"] = "console"
+		}
+
+		// Add custom fields if specified
+		if len(loggingConfig.Fields) > 0 {
+			encoderConfig["fields"] = loggingConfig.Fields
+		}
+
+		logs["default"].(map[string]interface{})["encoder"] = encoderConfig
+
+		// Configure writer (output)
+		writerConfig := map[string]interface{}{}
+
+		switch strings.ToLower(loggingConfig.Output) {
+		case "stdout":
+			writerConfig["output"] = "stdout"
+		case "stderr":
+			writerConfig["output"] = "stderr"
+		case "discard":
+			writerConfig["output"] = "discard"
+		default:
+			if loggingConfig.Output != "" && !strings.Contains(strings.ToLower(loggingConfig.Output), "std") {
+				writerConfig["output"] = "file"
+				writerConfig["filename"] = loggingConfig.Output
+			} else {
+				writerConfig["output"] = "stdout"
+			}
+		}
+
+		logs["default"].(map[string]interface{})["writer"] = writerConfig
+
+		// Add sampling configuration if specified
+		if loggingConfig.SamplingFirst > 0 || loggingConfig.SamplingThereafter > 0 {
+			samplingConfig := map[string]interface{}{}
+
+			if loggingConfig.SamplingFirst > 0 {
+				samplingConfig["first"] = loggingConfig.SamplingFirst
+			}
+
+			if loggingConfig.SamplingThereafter > 0 {
+				samplingConfig["thereafter"] = loggingConfig.SamplingThereafter
+			}
+
+			logs["default"].(map[string]interface{})["sampling"] = samplingConfig
+		}
+
+		loggingPayload["logs"] = logs
+
+		// Update HTTP server access logs for all servers (https, http, srv0)
+		accessLogConfig := map[string]interface{}{
+			"default_logger_name": "default", // Use the same logger as general logs
+		}
+
+		// Add include/exclude fields if specified
+		if len(loggingConfig.Include) > 0 {
+			accessLogConfig["include"] = loggingConfig.Include
+		}
+
+		if len(loggingConfig.Exclude) > 0 {
+			accessLogConfig["exclude"] = loggingConfig.Exclude
+		}
+
+		// Update all known server types
+		serverTypes := []string{"https", "http", "srv0"}
+		for _, serverType := range serverTypes {
+			serverLogsURL := fmt.Sprintf("%s/config/apps/http/servers/%s/logs", s.caddyAdminAPI, serverType)
+			if err := s.updateCaddyConfig(serverLogsURL, accessLogConfig); err != nil {
+				logger.Debug("⚠️  Failed to update %s server logs (may not exist): %v", serverType, err)
+			} else {
+				logger.Debug("✅ Updated access logs for %s server", serverType)
+			}
+		}
+	} else {
+		// Disable access logs by removing the configuration from all servers
+		serverTypes := []string{"https", "http", "srv0"}
+		for _, serverType := range serverTypes {
+			serverLogsURL := fmt.Sprintf("%s/config/apps/http/servers/%s/logs", s.caddyAdminAPI, serverType)
+			if err := s.deleteCaddyConfig(serverLogsURL); err != nil {
+				logger.Debug("⚠️  Failed to disable %s server logs (may not exist): %v", serverType, err)
+			} else {
+				logger.Debug("✅ Disabled access logs for %s server", serverType)
+			}
+		}
+	}
+
+	// Update the main logging configuration
+	loggingURL := fmt.Sprintf("%s/config/logging", s.caddyAdminAPI)
+	return s.updateCaddyConfig(loggingURL, loggingPayload)
+}
+
+// updateCaddyConfig updates a specific part of Caddy's configuration via the admin API
+func (s *Server) updateCaddyConfig(url string, config interface{}) error {
+	// Marshal the configuration to JSON
+	configData, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %v", err)
+	}
+
+	// Try PATCH first (for updating existing config)
+	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(configData))
+	if err != nil {
+		return fmt.Errorf("failed to create PATCH request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send request to Caddy admin API
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send PATCH request to Caddy admin API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// If PATCH works, we're done
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+
+	// If PATCH fails with 404 (not found), try PUT to create new config
+	if resp.StatusCode == http.StatusNotFound {
+		req, err := http.NewRequest("PUT", url, bytes.NewBuffer(configData))
+		if err != nil {
+			return fmt.Errorf("failed to create PUT request: %v", err)
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to send PUT request to Caddy admin API: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			return nil
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Caddy admin API PUT returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// If PATCH fails with 409 (conflict), the config already exists and matches
+	// This is actually OK - it means the configuration is already set correctly
+	if resp.StatusCode == http.StatusConflict {
+		logger.Debug("🔧 Caddy config already exists and matches desired state")
+		return nil
+	}
+
+	// For any other error, report it
+	body, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("Caddy admin API PATCH returned status %d: %s", resp.StatusCode, string(body))
+}
+
+// deleteCaddyConfig deletes a specific part of Caddy's configuration via the admin API
+func (s *Server) deleteCaddyConfig(url string) error {
+	// Create HTTP DELETE request
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create delete request: %v", err)
+	}
+
+	// Send request to Caddy admin API
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send delete request to Caddy admin API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Check response status (200 OK or 404 Not Found are both acceptable)
+	// 404 means the config doesn't exist, which is fine for deletion
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+
+	// For any other status, it's likely an error we should report
+	body, _ := io.ReadAll(resp.Body)
+
+	// Log the error but don't fail completely - deletion failures shouldn't break the system
+	logger.Warn("⚠️  Caddy admin API delete returned status %d: %s", resp.StatusCode, string(body))
+	return nil
+}
+
+// stringSlicesEqual compares two string slices for equality
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// mapsEqual compares two maps for equality
+func mapsEqual(a, b map[string]interface{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || !interfaceEqual(v, bv) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// interfaceEqual compares two interface{} values for equality
+func interfaceEqual(a, b interface{}) bool {
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
 }

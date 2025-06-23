@@ -34,9 +34,23 @@ type APISettings struct {
 
 // CaddySettings contains Caddy configuration
 type CaddySettings struct {
-	AdminAPI   string `yaml:"admin_api"`
-	ConfigDir  string `yaml:"config_dir,omitempty"`
-	StorageDir string `yaml:"storage_dir,omitempty"`
+	AdminAPI   string       `yaml:"admin_api"`
+	ConfigDir  string       `yaml:"config_dir,omitempty"`
+	StorageDir string       `yaml:"storage_dir,omitempty"`
+	Logging    CaddyLogging `yaml:"logging,omitempty"`
+}
+
+// CaddyLogging contains Caddy logging configuration
+type CaddyLogging struct {
+	Enabled            bool                   `yaml:"enabled"`
+	Level              string                 `yaml:"level,omitempty"`
+	Format             string                 `yaml:"format,omitempty"`
+	Output             string                 `yaml:"output,omitempty"`
+	Include            []string               `yaml:"include,omitempty"`
+	Exclude            []string               `yaml:"exclude,omitempty"`
+	Fields             map[string]interface{} `yaml:"fields,omitempty"`
+	SamplingFirst      int                    `yaml:"sampling_first,omitempty"`
+	SamplingThereafter int                    `yaml:"sampling_thereafter,omitempty"`
 }
 
 // LoadServerConfig loads the server configuration from a file
@@ -111,6 +125,14 @@ func createDefaultServerConfig() *ServerConfig {
 			AdminAPI:   "http://localhost:2019",
 			ConfigDir:  "/config/caddy",
 			StorageDir: "/config/caddy/storage",
+			Logging: CaddyLogging{
+				Enabled: true,
+				Level:   "INFO",
+				Format:  "console",
+				Output:  "stdout",
+				Include: []string{"ts", "request>method", "request>uri", "status", "duration", "size"},
+				Exclude: []string{"request>headers>Authorization", "request>headers>Cookie"},
+			},
 		},
 		LogLevel: "INFO",
 	}

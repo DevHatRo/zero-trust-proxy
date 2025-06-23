@@ -1,0 +1,51 @@
+# Debug Configuration - Shows ALL access logs (successful and failed)
+
+log_level: "DEBUG"
+
+server:
+  listen_addr: ":8443"
+  cert_file: "/config/certs/server.crt"
+  key_file: "/config/certs/server.key"
+  ca_file: "/config/certs/ca.crt"
+
+api:
+  listen_addr: "localhost:9443"
+
+caddy:
+  admin_api: "http://localhost:2019"
+  config_dir: "/config/caddy"
+  storage_dir: "/config/caddy/storage"
+
+  logging:
+    enabled: true
+    level: "INFO" # INFO level to see all requests
+    format: "console" # Human-readable format for debugging
+    output: "stdout"
+
+    # COMPREHENSIVE field list to see everything
+    include:
+      - "ts" # Timestamp
+      - "level" # Log level
+      - "logger" # Which logger (http.log.access vs http.log.error)
+      - "msg" # Log message
+      - "request>method" # HTTP method
+      - "request>uri" # Full URI
+      - "request>host" # Host header
+      - "request>remote_ip" # Client IP
+      - "request>proto" # HTTP version
+      - "status" # Status code (200, 502, etc.)
+      - "duration" # Request duration
+      - "size" # Response size
+      - "common_log" # Apache-style log format
+      - "user_id" # User ID if available
+      - "error" # Error message if any
+      - "err_id" # Error ID
+      - "err_trace" # Error trace
+
+    # Don't exclude anything for debugging
+    exclude: []
+
+    # Add debug context
+    fields:
+      mode: "debug"
+      proxy_type: "zero-trust"

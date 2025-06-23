@@ -216,6 +216,12 @@ func (cm *Manager) reloadConfig() error {
 			logger.Debug("⚡ Configuring HTTPS server with HTTP/1.1 and HTTP/2 support")
 		}
 
+		// Enable access logging for HTTPS server using default logger
+		httpsServer["logs"] = map[string]interface{}{
+			"default_logger_name": "default",
+		}
+		logger.Debug("🔧 Enabled access logging for HTTPS server")
+
 		servers["https"] = httpsServer
 	}
 
@@ -228,6 +234,13 @@ func (cm *Manager) reloadConfig() error {
 
 		// HTTP server always uses HTTP/1.1
 		httpServer["protocols"] = []string{"h1"}
+
+		// Enable access logging for HTTP server using default logger
+		httpServer["logs"] = map[string]interface{}{
+			"default_logger_name": "default",
+		}
+		logger.Debug("🔧 Enabled access logging for HTTP server")
+
 		servers["http"] = httpServer
 	}
 

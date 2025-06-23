@@ -1,0 +1,51 @@
+# 0Trust Server Configuration - WORKING ACCESS LOGS
+# This configuration will show Caddy access logs for all requests
+
+# Log level configuration
+log_level: "INFO"
+
+# Core server settings
+server:
+  listen_addr: ":8443"
+  cert_file: "/config/certs/server.crt"
+  key_file: "/config/certs/server.key"
+  ca_file: "/config/certs/ca.crt"
+
+# API server settings (for HTTP proxy from Caddy)
+api:
+  listen_addr: "localhost:9443"
+
+# Caddy reverse proxy settings
+caddy:
+  admin_api: "http://localhost:2019"
+  config_dir: "/config/caddy"
+  storage_dir: "/config/caddy/storage"
+
+  # WORKING Caddy logging configuration
+  logging:
+    enabled: true
+    level: "INFO" # DEBUG, INFO, WARN, ERROR
+    format: "console" # Use console for easy reading during testing
+    output: "stdout" # stdout, stderr, discard, or file path
+
+    # CRITICAL: These fields MUST be included for access logs to appear
+    include:
+      - "ts" # Timestamp
+      - "request>method" # HTTP method (GET, POST, etc.)
+      - "request>uri" # Request URI/path
+      - "request>host" # Host header
+      - "request>remote_ip" # Client IP address
+      - "status" # HTTP status code (200, 404, 502, etc.)
+      - "duration" # Request duration
+      - "size" # Response size
+      - "common_log" # Apache-style common log format
+
+    # Optional: Exclude sensitive data for security
+    exclude:
+      - "request>headers>Authorization"
+      - "request>headers>Cookie"
+
+    # Optional: Add custom context fields
+    fields:
+      component: "caddy-proxy"
+      environment: "production"

@@ -1,0 +1,50 @@
+# 0Trust Server Configuration - Simple Caddy Logging for Development
+# This example shows minimal logging configuration for development environments
+
+# Global log level
+log_level: "INFO"
+
+# Core server settings
+server:
+  listen_addr: ":8443"
+  cert_file: "/config/certs/server.crt"
+  key_file: "/config/certs/server.key"
+  ca_file: "/config/certs/ca.crt"
+
+# API server settings
+api:
+  listen_addr: "localhost:9443"
+
+# Caddy reverse proxy settings with simple logging
+caddy:
+  admin_api: "http://localhost:2019"
+  config_dir: "/config/caddy"
+  storage_dir: "/config/caddy/storage"
+
+  # Simple Caddy logging configuration for development
+  logging:
+    enabled: true
+    level: "INFO" # INFO level for development
+    format: "console" # Console format for easy reading
+    output: "stdout" # Output to stdout for Docker logs
+
+    # Basic fields to include
+    include:
+      - "status"
+      - "method"
+      - "uri"
+      - "duration"
+      - "size"
+
+    # Exclude sensitive data
+    exclude:
+      - "request>headers>Authorization"
+      - "request>headers>Cookie"
+
+    # Simple custom field
+    fields:
+      component: "caddy-dev"
+
+# Hot reload enabled for development
+hot_reload:
+  enabled: true

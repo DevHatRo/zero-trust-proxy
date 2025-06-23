@@ -18,4 +18,38 @@ api:
 caddy:
   admin_api: "http://localhost:2019"
   config_dir: "/config/caddy"
-  storage_dir: "/config/caddy/storage" 
+  storage_dir: "/config/caddy/storage"
+
+  # Caddy logging configuration
+  logging:
+    enabled: true
+    level: "INFO" # DEBUG, INFO, WARN, ERROR
+    format: "console" # json, console, single_field, filter, or custom encoder
+    output: "stdout" # stdout, stderr, discard, or file path (e.g., "/var/log/caddy.log")
+
+    # Fields to include in logs (for structured logging)
+    include:
+      - "user_id"
+      - "duration"
+      - "size"
+      - "status"
+      - "method"
+      - "uri"
+      - "host"
+      - "resp_headers>Server"
+
+    # Fields to exclude from logs (for privacy/security)
+    exclude:
+      - "headers" # All request headers
+      - "request>headers>Authorization" # Authorization header specifically
+      - "request>headers>Cookie" # Cookie header
+      - "request>body" # Request body content
+
+    # Custom fields to add to every log entry
+    fields:
+      component: "caddy-proxy"
+      environment: "production"
+
+    # Log sampling (reduce log volume for high-traffic)
+    # sampling_first: 100        # Log first N requests normally
+    # sampling_thereafter: 100   # Then log every Nth request

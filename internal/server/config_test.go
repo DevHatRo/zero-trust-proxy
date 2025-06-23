@@ -83,6 +83,82 @@ hot_reload:
 			},
 		},
 		{
+			name: "config with Caddy logging",
+			setupFunc: func() (string, func()) {
+				tmpDir := t.TempDir()
+				configPath := filepath.Join(tmpDir, "server.yaml")
+
+				configContent := `
+server:
+  listen_addr: ":8443"
+  cert_file: "/config/certs/server.crt"
+  key_file: "/config/certs/server.key"
+  ca_file: "/config/certs/ca.crt"
+api:
+  listen_addr: ":9443"
+caddy:
+  admin_api: "http://localhost:2019"
+  config_dir: "/config/caddy"
+  storage_dir: "/config/storage"
+  logging:
+    enabled: true
+    level: "DEBUG"
+    format: "json"
+    output: "/var/log/caddy.log"
+    include:
+      - "ts"
+      - "request>method"
+      - "request>uri"
+      - "status"
+    exclude:
+      - "request>headers>Authorization"
+      - "request>headers>Cookie"
+    fields:
+      component: "caddy-proxy"
+      environment: "test"
+    sampling_first: 100
+    sampling_thereafter: 50
+log_level: "INFO"
+`
+				if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+					t.Fatalf("Failed to create test config: %v", err)
+				}
+
+				return configPath, func() {}
+			},
+			wantErr: false,
+			validate: func(t *testing.T, config *ServerConfig) {
+				logging := config.Caddy.Logging
+				if !logging.Enabled {
+					t.Error("Expected Caddy logging to be enabled")
+				}
+				if logging.Level != "DEBUG" {
+					t.Errorf("Expected logging level DEBUG, got %s", logging.Level)
+				}
+				if logging.Format != "json" {
+					t.Errorf("Expected logging format json, got %s", logging.Format)
+				}
+				if logging.Output != "/var/log/caddy.log" {
+					t.Errorf("Expected logging output /var/log/caddy.log, got %s", logging.Output)
+				}
+				if len(logging.Include) != 4 {
+					t.Errorf("Expected 4 include fields, got %d", len(logging.Include))
+				}
+				if len(logging.Exclude) != 2 {
+					t.Errorf("Expected 2 exclude fields, got %d", len(logging.Exclude))
+				}
+				if len(logging.Fields) != 2 {
+					t.Errorf("Expected 2 custom fields, got %d", len(logging.Fields))
+				}
+				if logging.SamplingFirst != 100 {
+					t.Errorf("Expected sampling_first 100, got %d", logging.SamplingFirst)
+				}
+				if logging.SamplingThereafter != 50 {
+					t.Errorf("Expected sampling_thereafter 50, got %d", logging.SamplingThereafter)
+				}
+			},
+		},
+		{
 			name: "invalid yaml",
 			setupFunc: func() (string, func()) {
 				tmpDir := t.TempDir()
@@ -305,6 +381,43 @@ func TestCreateDefaultServerConfig(t *testing.T) {
 	if config.Server.CAFile == "" {
 		t.Error("Expected CAFile to be set")
 	}
+
+	// Test default Caddy logging configuration
+	logging := config.Caddy.Logging
+	if !logging.Enabled {
+		t.Error("Expected default Caddy logging to be enabled")
+	}
+	if logging.Level != "INFO" {
+		t.Errorf("Expected default logging level INFO, got %s", logging.Level)
+	}
+	if logging.Format != "console" {
+		t.Errorf("Expected default logging format console, got %s", logging.Format)
+	}
+	if logging.Output != "stdout" {
+		t.Errorf("Expected default logging output stdout, got %s", logging.Output)
+	}
+
+	// Test default include fields
+	expectedInclude := []string{"ts", "request>method", "request>uri", "status", "duration", "size"}
+	if len(logging.Include) != len(expectedInclude) {
+		t.Errorf("Expected %d default include fields, got %d", len(expectedInclude), len(logging.Include))
+	}
+	for i, field := range expectedInclude {
+		if i >= len(logging.Include) || logging.Include[i] != field {
+			t.Errorf("Expected include field %s at position %d, got %v", field, i, logging.Include)
+		}
+	}
+
+	// Test default exclude fields
+	expectedExclude := []string{"request>headers>Authorization", "request>headers>Cookie"}
+	if len(logging.Exclude) != len(expectedExclude) {
+		t.Errorf("Expected %d default exclude fields, got %d", len(expectedExclude), len(logging.Exclude))
+	}
+	for i, field := range expectedExclude {
+		if i >= len(logging.Exclude) || logging.Exclude[i] != field {
+			t.Errorf("Expected exclude field %s at position %d, got %v", field, i, logging.Exclude)
+		}
+	}
 }
 
 func TestValidateServerConfig(t *testing.T) {
@@ -411,6 +524,58 @@ func TestValidateServerConfig(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "valid config with Caddy logging",
+			config: &ServerConfig{
+				Server: ServerSettings{
+					ListenAddr: ":8443",
+					CertFile:   "/test/server.crt",
+					KeyFile:    "/test/server.key",
+					CAFile:     "/test/ca.crt",
+				},
+				API: APISettings{
+					ListenAddr: ":9443",
+				},
+				Caddy: CaddySettings{
+					AdminAPI: "http://localhost:2019",
+					Logging: CaddyLogging{
+						Enabled: true,
+						Level:   "INFO",
+						Format:  "json",
+						Output:  "stdout",
+						Include: []string{"ts", "request>method", "status"},
+						Exclude: []string{"request>headers>Authorization"},
+						Fields: map[string]interface{}{
+							"component": "test",
+						},
+						SamplingFirst:      100,
+						SamplingThereafter: 50,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid config with disabled Caddy logging",
+			config: &ServerConfig{
+				Server: ServerSettings{
+					ListenAddr: ":8443",
+					CertFile:   "/test/server.crt",
+					KeyFile:    "/test/server.key",
+					CAFile:     "/test/ca.crt",
+				},
+				API: APISettings{
+					ListenAddr: ":9443",
+				},
+				Caddy: CaddySettings{
+					AdminAPI: "http://localhost:2019",
+					Logging: CaddyLogging{
+						Enabled: false,
+					},
+				},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -495,6 +660,132 @@ func TestServerConfigRoundTrip(t *testing.T) {
 	}
 	if loadedConfig.HotReload.Enabled != originalConfig.HotReload.Enabled {
 		t.Errorf("HotReload.Enabled mismatch: got %v, want %v", loadedConfig.HotReload.Enabled, originalConfig.HotReload.Enabled)
+	}
+}
+
+// TestCaddyLoggingConfigRoundTrip tests that Caddy logging configuration survives save/load cycles
+func TestCaddyLoggingConfigRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "server.yaml")
+
+	originalConfig := &ServerConfig{
+		Server: ServerSettings{
+			ListenAddr: ":8443",
+			CertFile:   "/test/server.crt",
+			KeyFile:    "/test/server.key",
+			CAFile:     "/test/ca.crt",
+		},
+		API: APISettings{
+			ListenAddr: ":9443",
+		},
+		Caddy: CaddySettings{
+			AdminAPI:   "http://localhost:2019",
+			ConfigDir:  "/test/caddy",
+			StorageDir: "/test/storage",
+			Logging: CaddyLogging{
+				Enabled: true,
+				Level:   "DEBUG",
+				Format:  "json",
+				Output:  "/var/log/caddy-access.log",
+				Include: []string{
+					"ts",
+					"request>method",
+					"request>uri",
+					"request>host",
+					"request>remote_ip",
+					"status",
+					"duration",
+					"size",
+				},
+				Exclude: []string{
+					"request>headers>Authorization",
+					"request>headers>Cookie",
+					"request>body",
+				},
+				Fields: map[string]interface{}{
+					"component":   "caddy-proxy",
+					"environment": "test",
+					"version":     "1.0.0",
+				},
+				SamplingFirst:      100,
+				SamplingThereafter: 50,
+			},
+		},
+		LogLevel: "DEBUG",
+	}
+
+	// Save the config
+	if err := SaveServerConfig(configPath, originalConfig); err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Load it back
+	loadedConfig, err := LoadServerConfig(configPath)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Compare Caddy logging configuration
+	originalLogging := originalConfig.Caddy.Logging
+	loadedLogging := loadedConfig.Caddy.Logging
+
+	if loadedLogging.Enabled != originalLogging.Enabled {
+		t.Errorf("Logging.Enabled mismatch: got %v, want %v", loadedLogging.Enabled, originalLogging.Enabled)
+	}
+	if loadedLogging.Level != originalLogging.Level {
+		t.Errorf("Logging.Level mismatch: got %s, want %s", loadedLogging.Level, originalLogging.Level)
+	}
+	if loadedLogging.Format != originalLogging.Format {
+		t.Errorf("Logging.Format mismatch: got %s, want %s", loadedLogging.Format, originalLogging.Format)
+	}
+	if loadedLogging.Output != originalLogging.Output {
+		t.Errorf("Logging.Output mismatch: got %s, want %s", loadedLogging.Output, originalLogging.Output)
+	}
+
+	// Compare include fields
+	if len(loadedLogging.Include) != len(originalLogging.Include) {
+		t.Errorf("Include fields length mismatch: got %d, want %d", len(loadedLogging.Include), len(originalLogging.Include))
+	} else {
+		for i, field := range originalLogging.Include {
+			if loadedLogging.Include[i] != field {
+				t.Errorf("Include field %d mismatch: got %s, want %s", i, loadedLogging.Include[i], field)
+			}
+		}
+	}
+
+	// Compare exclude fields
+	if len(loadedLogging.Exclude) != len(originalLogging.Exclude) {
+		t.Errorf("Exclude fields length mismatch: got %d, want %d", len(loadedLogging.Exclude), len(originalLogging.Exclude))
+	} else {
+		for i, field := range originalLogging.Exclude {
+			if loadedLogging.Exclude[i] != field {
+				t.Errorf("Exclude field %d mismatch: got %s, want %s", i, loadedLogging.Exclude[i], field)
+			}
+		}
+	}
+
+	// Compare custom fields
+	if len(loadedLogging.Fields) != len(originalLogging.Fields) {
+		t.Errorf("Custom fields length mismatch: got %d, want %d", len(loadedLogging.Fields), len(originalLogging.Fields))
+	} else {
+		for key, originalValue := range originalLogging.Fields {
+			loadedValue, exists := loadedLogging.Fields[key]
+			if !exists {
+				t.Errorf("Custom field %s missing in loaded config", key)
+				continue
+			}
+			if loadedValue != originalValue {
+				t.Errorf("Custom field %s mismatch: got %v, want %v", key, loadedValue, originalValue)
+			}
+		}
+	}
+
+	// Compare sampling configuration
+	if loadedLogging.SamplingFirst != originalLogging.SamplingFirst {
+		t.Errorf("SamplingFirst mismatch: got %d, want %d", loadedLogging.SamplingFirst, originalLogging.SamplingFirst)
+	}
+	if loadedLogging.SamplingThereafter != originalLogging.SamplingThereafter {
+		t.Errorf("SamplingThereafter mismatch: got %d, want %d", loadedLogging.SamplingThereafter, originalLogging.SamplingThereafter)
 	}
 }
 

@@ -1,0 +1,53 @@
+# Debug Caddy Configuration
+# This config will help us see what's happening with access logs
+
+# Log level configuration
+log_level: "DEBUG" # Increase to DEBUG for more visibility
+
+# Core server settings
+server:
+  listen_addr: ":8443"
+  cert_file: "/config/certs/server.crt"
+  key_file: "/config/certs/server.key"
+  ca_file: "/config/certs/ca.crt"
+
+# API server settings
+api:
+  listen_addr: "localhost:9443"
+
+# Caddy reverse proxy settings
+caddy:
+  admin_api: "http://localhost:2019"
+  config_dir: "/config/caddy"
+  storage_dir: "/config/caddy/storage"
+
+  logging:
+    enabled: true
+    level: "DEBUG" # Set to DEBUG to see all logs
+    format: "console" # Use console format for easier reading
+    output: "stdout"
+
+    # Include ALL fields to see what's happening
+    include:
+      - "ts"
+      - "level"
+      - "msg"
+      - "logger"
+      - "request>method"
+      - "request>uri"
+      - "request>host"
+      - "request>remote_ip"
+      - "request>remote_port"
+      - "request>proto"
+      - "status"
+      - "duration"
+      - "size"
+      - "resp_headers"
+      - "common_log"
+
+    # Don't exclude anything for debugging
+    exclude: []
+
+    fields:
+      debug: "true"
+      component: "caddy-debug"

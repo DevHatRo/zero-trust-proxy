@@ -13,6 +13,8 @@ This directory contains ready-to-use configuration examples and deployment files
 - **[`server-config.yaml`](server-config.yaml)** - Complete server configuration with detailed comments
 - **[`agent-config.yaml`](agent-config.yaml)** - Basic agent configuration with multiple service examples
 - **[`agent-homelab-config.yaml`](agent-homelab-config.yaml)** - Production homelab configuration with real services
+- **[`server-logging-config.yaml`](server-logging-config.yaml)** - Comprehensive Caddy logging configuration for production
+- **[`server-logging-simple.yaml`](server-logging-simple.yaml)** - Simple Caddy logging setup for development
 
 ### 🔧 **Legacy Examples** (from existing configs)
 - **[`agent-hot-reload-config.yaml`](agent-hot-reload-config.yaml)** - Hot reload configuration example
@@ -85,6 +87,91 @@ server:
 
 api:
   listen_addr: "localhost:9443"          # Keep as localhost for security
+
+# Optional: Configure Caddy logging
+caddy:
+  admin_api: "http://localhost:2019"
+  logging:
+    enabled: true
+    level: "INFO"                        # DEBUG, INFO, WARN, ERROR
+    format: "console"                    # json, console, single_field
+    output: "stdout"                     # stdout, stderr, or file path
+```
+
+### **Caddy Logging Configuration**
+
+The Zero Trust Proxy now supports comprehensive Caddy logging configuration. Use [`server-logging-config.yaml`](server-logging-config.yaml) for production or [`server-logging-simple.yaml`](server-logging-simple.yaml) for development.
+
+#### **Development Setup (Simple)**
+```yaml
+caddy:
+  logging:
+    enabled: true
+    level: "INFO"
+    format: "console"      # Easy to read in terminal
+    output: "stdout"       # Output to Docker logs
+    
+    include:               # Basic fields to log
+      - "status"
+      - "method" 
+      - "uri"
+      - "duration"
+    
+    exclude:               # Exclude sensitive data
+      - "request>headers>Authorization"
+      - "request>headers>Cookie"
+```
+
+#### **Production Setup (Comprehensive)**
+```yaml
+caddy:
+  logging:
+    enabled: true
+    level: "INFO"
+    format: "json"                          # Structured logging
+    output: "/var/log/caddy-access.log"     # Persistent file logging
+    
+    include:                                # Detailed request tracking
+      - "user_id"
+      - "duration"
+      - "size"
+      - "status"
+      - "method"
+      - "uri"
+      - "host"
+      - "request>remote_ip"
+      - "request>headers>User-Agent"
+      - "common_log"
+    
+    exclude:                                # Security: exclude sensitive data
+      - "request>headers>Authorization"
+      - "request>headers>Cookie"
+      - "request>headers>X-API-Key"
+      - "request>body"
+      - "resp_headers>Set-Cookie"
+    
+    fields:                                 # Custom context fields
+      component: "zero-trust-caddy-proxy"
+      environment: "production"
+      version: "1.0.0"
+    
+    # Optional: Log sampling for high traffic
+    sampling_first: 100
+    sampling_thereafter: 50
+```
+
+#### **Hot Reload Support**
+
+Caddy logging configuration supports hot reload - changes to logging settings are applied without server restart:
+
+```bash
+# Edit your server configuration
+nano config/server.yaml
+
+# The logging configuration will be automatically updated
+# Check logs for confirmation:
+# "Caddy logging configuration changed, updating Caddy config..."
+# "Caddy logging configuration updated successfully"
 ```
 
 ### **Agent Configuration**
