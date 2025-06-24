@@ -1,7 +1,13 @@
 # Enhanced Agent Configuration
 # Supports multiple services, advanced routing, middleware, and Caddy-style features
 
-# Log level configuration
+# Zero Trust Proxy agent logging configuration
+logging:
+  level: "INFO" # DEBUG, INFO, WARN, ERROR, FATAL
+  format: "console" # console, json
+  output: "stdout" # stdout, stderr, or file path
+
+# Legacy log level (deprecated - use logging.level instead)
 log_level: "INFO"
 
 # Global agent settings
@@ -29,7 +35,7 @@ services:
       - address: "http://traefik:80"
     routes:
       - match:
-          path: "/*"  # Match ALL paths, not just root
+          path: "/*" # Match ALL paths, not just root
         handle:
           - type: "reverse_proxy"
 
@@ -38,12 +44,12 @@ services:
     hosts:
       - assistant.local.example.com
     protocol: "http"
-    websocket: true  # Enable WebSocket for real-time features
+    websocket: true # Enable WebSocket for real-time features
     upstreams:
       - address: "http://172.30.10.120:8123"
     routes:
       - match:
-          path: "/*"  # Match ALL paths, not just root
+          path: "/*" # Match ALL paths, not just root
         handle:
           - type: "reverse_proxy"
 
@@ -52,12 +58,12 @@ services:
     hosts:
       - pihole.local.example.com
     protocol: "http"
-    websocket: true  # Enable WebSocket for real-time graphs
+    websocket: true # Enable WebSocket for real-time graphs
     upstreams:
       - address: "http://172.30.13.254:80"
     routes:
       - match:
-          path: "/*"  # Match ALL paths, not just root
+          path: "/*" # Match ALL paths, not just root
         handle:
           - type: "reverse_proxy"
 
@@ -69,12 +75,12 @@ services:
       - file.local.example.com
       - photo.local.example.com
     protocol: "https"
-    websocket: true  # Enable WebSocket for real-time features
+    websocket: true # Enable WebSocket for real-time features
     upstreams:
       - address: "https://172.23.0.1:443"
     routes:
       - match:
-          path: "/*"  # Match ALL paths, not just root
+          path: "/*" # Match ALL paths, not just root
         handle:
           - type: "reverse_proxy"
 

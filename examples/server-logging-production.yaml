@@ -1,0 +1,78 @@
+# Zero Trust Proxy Server Configuration - Production Setup
+# This configuration uses JSON logging for both application and Caddy logs
+# Suitable for production environments with log aggregation systems
+
+server:
+  listen_addr: ":8443"
+  cert_file: "/config/certs/server.crt"
+  key_file: "/config/certs/server.key"
+  ca_file: "/config/certs/ca.crt"
+
+api:
+  listen_addr: ":9443"
+
+# Zero Trust Proxy Application Logging (JSON for structured logs)
+logging:
+  level: "INFO" # Production log level
+  format: "json" # JSON format for log aggregation (ELK, Grafana, etc.)
+  output: "/var/log/zero-trust-proxy/app.log" # Log to file for log rotation
+
+# Caddy Configuration
+caddy:
+  admin_api: "http://localhost:2019"
+  config_dir: "/config/caddy"
+  storage_dir: "/config/caddy/storage"
+
+  # Caddy Logging (JSON for access log analysis)
+  logging:
+    enabled: true
+    level: "INFO"
+    format: "json" # JSON format for log parsing
+    output: "/var/log/zero-trust-proxy/access.log" # Separate access log file
+
+    # Comprehensive access log fields for monitoring and analytics
+    include:
+      - "ts" # Timestamp (essential for log analysis)
+      - "request>method" # HTTP method
+      - "request>uri" # Full URI with query parameters
+      - "request>host" # Requested hostname
+      - "request>remote_ip" # Client IP (for geo-analytics)
+      - "request>remote_port" # Client port
+      - "request>proto" # HTTP protocol version
+      - "request>headers>User-Agent" # User agent (for analytics)
+      - "request>headers>Referer" # Referer header
+      - "request>headers>X-Forwarded-For" # Real client IP if behind proxy
+      - "request>headers>X-Real-IP" # Alternative real IP header
+      - "status" # HTTP response status
+      - "error" # Error message if any
+      - "duration" # Request processing time
+      - "size" # Response size in bytes
+      - "resp_headers>Content-Type" # Response content type
+      - "resp_headers>Cache-Control" # Cache headers for optimization analysis
+
+    # Security: exclude sensitive headers
+    exclude:
+      - "request>headers>Authorization" # Authentication tokens
+      - "request>headers>Cookie" # Session cookies
+      - "request>headers>X-Api-Key" # API keys
+      - "request>headers>X-Auth-Token" # Auth tokens
+      - "request>body" # Request body (may contain sensitive data)
+
+    # Production metadata for all logs
+    fields:
+      service: "caddy-reverse-proxy"
+      component: "access-log"
+      environment: "production"
+      version: "2.7.6"
+      datacenter: "us-east-1"
+      cluster: "prod-cluster"
+
+    # Log sampling for high-traffic production environments
+    sampling_first: 1000 # Log first 1000 requests normally
+    sampling_thereafter: 50 # Then log every 50th request
+
+# Hot reload for production (careful with file watching in containers)
+hot_reload:
+  enabled: true
+  watch_config: true
+  watch_certs: true

@@ -147,9 +147,7 @@ log_level: "INFO"
 				if len(logging.Exclude) != 2 {
 					t.Errorf("Expected 2 exclude fields, got %d", len(logging.Exclude))
 				}
-				if len(logging.Fields) != 2 {
-					t.Errorf("Expected 2 custom fields, got %d", len(logging.Fields))
-				}
+
 				if logging.SamplingFirst != 100 {
 					t.Errorf("Expected sampling_first 100, got %d", logging.SamplingFirst)
 				}
@@ -356,67 +354,38 @@ func TestCreateDefaultServerConfig(t *testing.T) {
 
 	// Test default values
 	if config.Server.ListenAddr != ":8443" {
-		t.Errorf("Expected default ListenAddr :8443, got %s", config.Server.ListenAddr)
+		t.Errorf("Expected listen addr :8443, got %s", config.Server.ListenAddr)
 	}
 
 	if config.API.ListenAddr != ":9443" {
-		t.Errorf("Expected default API ListenAddr :9443, got %s", config.API.ListenAddr)
+		t.Errorf("Expected API listen addr :9443, got %s", config.API.ListenAddr)
 	}
 
-	if config.Caddy.AdminAPI != "http://localhost:2019" {
-		t.Errorf("Expected default AdminAPI http://localhost:2019, got %s", config.Caddy.AdminAPI)
+	// Test application logging defaults
+	if config.Logging.Level != "INFO" {
+		t.Errorf("Expected logging level INFO, got %s", config.Logging.Level)
 	}
 
+	if config.Logging.Format != "console" {
+		t.Errorf("Expected logging format console, got %s", config.Logging.Format)
+	}
+
+	if config.Logging.Output != "stdout" {
+		t.Errorf("Expected logging output stdout, got %s", config.Logging.Output)
+	}
+
+	// Test Caddy logging defaults
+	if !config.Caddy.Logging.Enabled {
+		t.Error("Expected Caddy logging to be enabled by default")
+	}
+
+	if config.Caddy.Logging.Level != "INFO" {
+		t.Errorf("Expected Caddy logging level INFO, got %s", config.Caddy.Logging.Level)
+	}
+
+	// Test legacy log level (deprecated)
 	if config.LogLevel != "INFO" {
-		t.Errorf("Expected default LogLevel INFO, got %s", config.LogLevel)
-	}
-
-	// Test certificate paths are set
-	if config.Server.CertFile == "" {
-		t.Error("Expected CertFile to be set")
-	}
-	if config.Server.KeyFile == "" {
-		t.Error("Expected KeyFile to be set")
-	}
-	if config.Server.CAFile == "" {
-		t.Error("Expected CAFile to be set")
-	}
-
-	// Test default Caddy logging configuration
-	logging := config.Caddy.Logging
-	if !logging.Enabled {
-		t.Error("Expected default Caddy logging to be enabled")
-	}
-	if logging.Level != "INFO" {
-		t.Errorf("Expected default logging level INFO, got %s", logging.Level)
-	}
-	if logging.Format != "console" {
-		t.Errorf("Expected default logging format console, got %s", logging.Format)
-	}
-	if logging.Output != "stdout" {
-		t.Errorf("Expected default logging output stdout, got %s", logging.Output)
-	}
-
-	// Test default include fields
-	expectedInclude := []string{"ts", "request>method", "request>uri", "status", "duration", "size"}
-	if len(logging.Include) != len(expectedInclude) {
-		t.Errorf("Expected %d default include fields, got %d", len(expectedInclude), len(logging.Include))
-	}
-	for i, field := range expectedInclude {
-		if i >= len(logging.Include) || logging.Include[i] != field {
-			t.Errorf("Expected include field %s at position %d, got %v", field, i, logging.Include)
-		}
-	}
-
-	// Test default exclude fields
-	expectedExclude := []string{"request>headers>Authorization", "request>headers>Cookie"}
-	if len(logging.Exclude) != len(expectedExclude) {
-		t.Errorf("Expected %d default exclude fields, got %d", len(expectedExclude), len(logging.Exclude))
-	}
-	for i, field := range expectedExclude {
-		if i >= len(logging.Exclude) || logging.Exclude[i] != field {
-			t.Errorf("Expected exclude field %s at position %d, got %v", field, i, logging.Exclude)
-		}
+		t.Errorf("Expected legacy log level INFO, got %s", config.LogLevel)
 	}
 }
 
@@ -545,9 +514,7 @@ func TestValidateServerConfig(t *testing.T) {
 						Output:  "stdout",
 						Include: []string{"ts", "request>method", "status"},
 						Exclude: []string{"request>headers>Authorization"},
-						Fields: map[string]interface{}{
-							"component": "test",
-						},
+
 						SamplingFirst:      100,
 						SamplingThereafter: 50,
 					},
@@ -702,11 +669,6 @@ func TestCaddyLoggingConfigRoundTrip(t *testing.T) {
 					"request>headers>Cookie",
 					"request>body",
 				},
-				Fields: map[string]interface{}{
-					"component":   "caddy-proxy",
-					"environment": "test",
-					"version":     "1.0.0",
-				},
 				SamplingFirst:      100,
 				SamplingThereafter: 50,
 			},
@@ -764,22 +726,6 @@ func TestCaddyLoggingConfigRoundTrip(t *testing.T) {
 		}
 	}
 
-	// Compare custom fields
-	if len(loadedLogging.Fields) != len(originalLogging.Fields) {
-		t.Errorf("Custom fields length mismatch: got %d, want %d", len(loadedLogging.Fields), len(originalLogging.Fields))
-	} else {
-		for key, originalValue := range originalLogging.Fields {
-			loadedValue, exists := loadedLogging.Fields[key]
-			if !exists {
-				t.Errorf("Custom field %s missing in loaded config", key)
-				continue
-			}
-			if loadedValue != originalValue {
-				t.Errorf("Custom field %s mismatch: got %v, want %v", key, loadedValue, originalValue)
-			}
-		}
-	}
-
 	// Compare sampling configuration
 	if loadedLogging.SamplingFirst != originalLogging.SamplingFirst {
 		t.Errorf("SamplingFirst mismatch: got %d, want %d", loadedLogging.SamplingFirst, originalLogging.SamplingFirst)
@@ -821,4 +767,176 @@ func BenchmarkSaveServerConfig(b *testing.B) {
 		}
 		os.Remove(configPath) // Clean up for next iteration
 	}
+}
+
+// TestApplicationLoggingConfig tests the application logging configuration
+func TestApplicationLoggingConfig(t *testing.T) {
+	config := &ServerConfig{
+		Server: ServerSettings{
+			ListenAddr: ":8443",
+			CertFile:   "/test/server.crt",
+			KeyFile:    "/test/server.key",
+			CAFile:     "/test/ca.crt",
+		},
+		API: APISettings{
+			ListenAddr: ":9443",
+		},
+		Logging: LoggingConfig{
+			Level:  "DEBUG",
+			Format: "json",
+			Output: "stderr",
+		},
+		Caddy: CaddySettings{
+			AdminAPI: "http://localhost:2019",
+		},
+	}
+
+	// Validate the configuration
+	err := validateServerConfig(config)
+	if err != nil {
+		t.Fatalf("Configuration validation failed: %v", err)
+	}
+
+	// Test that values are preserved
+	if config.Logging.Level != "DEBUG" {
+		t.Errorf("Expected logging level DEBUG, got %s", config.Logging.Level)
+	}
+
+	if config.Logging.Format != "json" {
+		t.Errorf("Expected logging format json, got %s", config.Logging.Format)
+	}
+
+	if config.Logging.Output != "stderr" {
+		t.Errorf("Expected logging output stderr, got %s", config.Logging.Output)
+	}
+}
+
+// TestLoggingConfigDefaults tests that defaults are applied correctly
+func TestLoggingConfigDefaults(t *testing.T) {
+	config := &ServerConfig{
+		Server: ServerSettings{
+			ListenAddr: ":8443",
+			CertFile:   "/test/server.crt",
+			KeyFile:    "/test/server.key",
+			CAFile:     "/test/ca.crt",
+		},
+		API: APISettings{
+			ListenAddr: ":9443",
+		},
+		// Logging config intentionally empty to test defaults
+		Logging: LoggingConfig{},
+		Caddy: CaddySettings{
+			AdminAPI: "http://localhost:2019",
+		},
+	}
+
+	// Validate the configuration (this should apply defaults)
+	err := validateServerConfig(config)
+	if err != nil {
+		t.Fatalf("Configuration validation failed: %v", err)
+	}
+
+	// Test that defaults were applied
+	if config.Logging.Level != "INFO" {
+		t.Errorf("Expected default logging level INFO, got %s", config.Logging.Level)
+	}
+
+	if config.Logging.Format != "console" {
+		t.Errorf("Expected default logging format console, got %s", config.Logging.Format)
+	}
+
+	if config.Logging.Output != "stdout" {
+		t.Errorf("Expected default logging output stdout, got %s", config.Logging.Output)
+	}
+}
+
+// TestLegacyLogLevelCompatibility tests backward compatibility with legacy log_level
+func TestLegacyLogLevelCompatibility(t *testing.T) {
+	config := &ServerConfig{
+		Server: ServerSettings{
+			ListenAddr: ":8443",
+			CertFile:   "/test/server.crt",
+			KeyFile:    "/test/server.key",
+			CAFile:     "/test/ca.crt",
+		},
+		API: APISettings{
+			ListenAddr: ":9443",
+		},
+		Logging: LoggingConfig{
+			// Level intentionally empty to test legacy fallback
+		},
+		Caddy: CaddySettings{
+			AdminAPI: "http://localhost:2019",
+		},
+		LogLevel: "WARN", // Legacy log level
+	}
+
+	// Validate the configuration
+	err := validateServerConfig(config)
+	if err != nil {
+		t.Fatalf("Configuration validation failed: %v", err)
+	}
+
+	// Test that legacy log level is used when new logging.level is empty
+	if config.Logging.Level != "WARN" {
+		t.Errorf("Expected logging level from legacy config WARN, got %s", config.Logging.Level)
+	}
+}
+
+// TestLoggingConfigRoundTrip tests saving and loading configuration with logging
+func TestLoggingConfigRoundTrip(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "test-logging-config.yaml")
+
+	originalConfig := &ServerConfig{
+		Server: ServerSettings{
+			ListenAddr: ":8443",
+			CertFile:   "/test/server.crt",
+			KeyFile:    "/test/server.key",
+			CAFile:     "/test/ca.crt",
+		},
+		API: APISettings{
+			ListenAddr: ":9443",
+		},
+		Logging: LoggingConfig{
+			Level:  "DEBUG",
+			Format: "json",
+			Output: "/var/log/app.log",
+		},
+		Caddy: CaddySettings{
+			AdminAPI: "http://localhost:2019",
+			Logging: CaddyLogging{
+				Enabled: true,
+				Level:   "WARN",
+				Format:  "json",
+			},
+		},
+	}
+
+	// Save the configuration
+	err := SaveServerConfig(configPath, originalConfig)
+	if err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Load the configuration
+	loadedConfig, err := LoadServerConfig(configPath)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Compare application logging settings
+	if loadedConfig.Logging.Level != originalConfig.Logging.Level {
+		t.Errorf("Logging level mismatch: expected %s, got %s", originalConfig.Logging.Level, loadedConfig.Logging.Level)
+	}
+
+	if loadedConfig.Logging.Format != originalConfig.Logging.Format {
+		t.Errorf("Logging format mismatch: expected %s, got %s", originalConfig.Logging.Format, loadedConfig.Logging.Format)
+	}
+
+	if loadedConfig.Logging.Output != originalConfig.Logging.Output {
+		t.Errorf("Logging output mismatch: expected %s, got %s", originalConfig.Logging.Output, loadedConfig.Logging.Output)
+	}
+
+	// Note: Fields functionality has been removed
 }

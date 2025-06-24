@@ -19,6 +19,9 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/types"
 )
 
+// Component-specific logger for agent
+var log = logger.WithComponent("agent")
+
 // Message types
 const (
 	MessageTypePing  = "ping"
@@ -211,10 +214,32 @@ func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config, validator ty
 		caddyValidator:      validator,
 	}
 
+	// Apply logging configuration from config
+	applyLoggingConfig(config.Logging)
+
 	// Store config path in config object for hot reload
 	config.ConfigPath = config.ConfigPath
 
 	return agent
+}
+
+// applyLoggingConfig applies the logging configuration to the logger package
+func applyLoggingConfig(config LoggingConfig) {
+	// Set log level
+	if config.Level != "" {
+		logger.SetLogLevel(config.Level)
+	}
+
+	// Set format
+	if config.Format != "" {
+		logger.SetFormat(config.Format)
+	}
+
+	// Note: Output redirection to files would require more complex implementation
+	// For now, we support stdout/stderr via the default logger output
+	if config.Output != "" && config.Output != "stdout" && config.Output != "stderr" {
+		log.Warn("File output for application logging not yet implemented, using stdout")
+	}
 }
 
 // convertCommonToTypes converts common.ServiceConfig to types.ServiceConfig
@@ -238,7 +263,7 @@ func convertTypesToCommon(config *types.ServiceConfig) *common.ServiceConfig {
 
 // Connect establishes a connection to the server
 func (a *Agent) Connect() error {
-	logger.Info("🔌 Connecting to server at %s", a.serverAddr)
+	log.Info("🔌 Connecting to server at %s", a.serverAddr)
 
 	// Reset connection state for new connection
 	a.resetConnectionState()
@@ -253,7 +278,7 @@ func (a *Agent) Connect() error {
 	a.encoder = json.NewEncoder(conn)
 	a.decoder = json.NewDecoder(conn)
 
-	logger.Info("🔌 Connected to server at %s", a.serverAddr)
+	log.Info("🔌 Connected to server at %s", a.serverAddr)
 
 	// Start message handling goroutine
 	go a.handleMessages()
@@ -264,7 +289,7 @@ func (a *Agent) Connect() error {
 		ID:   a.id,
 	}
 
-	logger.Info("📋 Registering agent with server...")
+	log.Info("📋 Registering agent with server...")
 	if err := a.SendMessage(registerMsg); err != nil {
 		// Clean up connection on registration failure with proper locking
 		a.writeMu.Lock()
@@ -281,7 +306,7 @@ func (a *Agent) Connect() error {
 	// Wait for registration acknowledgment
 	select {
 	case <-a.registerCh:
-		logger.Info("✅ Successfully registered with server")
+		log.Info("✅ Successfully registered with server")
 		// Initialize last successful heartbeat timestamp for successful connection
 		a.mu.Lock()
 		a.lastPong = time.Now()
@@ -307,7 +332,7 @@ func (a *Agent) handleMessages() {
 	defer func() {
 		// Recover from any panics to prevent crashing the entire application
 		if r := recover(); r != nil {
-			logger.Error("🚨 Panic in message handler: %v", r)
+			log.Error("🚨 Panic in message handler: %v", r)
 			// Trigger reconnection after panic
 			a.signalConnectionBroken()
 			a.cleanupAllWebSocketConnections()
@@ -316,7 +341,7 @@ func (a *Agent) handleMessages() {
 			a.mu.Unlock()
 			a.attemptReconnection("message-handler-panic")
 		}
-		logger.Debug("🛑 Message handler exiting")
+		log.Debug("🛑 Message handler exiting")
 	}()
 
 	for {
@@ -328,7 +353,7 @@ func (a *Agent) handleMessages() {
 		// Check if decoder is nil before attempting to use it
 		if a.decoder == nil {
 			a.readMu.Unlock()
-			logger.Debug("🔌 Decoder is nil, connection likely closed - exiting message handler")
+			log.Debug("🔌 Decoder is nil, connection likely closed - exiting message handler")
 			return
 		}
 
@@ -337,7 +362,7 @@ func (a *Agent) handleMessages() {
 
 		if err != nil {
 			if err == io.EOF {
-				logger.Error("💔 Connection closed by server")
+				log.Error("💔 Connection closed by server")
 
 				// Signal connection broken and clean up
 				a.signalConnectionBroken()
@@ -359,7 +384,7 @@ func (a *Agent) handleMessages() {
 				strings.Contains(err.Error(), "connection reset") ||
 				strings.Contains(err.Error(), "connection refused") ||
 				strings.Contains(err.Error(), "use of closed network connection") {
-				logger.Error("💔 Connection broken: %v", err)
+				log.Error("💔 Connection broken: %v", err)
 
 				// Signal connection broken and clean up
 				a.signalConnectionBroken()
@@ -376,7 +401,7 @@ func (a *Agent) handleMessages() {
 				return
 			}
 
-			logger.Error("❌ Failed to decode message: %v", err)
+			log.Error("❌ Failed to decode message: %v", err)
 			continue
 		}
 
@@ -390,10 +415,10 @@ func (a *Agent) handleMessages() {
 			timeout := a.getAdaptiveTimeout("register", 5*time.Second)
 			select {
 			case a.registerCh <- &msg:
-				logger.Debug("📨 Register response sent to channel, buffer usage: %d/%d", len(a.registerCh), cap(a.registerCh))
+				log.Debug("📨 Register response sent to channel, buffer usage: %d/%d", len(a.registerCh), cap(a.registerCh))
 				a.trackChannelPressure("register", true)
 			case <-time.After(timeout):
-				logger.Error("⚠️  Timeout sending register response to channel, buffer full: %d/%d", len(a.registerCh), cap(a.registerCh))
+				log.Error("⚠️  Timeout sending register response to channel, buffer full: %d/%d", len(a.registerCh), cap(a.registerCh))
 				a.trackChannelPressure("register", false)
 			}
 		case "pong":
@@ -405,11 +430,11 @@ func (a *Agent) handleMessages() {
 			select {
 			case a.pongCh <- &msg:
 				if len(a.pongCh) > cap(a.pongCh)*3/4 { // Log when 75% full
-					logger.Debug("📈 Pong channel usage high: %d/%d", len(a.pongCh), cap(a.pongCh))
+					log.Debug("📈 Pong channel usage high: %d/%d", len(a.pongCh), cap(a.pongCh))
 				}
 				a.trackChannelPressure("pong", true)
 			case <-time.After(timeout):
-				logger.Error("⚠️  Timeout sending pong to channel, buffer full: %d/%d", len(a.pongCh), cap(a.pongCh))
+				log.Error("⚠️  Timeout sending pong to channel, buffer full: %d/%d", len(a.pongCh), cap(a.pongCh))
 				a.trackChannelPressure("pong", false)
 			}
 		case "service_add_response", "service_update_response", "service_remove_response":
@@ -418,11 +443,11 @@ func (a *Agent) handleMessages() {
 			select {
 			case a.serviceRespCh <- &msg:
 				if len(a.serviceRespCh) > cap(a.serviceRespCh)*3/4 { // Log when 75% full
-					logger.Debug("📈 Service response channel usage high: %d/%d", len(a.serviceRespCh), cap(a.serviceRespCh))
+					log.Debug("📈 Service response channel usage high: %d/%d", len(a.serviceRespCh), cap(a.serviceRespCh))
 				}
 				a.trackChannelPressure("service", true)
 			case <-time.After(timeout):
-				logger.Error("⚠️  Timeout sending service response to channel, buffer full: %d/%d", len(a.serviceRespCh), cap(a.serviceRespCh))
+				log.Error("⚠️  Timeout sending service response to channel, buffer full: %d/%d", len(a.serviceRespCh), cap(a.serviceRespCh))
 				a.trackChannelPressure("service", false)
 			}
 		case "http_response_ack":
@@ -436,7 +461,7 @@ func (a *Agent) handleMessages() {
 				ID:   msg.ID,
 			}
 			if err := a.SendMessage(pong); err != nil {
-				logger.Error("❌ Failed to send pong response: %v", err)
+				log.Error("❌ Failed to send pong response: %v", err)
 			}
 		case "websocket_frame":
 			// Handle WebSocket frame from client to backend
@@ -445,7 +470,7 @@ func (a *Agent) handleMessages() {
 			// Handle notification that client disconnected from server
 			go a.handleWebSocketDisconnect(&msg)
 		default:
-			logger.Error("❓ Unknown message type: %s", msg.Type)
+			log.Error("❓ Unknown message type: %s", msg.Type)
 		}
 	}
 }
@@ -453,20 +478,20 @@ func (a *Agent) handleMessages() {
 // handleHTTPRequest handles an HTTP request from the server
 func (a *Agent) handleHTTPRequest(msg *common.Message) {
 	if msg.HTTP == nil {
-		logger.Error("❌ Received HTTP request without HTTP data")
+		log.Error("❌ Received HTTP request without HTTP data")
 		return
 	}
 
 	// Check if we have a connection to send responses
 	if a.conn == nil {
-		logger.Warn("⚠️  Received HTTP request but no server connection - triggering reconnection")
+		log.Warn("⚠️  Received HTTP request but no server connection - triggering reconnection")
 		a.attemptReconnection("http-request-no-connection")
 		return
 	}
 
 	// Extract host from headers
 	host := msg.HTTP.Headers["Host"][0]
-	logger.Info("🌐 Handling HTTP request for host: [%s]", host)
+	log.Info("🌐 Handling HTTP request for host: [%s]", host)
 
 	// Find service configuration
 	a.mu.RLock()
@@ -474,20 +499,20 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 	a.mu.RUnlock()
 
 	if !ok {
-		logger.Error("❌ No service configuration found for host: %s", host)
+		log.Error("❌ No service configuration found for host: %s", host)
 		return
 	}
 
 	// Check if this is a WebSocket upgrade request
 	isWebSocketUpgrade := a.isWebSocketUpgrade(msg.HTTP.Headers)
 	if isWebSocketUpgrade {
-		logger.Info("🔌 Detected WebSocket upgrade request for host: %s - using raw TCP relay approach", host)
+		log.Info("🔌 Detected WebSocket upgrade request for host: %s - using raw TCP relay approach", host)
 
 		// Debug: Log all headers received from client
-		logger.Debug("🔍 Headers received from client for WebSocket upgrade:")
+		log.Debug("🔍 Headers received from client for WebSocket upgrade:")
 		for key, values := range msg.HTTP.Headers {
 			for _, value := range values {
-				logger.Debug("  📋 %s: %s", key, value)
+				log.Debug("  📋 %s: %s", key, value)
 			}
 		}
 
@@ -508,7 +533,7 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 	if hasProtocol {
 		// Backend already has protocol, use as-is
 		url = fmt.Sprintf("%s%s", backend, msg.HTTP.URL)
-		logger.Debug("🔗 Backend includes protocol, using as-is: %s", backend)
+		log.Debug("🔗 Backend includes protocol, using as-is: %s", backend)
 	} else {
 		// Backend doesn't have protocol, determine from service config or default to http
 		protocol := "http"
@@ -516,16 +541,16 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 			protocol = "https"
 		}
 		url = fmt.Sprintf("%s://%s%s", protocol, backend, msg.HTTP.URL)
-		logger.Debug("🔗 Backend without protocol, using service protocol '%s': %s", protocol, backend)
+		log.Debug("🔗 Backend without protocol, using service protocol '%s': %s", protocol, backend)
 	}
 
-	logger.Debug("📤 Forwarding request to local service: %s", url)
-	logger.Debug("🏠 Original Host header: %s, Backend: %s", host, service.Backend)
+	log.Debug("📤 Forwarding request to local service: %s", url)
+	log.Debug("🏠 Original Host header: %s, Backend: %s", host, service.Backend)
 
 	// Create HTTP request to the backend service
 	req, err := http.NewRequest(msg.HTTP.Method, url, bytes.NewReader(msg.HTTP.Body))
 	if err != nil {
-		logger.Error("❌ Failed to create request: %v", err)
+		log.Error("❌ Failed to create request: %v", err)
 		return
 	}
 
@@ -543,9 +568,9 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 	// We MUST explicitly set req.Host to the original host for proper routing
 	if originalHost != "" {
 		req.Host = originalHost // This is the key fix!
-		logger.Info("✅ FIXED: Set req.Host to original host: %s (was: %s)", originalHost, req.URL.Host)
+		log.Info("✅ FIXED: Set req.Host to original host: %s (was: %s)", originalHost, req.URL.Host)
 	} else {
-		logger.Warn("⚠️  No original Host header found - this might cause routing issues")
+		log.Warn("⚠️  No original Host header found - this might cause routing issues")
 	}
 
 	// Configure reverse proxy headers
@@ -584,22 +609,22 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 
 		// Build X-Forwarded-For chain: client -> agent
 		req.Header.Set("X-Forwarded-For", clientIP)
-		logger.Debug("🌍 Set client IP headers: X-Real-IP=%s, X-Forwarded-For=%s", clientIP, clientIP)
+		log.Debug("🌍 Set client IP headers: X-Real-IP=%s, X-Forwarded-For=%s", clientIP, clientIP)
 	} else {
-		logger.Warn("⚠️  Could not determine client IP from headers")
+		log.Warn("⚠️  Could not determine client IP from headers")
 	}
 
 	// Add X-Forwarded-Server (this agent's identifier)
 	req.Header.Set("X-Forwarded-Server", fmt.Sprintf("zero-trust-agent-%s", a.id))
 
 	// Log the routing information
-	logger.Info("🚀 Request routing: URL=%s, Host=%s, Backend=%s", url, originalHost, service.Backend)
-	logger.Info("🔧 Added reverse proxy headers: X-Forwarded-Host=%s, X-Forwarded-Proto=https", originalHost)
+	log.Info("🚀 Request routing: URL=%s, Host=%s, Backend=%s", url, originalHost, service.Backend)
+	log.Info("🔧 Added reverse proxy headers: X-Forwarded-Host=%s, X-Forwarded-Proto=https", originalHost)
 
 	// Debug: Show all headers being sent to backend
-	logger.Debug("📋 Headers being sent to backend:")
+	log.Debug("📋 Headers being sent to backend:")
 	for key, values := range req.Header {
-		logger.Debug("  📎 %s: %v", key, values)
+		log.Debug("  📎 %s: %v", key, values)
 	}
 
 	// Determine if this might be a streaming operation based on request characteristics
@@ -621,7 +646,7 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 			InsecureSkipVerify: true, // Skip certificate verification for internal services
 		}
 		transport.TLSClientConfig = tlsConfig
-		logger.Debug("🔒 HTTPS request detected - configured to skip certificate verification for internal service")
+		log.Debug("🔒 HTTPS request detected - configured to skip certificate verification for internal service")
 	}
 
 	// Always use unlimited timeout and let the actual response characteristics decide streaming
@@ -631,15 +656,15 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 	}
 
 	if mightBeStream {
-		logger.Debug("📡 Range request detected - likely large file transfer")
+		log.Debug("📡 Range request detected - likely large file transfer")
 	} else {
-		logger.Debug("⏱️  Using unlimited timeout with activity-based detection")
+		log.Debug("⏱️  Using unlimited timeout with activity-based detection")
 	}
 
 	// Make the request with appropriate timeout
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.Error("❌ Failed to forward request: %v", err)
+		log.Error("❌ Failed to forward request: %v", err)
 		return
 	}
 
@@ -649,7 +674,7 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 		if conn, err := net.Dial("tcp", req.URL.Host); err == nil {
 			agentIP := conn.LocalAddr().(*net.TCPAddr).IP.String()
 			conn.Close()
-			logger.Info("🔧 AGENT IP: %s (connecting to %s) ", agentIP, req.URL.Host)
+			log.Info("🔧 AGENT IP: %s (connecting to %s) ", agentIP, req.URL.Host)
 		}
 	}
 	defer resp.Body.Close()
@@ -659,33 +684,33 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 	contentType := resp.Header.Get("Content-Type")
 
 	// Debug logging for API responses
-	logger.Debug("📊 Response details: URL=%s, ContentLength=%d, ContentType=%s, Status=%d",
+	log.Debug("📊 Response details: URL=%s, ContentLength=%d, ContentType=%s, Status=%d",
 		req.URL.Path, contentLength, contentType, resp.StatusCode)
 
 	// If we underestimated and this is actually a large file, log it
 	if !mightBeStream && (contentLength > 1024*1024) {
-		logger.Debug("📈 Large response detected (%d bytes) - consider extending timeout for this URL pattern", contentLength)
+		log.Debug("📈 Large response detected (%d bytes) - consider extending timeout for this URL pattern", contentLength)
 	}
 
 	// Stream if content is large (>1MB) - content type doesn't matter with robust timeout system
 	shouldStream := contentLength > 1024*1024
 
-	logger.Debug("🎯 Streaming decision: shouldStream=%t, contentLength=%d, contentType=%s",
+	log.Debug("🎯 Streaming decision: shouldStream=%t, contentLength=%d, contentType=%s",
 		shouldStream, contentLength, contentType)
 
 	if shouldStream {
-		logger.Debug("📡 Streaming response for large file, reported size: %d bytes", contentLength)
+		log.Debug("📡 Streaming response for large file, reported size: %d bytes", contentLength)
 
 		// Handle unknown content length
 		if contentLength <= 0 {
 			contentLength = -1 // Normalize unknown size
-			logger.Debug("❓ Content length unknown, will determine actual size during streaming")
+			log.Debug("❓ Content length unknown, will determine actual size during streaming")
 		}
 
 		// Detect WebSocket upgrade response for streaming
 		isWebSocketUpgrade := resp.StatusCode == 101
 		if isWebSocketUpgrade {
-			logger.Info("✅ WebSocket upgrade response detected (101) for streaming host: %s", host)
+			log.Info("✅ WebSocket upgrade response detected (101) for streaming host: %s", host)
 		}
 
 		// Create timeout configuration for streaming operations
@@ -709,11 +734,11 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 		}
 
 		if err := a.SendMessage(initialMsg); err != nil {
-			logger.Error("❌ Failed to send initial streaming response: %v", err)
+			log.Error("❌ Failed to send initial streaming response: %v", err)
 			return
 		}
 
-		logger.Info("🚀 Started streaming response for request ID: %s", msg.ID)
+		log.Info("🚀 Started streaming response for request ID: %s", msg.ID)
 
 		// Stream the response body in chunks with dynamic timeouts
 		buffer := make([]byte, 32768) // 32KB buffer
@@ -766,7 +791,7 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 				}
 
 				if err := a.SendMessage(chunkMsg); err != nil {
-					logger.Error("❌ Failed to send chunk %d: %v", chunkIndex, err)
+					log.Error("❌ Failed to send chunk %d: %v", chunkIndex, err)
 					return
 				}
 
@@ -777,7 +802,7 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 					if contentLength > 0 {
 						progress = float64(totalSent) / float64(contentLength) * 100
 					}
-					logger.Info("📊 Transfer progress: %.1f%% (%d/%d bytes), elapsed: %v, timeout: %v",
+					log.Info("📊 Transfer progress: %.1f%% (%d/%d bytes), elapsed: %v, timeout: %v",
 						progress, totalSent, actualTotalSize, elapsed.Round(time.Second),
 						dynamicTimeout.Round(time.Second))
 					lastProgressLog = time.Now()
@@ -786,9 +811,9 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 				if isLastChunk {
 					// Log if actual size differs from reported size
 					if totalSent != contentLength {
-						logger.Info("📏 Streaming complete - actual size (%d bytes) differs from reported size (%d bytes)", totalSent, contentLength)
+						log.Info("📏 Streaming complete - actual size (%d bytes) differs from reported size (%d bytes)", totalSent, contentLength)
 					}
-					logger.Info("✅ Streaming complete for request ID: %s, total chunks: %d, actual size: %d bytes, transfer time: %v",
+					log.Info("✅ Streaming complete for request ID: %s, total chunks: %d, actual size: %d bytes, transfer time: %v",
 						msg.ID, chunkIndex, totalSent, time.Since(startTime).Round(time.Second))
 					break
 				}
@@ -797,7 +822,7 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 			if err == io.EOF {
 				// Handle EOF without data read in this iteration
 				if n == 0 {
-					logger.Debug("🔚 Reached EOF, streaming complete for request ID: %s", msg.ID)
+					log.Debug("🔚 Reached EOF, streaming complete for request ID: %s", msg.ID)
 					break
 				}
 			} else if err != nil {
@@ -805,10 +830,10 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 
 				timeSinceActivity := currentTime.Sub(lastActivityTime)
 				if timeSinceActivity > dynamicTimeout {
-					logger.Error("⏰ Activity timeout exceeded (%.1fs since last data) during streaming: %v",
+					log.Error("⏰ Activity timeout exceeded (%.1fs since last data) during streaming: %v",
 						timeSinceActivity.Seconds(), err)
 				} else {
-					logger.Error("❌ Error reading response body: %v", err)
+					log.Error("❌ Error reading response body: %v", err)
 				}
 				return
 			}
@@ -817,7 +842,7 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 			// Only timeout if no activity for longer than dynamic timeout
 			timeSinceActivity := currentTime.Sub(lastActivityTime)
 			if timeSinceActivity > dynamicTimeout {
-				logger.Error("💀 No activity for %.1fs (timeout: %.1fs) - connection appears dead",
+				log.Error("💀 No activity for %.1fs (timeout: %.1fs) - connection appears dead",
 					timeSinceActivity.Seconds(), dynamicTimeout.Seconds())
 				return
 			}
@@ -826,12 +851,12 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 		// Final completion log with statistics
 		elapsed := time.Since(startTime)
 		avgSpeed := float64(totalSent) / elapsed.Seconds() / (1024 * 1024) // MB/s
-		logger.Info("🏁 Stream completed: %d bytes in %v (%.2f MB/s avg)", totalSent, elapsed.Round(time.Second), avgSpeed)
+		log.Info("🏁 Stream completed: %d bytes in %v (%.2f MB/s avg)", totalSent, elapsed.Round(time.Second), avgSpeed)
 	} else {
 		// For small files, read everything into memory (original behavior)
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			logger.Error("❌ Failed to read response body: %v", err)
+			log.Error("❌ Failed to read response body: %v", err)
 			return
 		}
 
@@ -856,18 +881,18 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 
 		// Send response to server
 		if err := a.SendMessage(responseMsg); err != nil {
-			logger.Error("❌ Failed to send response: %v", err)
+			log.Error("❌ Failed to send response: %v", err)
 			return
 		}
 
-		logger.Debug("✅ HTTP response sent successfully for request ID: %s", msg.ID)
+		log.Debug("✅ HTTP response sent successfully for request ID: %s", msg.ID)
 	}
 }
 
 // handleWebSocketConnection handles WebSocket connections using raw TCP relay
 func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.ServiceConfig) {
 	host := msg.HTTP.Headers["Host"][0]
-	logger.Info("🔌 Starting WebSocket connection handler for %s", host)
+	log.Info("🔌 Starting WebSocket connection handler for %s", host)
 
 	// Cleanup stale connections before creating new ones
 	a.cleanupStaleConnections()
@@ -876,13 +901,13 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 	total, healthy, stale := a.wsManager.GetStats()
 	activeConnections := total
 
-	logger.Debug("📊 WebSocket connection stats: Active=%d, Healthy=%d, Stale=%d, New ID=%s",
+	log.Debug("📊 WebSocket connection stats: Active=%d, Healthy=%d, Stale=%d, New ID=%s",
 		activeConnections, healthy, stale, msg.ID[:8]+"...")
 
 	// Add small delay for rapid reconnections (page refresh scenarios)
 	// This helps prevent race conditions and allows proper cleanup
 	if activeConnections > 0 {
-		logger.Debug("⏰ Multiple WebSocket connections detected, adding 500ms delay to prevent race conditions")
+		log.Debug("⏰ Multiple WebSocket connections detected, adding 500ms delay to prevent race conditions")
 		time.Sleep(500 * time.Millisecond)
 
 		// Cleanup again after delay to ensure proper state
@@ -890,7 +915,7 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 
 		// Update connection count after cleanup
 		activeConnections = a.wsManager.GetConnectionCount()
-		logger.Debug("📊 After cleanup delay: Active=%d connections", activeConnections)
+		log.Debug("📊 After cleanup delay: Active=%d connections", activeConnections)
 	}
 
 	// Extract backend address
@@ -908,7 +933,7 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 		backendAddr = strings.TrimPrefix(backend, "wss://")
 	}
 
-	logger.Info("🔗 Connecting to WebSocket backend: %s", backendAddr)
+	log.Info("🔗 Connecting to WebSocket backend: %s", backendAddr)
 
 	// Determine if we need TLS based on the service protocol or backend address
 	shouldUseTLS := needsTLS(service, backendAddr)
@@ -918,7 +943,7 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 
 	if shouldUseTLS {
 		// Establish TLS connection for HTTPS/WSS backends
-		logger.Debug("🔒 Using TLS connection for HTTPS/WSS backend")
+		log.Debug("🔒 Using TLS connection for HTTPS/WSS backend")
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: true,                               // Skip verification for backends (like curl -k)
 			ServerName:         strings.Split(backendAddr, ":")[0], // Extract hostname
@@ -926,7 +951,7 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 		backendConn, err = tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", backendAddr, tlsConfig)
 	} else {
 		// Establish plain TCP connection for HTTP/WS backends
-		logger.Debug("🔓 Using plain TCP connection for HTTP/WS backend")
+		log.Debug("🔓 Using plain TCP connection for HTTP/WS backend")
 		backendConn, err = net.DialTimeout("tcp", backendAddr, 10*time.Second)
 	}
 
@@ -935,7 +960,7 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 		if shouldUseTLS {
 			connType = "TLS"
 		}
-		logger.Error("❌ Failed to connect to WebSocket backend %s using %s: %v", backendAddr, connType, err)
+		log.Error("❌ Failed to connect to WebSocket backend %s using %s: %v", backendAddr, connType, err)
 		// Send error response
 		errorResponse := &common.Message{
 			Type: "http_response",
@@ -953,51 +978,51 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 	}
 	defer backendConn.Close()
 
-	logger.Info("✅ Connected to WebSocket backend %s", backendAddr)
+	log.Info("✅ Connected to WebSocket backend %s", backendAddr)
 
 	// Build and send the HTTP upgrade request to backend
 	upgradeRequest := a.buildWebSocketUpgradeRequest(msg)
 
 	// Debug: Log the complete upgrade request being sent to backend
-	logger.Debug("📤 Sending WebSocket upgrade request to backend:")
-	logger.Debug("📄 --- Request Start ---")
-	logger.Debug("%s", upgradeRequest)
-	logger.Debug("📄 --- Request End ---")
+	log.Debug("📤 Sending WebSocket upgrade request to backend:")
+	log.Debug("📄 --- Request Start ---")
+	log.Debug("%s", upgradeRequest)
+	log.Debug("📄 --- Request End ---")
 
 	if _, err := backendConn.Write([]byte(upgradeRequest)); err != nil {
-		logger.Error("❌ Failed to send upgrade request to backend: %v", err)
+		log.Error("❌ Failed to send upgrade request to backend: %v", err)
 		return
 	}
 
-	logger.Debug("📤 Sent WebSocket upgrade request to backend")
+	log.Debug("📤 Sent WebSocket upgrade request to backend")
 
 	// Read the upgrade response from backend
 	buffer := make([]byte, 4096)
 	n, err := backendConn.Read(buffer)
 	if err != nil {
-		logger.Error("❌ Failed to read upgrade response from backend: %v", err)
+		log.Error("❌ Failed to read upgrade response from backend: %v", err)
 		return
 	}
 
 	response := string(buffer[:n])
-	logger.Info("📥 Backend WebSocket response: %s", strings.Split(response, "\r\n")[0])
+	log.Info("📥 Backend WebSocket response: %s", strings.Split(response, "\r\n")[0])
 
 	// Debug: Log the complete response for troubleshooting
-	logger.Debug("📥 Complete backend response:")
-	logger.Debug("📄 --- Response Start ---")
-	logger.Debug("%s", response)
-	logger.Debug("📄 --- Response End ---")
+	log.Debug("📥 Complete backend response:")
+	log.Debug("📄 --- Response Start ---")
+	log.Debug("%s", response)
+	log.Debug("📄 --- Response End ---")
 
 	// Check if upgrade was successful (101 status)
 	if !strings.Contains(response, "101 Switching Protocols") {
-		logger.Error("❌ Backend rejected WebSocket upgrade: %s", strings.Split(response, "\r\n")[0])
-		logger.Error("🔍 This means the backend service doesn't support WebSockets or has an issue")
+		log.Error("❌ Backend rejected WebSocket upgrade: %s", strings.Split(response, "\r\n")[0])
+		log.Error("🔍 This means the backend service doesn't support WebSockets or has an issue")
 		// Forward the error response to client
 		a.sendRawHTTPResponse(msg.ID, response)
 		return
 	}
 
-	logger.Info("🎉 WebSocket upgrade successful with backend %s", backendAddr)
+	log.Info("🎉 WebSocket upgrade successful with backend %s", backendAddr)
 
 	// Send the 101 response to client
 	a.sendRawHTTPResponse(msg.ID, response)
@@ -1006,7 +1031,7 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 	a.wsManager.AddConnection(msg.ID, backendConn)
 	totalConnections := a.wsManager.GetConnectionCount()
 
-	logger.Info("🔗 WebSocket connection established: ID=%s, Backend=%s, Total=%d",
+	log.Info("🔗 WebSocket connection established: ID=%s, Backend=%s, Total=%d",
 		msg.ID[:8]+"...", backendAddr, totalConnections)
 
 	// Start bidirectional relay between server and backend
@@ -1022,11 +1047,11 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 			a.wsManager.RemoveConnection(msg.ID)
 			totalConnections := a.wsManager.GetConnectionCount()
 
-			logger.Info("🔌 WebSocket relay ended: ID=%s, Backend=%s, Remaining=%d",
+			log.Info("🔌 WebSocket relay ended: ID=%s, Backend=%s, Remaining=%d",
 				msg.ID[:8]+"...", backendAddr, totalConnections)
 			done <- true
 		}()
-		logger.Info("🔄 Starting backend→client relay: ID=%s, Backend=%s", msg.ID[:8]+"...", backendAddr)
+		log.Info("🔄 Starting backend→client relay: ID=%s, Backend=%s", msg.ID[:8]+"...", backendAddr)
 
 		buffer := make([]byte, 16384) // 16KB buffer for better performance
 		frameCount := 0
@@ -1035,7 +1060,7 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 			// Check if main connection is broken before trying to read/send
 			select {
 			case <-a.connectionBroken:
-				logger.Info("🔌 Main connection broken, stopping WebSocket relay: ID=%s", msg.ID[:8]+"...")
+				log.Info("🔌 Main connection broken, stopping WebSocket relay: ID=%s", msg.ID[:8]+"...")
 				return
 			default:
 				// Continue with normal operation
@@ -1049,27 +1074,27 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 				if err != io.EOF {
 					// Check if this is due to main connection being broken
 					if a.isConnectionBroken() {
-						logger.Debug("🔌 Backend read error due to main connection break: ID=%s", msg.ID[:8]+"...")
+						log.Debug("🔌 Backend read error due to main connection break: ID=%s", msg.ID[:8]+"...")
 						return
 					}
 
 					// Log backend errors with reduced verbosity during network issues
 					if strings.Contains(err.Error(), "use of closed network connection") {
-						logger.Debug("🔌 Backend connection closed: ID=%s", msg.ID[:8]+"...")
+						log.Debug("🔌 Backend connection closed: ID=%s", msg.ID[:8]+"...")
 					} else if strings.Contains(err.Error(), "connection reset") {
-						logger.Debug("🔄 Backend reset connection: ID=%s (normal behavior)", msg.ID[:8]+"...")
+						log.Debug("🔄 Backend reset connection: ID=%s (normal behavior)", msg.ID[:8]+"...")
 					} else if strings.Contains(err.Error(), "broken pipe") {
-						logger.Debug("📞 Backend connection broken: ID=%s (client disconnected)", msg.ID[:8]+"...")
+						log.Debug("📞 Backend connection broken: ID=%s (client disconnected)", msg.ID[:8]+"...")
 					} else {
-						logger.Error("❌ Backend read error for ID=%s: %v", msg.ID[:8]+"...", err)
+						log.Error("❌ Backend read error for ID=%s: %v", msg.ID[:8]+"...", err)
 					}
 				} else {
 					// Log more details for short-lived connections
 					if frameCount < 10 {
-						logger.Warn("⚡ Backend closed WebSocket quickly: ID=%s, FrameCount=%d (may indicate auth/protocol issue)",
+						log.Warn("⚡ Backend closed WebSocket quickly: ID=%s, FrameCount=%d (may indicate auth/protocol issue)",
 							msg.ID[:8]+"...", frameCount)
 					} else {
-						logger.Debug("📡 Backend gracefully closed WebSocket: ID=%s, FrameCount=%d",
+						log.Debug("📡 Backend gracefully closed WebSocket: ID=%s, FrameCount=%d",
 							msg.ID[:8]+"...", frameCount)
 					}
 				}
@@ -1084,12 +1109,12 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 
 				// Log detailed frame info for debugging with protocol analysis
 				if frameCount%10 == 1 || n > 1024 { // Log every 10th small frame or all large frames
-					logger.Debug("📦 Backend→Client frame #%d: %d bytes (ID=%s)", frameCount, n, msg.ID[:8]+"...")
+					log.Debug("📦 Backend→Client frame #%d: %d bytes (ID=%s)", frameCount, n, msg.ID[:8]+"...")
 				}
 
 				// Check if main connection is broken before sending
 				if a.isConnectionBroken() {
-					logger.Info("🔌 Main connection broken, stopping frame relay: ID=%s, Frame=%d",
+					log.Info("🔌 Main connection broken, stopping frame relay: ID=%s, Frame=%d",
 						msg.ID[:8]+"...", frameCount)
 					return
 				}
@@ -1114,30 +1139,30 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 						strings.Contains(err.Error(), "use of closed network connection") ||
 						strings.Contains(err.Error(), "i/o timeout") ||
 						a.isConnectionBroken() {
-						logger.Info("🔌 Failed to relay frame due to main connection break: ID=%s, Frame=%d, Error: %v",
+						log.Info("🔌 Failed to relay frame due to main connection break: ID=%s, Frame=%d, Error: %v",
 							msg.ID[:8]+"...", frameCount, err)
 
 						// Trigger reconnection for persistent connection issues
 						if strings.Contains(err.Error(), "i/o timeout") {
-							logger.Warn("⚠️  Persistent I/O timeout detected on WebSocket relay")
+							log.Warn("⚠️  Persistent I/O timeout detected on WebSocket relay")
 							// Don't trigger reconnection from WebSocket relay - let heartbeat handle it
 							// to prevent multiple simultaneous reconnection attempts
 						}
 						return
 					}
 
-					logger.Error("❌ Failed to relay frame to client (ID=%s): %v", msg.ID[:8]+"...", err)
+					log.Error("❌ Failed to relay frame to client (ID=%s): %v", msg.ID[:8]+"...", err)
 					break
 				}
 			}
 		}
 
-		logger.Info("📊 WebSocket relay stats: ID=%s, Total frames=%d", msg.ID[:8]+"...", frameCount)
+		log.Info("📊 WebSocket relay stats: ID=%s, Total frames=%d", msg.ID[:8]+"...", frameCount)
 	}()
 
 	// Wait for one direction to finish
 	<-done
-	logger.Info("🔌 WebSocket connection relay ended for %s", host)
+	log.Info("🔌 WebSocket connection relay ended for %s", host)
 }
 
 // buildWebSocketUpgradeRequest builds the raw HTTP upgrade request for the backend
@@ -1146,7 +1171,7 @@ func (a *Agent) buildWebSocketUpgradeRequest(msg *common.Message) string {
 
 	// Start with request line
 	request.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", msg.HTTP.Method, msg.HTTP.URL))
-	logger.Debug("🔧 WebSocket upgrade request line: %s %s HTTP/1.1", msg.HTTP.Method, msg.HTTP.URL)
+	log.Debug("🔧 WebSocket upgrade request line: %s %s HTTP/1.1", msg.HTTP.Method, msg.HTTP.URL)
 
 	// Extract client IP for proxy headers
 	clientIP := ""
@@ -1177,7 +1202,7 @@ func (a *Agent) buildWebSocketUpgradeRequest(msg *common.Message) string {
 
 			// Skip WebSocket extensions to prevent compression issues
 			if keyLower == "sec-websocket-extensions" {
-				logger.Debug("🚫 Skipping WebSocket extensions header to prevent compression issues: %s", value)
+				log.Debug("🚫 Skipping WebSocket extensions header to prevent compression issues: %s", value)
 				continue
 			}
 
@@ -1185,7 +1210,7 @@ func (a *Agent) buildWebSocketUpgradeRequest(msg *common.Message) string {
 			switch keyLower {
 			case "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-server", "x-real-ip":
 				// These will be added back with proper values for Zero Trust
-				logger.Debug("🔄 Replacing proxy header %s with Zero Trust values", key)
+				log.Debug("🔄 Replacing proxy header %s with Zero Trust values", key)
 				continue
 			default:
 				// Pass through all other original client headers (WebSocket protocol, auth, etc.)
@@ -1196,21 +1221,21 @@ func (a *Agent) buildWebSocketUpgradeRequest(msg *common.Message) string {
 			switch keyLower {
 			case "connection":
 				hasConnection = true
-				logger.Debug("🔧 Found Connection header: %s", value)
+				log.Debug("🔧 Found Connection header: %s", value)
 			case "upgrade":
 				hasUpgrade = true
-				logger.Debug("🔧 Found Upgrade header: %s", value)
+				log.Debug("🔧 Found Upgrade header: %s", value)
 			case "sec-websocket-key":
 				hasSecWebSocketKey = true
-				logger.Debug("🔧 Found Sec-WebSocket-Key header: %s", value)
+				log.Debug("🔧 Found Sec-WebSocket-Key header: %s", value)
 			case "sec-websocket-version":
 				hasSecWebSocketVersion = true
-				logger.Debug("🔧 Found Sec-WebSocket-Version header: %s", value)
+				log.Debug("🔧 Found Sec-WebSocket-Version header: %s", value)
 			case "authorization":
 				hasAuthorization = true
-				logger.Info("🔑 Authorization header included in WebSocket upgrade: %s", value[:min(len(value), 30)]+"...")
+				log.Info("🔑 Authorization header included in WebSocket upgrade: %s", value[:min(len(value), 30)]+"...")
 			case "cookie":
-				logger.Debug("🍪 Cookie header found: %s", value[:min(len(value), 50)]+"...")
+				log.Debug("🍪 Cookie header found: %s", value[:min(len(value), 50)]+"...")
 			}
 		}
 	}
@@ -1229,7 +1254,7 @@ func (a *Agent) buildWebSocketUpgradeRequest(msg *common.Message) string {
 	if clientIP != "" {
 		request.WriteString(fmt.Sprintf("X-Real-IP: %s\r\n", clientIP))
 		request.WriteString(fmt.Sprintf("X-Forwarded-For: %s\r\n", clientIP))
-		logger.Debug("🔧 Added Zero Trust client IP headers: X-Real-IP=%s, X-Forwarded-For=%s", clientIP, clientIP)
+		log.Debug("🔧 Added Zero Trust client IP headers: X-Real-IP=%s, X-Forwarded-For=%s", clientIP, clientIP)
 	}
 
 	// Add X-Forwarded-Server (this agent's identifier)
@@ -1237,24 +1262,24 @@ func (a *Agent) buildWebSocketUpgradeRequest(msg *common.Message) string {
 
 	// Log missing essential WebSocket headers
 	if !hasConnection {
-		logger.Error("❌ Missing Connection header in WebSocket upgrade request!")
+		log.Error("❌ Missing Connection header in WebSocket upgrade request!")
 	}
 	if !hasUpgrade {
-		logger.Error("❌ Missing Upgrade header in WebSocket upgrade request!")
+		log.Error("❌ Missing Upgrade header in WebSocket upgrade request!")
 	}
 	if !hasSecWebSocketKey {
-		logger.Error("❌ Missing Sec-WebSocket-Key header in WebSocket upgrade request!")
+		log.Error("❌ Missing Sec-WebSocket-Key header in WebSocket upgrade request!")
 	}
 	if !hasSecWebSocketVersion {
-		logger.Error("❌ Missing Sec-WebSocket-Version header in WebSocket upgrade request!")
+		log.Error("❌ Missing Sec-WebSocket-Version header in WebSocket upgrade request!")
 	}
 
 	// Generic WebSocket upgrade logging - works for all services
-	logger.Info("🔌 WebSocket upgrade for %s - including Zero Trust headers for identity-aware proxy", originalHost)
+	log.Info("🔌 WebSocket upgrade for %s - including Zero Trust headers for identity-aware proxy", originalHost)
 	if hasAuthorization {
-		logger.Info("✅ WebSocket upgrade includes Authorization header")
+		log.Info("✅ WebSocket upgrade includes Authorization header")
 	} else {
-		logger.Debug("💡 WebSocket upgrade without Authorization header - this is normal for many services")
+		log.Debug("💡 WebSocket upgrade without Authorization header - this is normal for many services")
 	}
 
 	// Add end of headers
@@ -1265,7 +1290,7 @@ func (a *Agent) buildWebSocketUpgradeRequest(msg *common.Message) string {
 		request.Write(msg.HTTP.Body)
 	}
 
-	logger.Info("📋 WebSocket upgrade request built with Zero Trust headers: Host=%s, ClientIP=%s, Protocol=https",
+	log.Info("📋 WebSocket upgrade request built with Zero Trust headers: Host=%s, ClientIP=%s, Protocol=https",
 		originalHost, clientIP)
 
 	return request.String()
@@ -1335,7 +1360,7 @@ func (a *Agent) sendRawHTTPResponse(messageID, response string) {
 	}
 
 	if err := a.SendMessage(responseMsg); err != nil {
-		logger.Error("❌ Failed to send WebSocket upgrade response: %v", err)
+		log.Error("❌ Failed to send WebSocket upgrade response: %v", err)
 	}
 }
 
@@ -1349,13 +1374,13 @@ func (a *Agent) handleWebSocketFrame(msg *common.Message) {
 	wsConn, exists := a.wsManager.GetConnection(msg.ID)
 
 	if !exists {
-		logger.Debug("🔍 WebSocket frame dropped - connection not found: ID=%s", msg.ID[:8]+"...")
+		log.Debug("🔍 WebSocket frame dropped - connection not found: ID=%s", msg.ID[:8]+"...")
 		return
 	}
 
 	// Validate connection is still active
 	if wsConn == nil || wsConn.GetConn() == nil {
-		logger.Warn("⚠️  WebSocket frame dropped - nil connection: ID=%s", msg.ID[:8]+"...")
+		log.Warn("⚠️  WebSocket frame dropped - nil connection: ID=%s", msg.ID[:8]+"...")
 		a.wsManager.RemoveConnection(msg.ID)
 		return
 	}
@@ -1374,11 +1399,11 @@ func (a *Agent) handleWebSocketFrame(msg *common.Message) {
 	for totalWritten < len(data) {
 		n, err := wsConn.GetConn().Write(data[totalWritten:])
 		if err != nil {
-			logger.Error("❌ Failed to write WebSocket frame to backend (ID=%s): %v", msg.ID[:8]+"...", err)
+			log.Error("❌ Failed to write WebSocket frame to backend (ID=%s): %v", msg.ID[:8]+"...", err)
 			// Connection is broken, clean it up
 			a.wsManager.RemoveConnection(msg.ID)
 			totalConnections := a.wsManager.GetConnectionCount()
-			logger.Info("🗑️  Removed broken WebSocket connection: ID=%s, Remaining=%d", msg.ID[:8]+"...", totalConnections)
+			log.Info("🗑️  Removed broken WebSocket connection: ID=%s, Remaining=%d", msg.ID[:8]+"...", totalConnections)
 			return
 		}
 		totalWritten += n
@@ -1386,31 +1411,31 @@ func (a *Agent) handleWebSocketFrame(msg *common.Message) {
 
 	// Log frame forwarding with less verbosity for small frames
 	if frameSize > 100 || frameSize == 2 { // Log large frames or likely ping/pong frames
-		logger.Debug("📤 Client→Backend frame: %d bytes (ID=%s)", frameSize, msg.ID[:8]+"...")
+		log.Debug("📤 Client→Backend frame: %d bytes (ID=%s)", frameSize, msg.ID[:8]+"...")
 	}
 
 	// Generic client authentication frame analysis - works for any service
 	if frameSize > 50 && strings.Contains(string(data[:min(frameSize, 200)]), "access_token") {
-		logger.Info("🔑 Client sending authentication token")
+		log.Info("🔑 Client sending authentication token")
 	} else if frameSize > 20 && strings.Contains(string(data[:min(frameSize, 100)]), "type") {
 		frameStr := string(data[:min(frameSize, 100)])
 		if strings.Contains(frameStr, "auth") {
-			logger.Debug("🔐 Client authentication frame detected")
+			log.Debug("🔐 Client authentication frame detected")
 		} else if strings.Contains(frameStr, "subscribe") {
-			logger.Debug("📡 Client subscribing to events")
+			log.Debug("📡 Client subscribing to events")
 		}
 	}
 }
 
 // handleWebSocketDisconnect handles notification from server that client disconnected
 func (a *Agent) handleWebSocketDisconnect(msg *common.Message) {
-	logger.Info("📞 Server notified client disconnected: ID=%s", msg.ID[:8]+"...")
+	log.Info("📞 Server notified client disconnected: ID=%s", msg.ID[:8]+"...")
 
 	// Find and cleanup the backend connection
 	a.wsManager.RemoveConnection(msg.ID)
 	totalConnections := a.wsManager.GetConnectionCount()
 
-	logger.Info("🧹 Cleaned up backend WebSocket connection: ID=%s, Remaining=%d",
+	log.Info("🧹 Cleaned up backend WebSocket connection: ID=%s, Remaining=%d",
 		msg.ID[:8]+"...", totalConnections)
 }
 
@@ -1425,7 +1450,7 @@ func (a *Agent) loadAndRegisterServices() error {
 		return fmt.Errorf("❌ no configuration available")
 	}
 
-	logger.Info("📋 Loaded agent configuration: ID=%s, Name=%s, Services=%d",
+	log.Info("📋 Loaded agent configuration: ID=%s, Name=%s, Services=%d",
 		config.Agent.ID, config.Agent.Name, len(config.Services))
 
 	// Register each service
@@ -1433,14 +1458,14 @@ func (a *Agent) loadAndRegisterServices() error {
 		// Get all hosts for this service (handles both hostname and hosts fields)
 		allHosts := serviceConfig.GetAllHosts()
 
-		logger.Info("🌐 Loaded service configuration: %s (%s) -> %s://%s with %d upstreams and %d hosts",
+		log.Info("🌐 Loaded service configuration: %s (%s) -> %s://%s with %d upstreams and %d hosts",
 			serviceConfig.ID, serviceConfig.Name, serviceConfig.Protocol,
 			a.getPrimaryUpstream(&serviceConfig), len(serviceConfig.Upstreams), len(allHosts))
 
 		// Register each host separately with the server
 		for _, hostname := range allHosts {
 			// Validate service configuration BEFORE processing
-			logger.Debug("🔍 Validating service configuration for host: %s", hostname)
+			log.Debug("🔍 Validating service configuration for host: %s", hostname)
 
 			// Convert enhanced config to common ServiceConfig for validation
 			commonServiceForValidation := a.convertToCommonServiceConfig(&serviceConfig, hostname)
@@ -1456,7 +1481,7 @@ func (a *Agent) loadAndRegisterServices() error {
 					serviceConfig.ID, hostname, strings.Join(errorMessages, "; "))
 			}
 
-			logger.Info("✅ Caddy configuration validation passed for service %s (host: %s)", serviceConfig.ID, hostname)
+			log.Info("✅ Caddy configuration validation passed for service %s (host: %s)", serviceConfig.ID, hostname)
 
 			// Convert enhanced config to common ServiceConfig for server registration
 			commonService := a.convertToCommonServiceConfig(&serviceConfig, hostname)
@@ -1466,7 +1491,7 @@ func (a *Agent) loadAndRegisterServices() error {
 			a.services[hostname] = commonService
 			a.mu.Unlock()
 
-			logger.Info("📌 Registering host: %s -> %s", hostname, a.getPrimaryUpstream(&serviceConfig))
+			log.Info("📌 Registering host: %s -> %s", hostname, a.getPrimaryUpstream(&serviceConfig))
 
 			// Register with server (this will perform basic validation again but that's OK for safety)
 			if err := a.ConfigureService(commonService); err != nil {
@@ -1476,13 +1501,13 @@ func (a *Agent) loadAndRegisterServices() error {
 
 		// Start health checks if configured (once per service, not per host)
 		if err := a.startHealthChecks(&serviceConfig); err != nil {
-			logger.Error("❌ Failed to start health checks for service %s: %v", serviceConfig.ID, err)
+			log.Error("❌ Failed to start health checks for service %s: %v", serviceConfig.ID, err)
 		}
 	}
 
 	// Start global health check endpoints if configured
 	if err := a.startGlobalHealthChecks(config); err != nil {
-		logger.Error("❌ Failed to start global health checks: %v", err)
+		log.Error("❌ Failed to start global health checks: %v", err)
 	}
 
 	return nil
@@ -1594,9 +1619,9 @@ func (a *Agent) runHealthCheck(service *ServiceConfig, upstream UpstreamConfig) 
 		case <-ticker.C:
 			healthy := a.checkUpstreamHealth(service, upstream)
 			if healthy {
-				logger.Debug("✅ Health check passed for %s upstream %s", service.ID, upstream.Address)
+				log.Debug("✅ Health check passed for %s upstream %s", service.ID, upstream.Address)
 			} else {
-				logger.Error("❌ Health check failed for %s upstream %s", service.ID, upstream.Address)
+				log.Error("❌ Health check failed for %s upstream %s", service.ID, upstream.Address)
 			}
 		}
 	}
@@ -1636,7 +1661,7 @@ func (a *Agent) checkUpstreamHealth(service *ServiceConfig, upstream UpstreamCon
 
 	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
-		logger.Error("❌ Failed to create health check request for %s: %v", upstream.Address, err)
+		log.Error("❌ Failed to create health check request for %s: %v", upstream.Address, err)
 		return false
 	}
 
@@ -1648,7 +1673,7 @@ func (a *Agent) checkUpstreamHealth(service *ServiceConfig, upstream UpstreamCon
 	// Perform request
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.Debug("⚠️  Health check request failed for %s: %v", upstream.Address, err)
+		log.Debug("⚠️  Health check request failed for %s: %v", upstream.Address, err)
 		return false
 	}
 	defer resp.Body.Close()
@@ -1688,9 +1713,9 @@ func (a *Agent) runHealthCheckServer(endpoints []HealthCheckEndpoint) {
 		Handler: mux,
 	}
 
-	logger.Info("🏥 Starting health check server...")
+	log.Info("🏥 Starting health check server...")
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Error("❌ Health check server error: %v", err)
+		log.Error("❌ Health check server error: %v", err)
 	}
 }
 
@@ -1704,7 +1729,7 @@ func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttem
 	var lastErr error
 
 	// Validate configuration BEFORE attempting to send to server
-	logger.Debug("🔍 Validating Caddy configuration for service: %s", config.Hostname)
+	log.Debug("🔍 Validating Caddy configuration for service: %s", config.Hostname)
 	typesConfig := convertCommonToTypes(config)
 	validationResult := a.caddyValidator.ValidateServiceConfig(typesConfig)
 
@@ -1717,7 +1742,7 @@ func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttem
 			config.Hostname, strings.Join(errorMessages, "; "))
 	}
 
-	logger.Info("✅ Caddy configuration validation passed for service: %s", config.Hostname)
+	log.Info("✅ Caddy configuration validation passed for service: %s", config.Hostname)
 
 	// Track this service for future conflict detection
 	a.caddyValidator.AddExistingService(config.Hostname, typesConfig)
@@ -1729,7 +1754,7 @@ func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttem
 		a.mu.RUnlock()
 
 		if !registered {
-			logger.Warn("⚠️  Agent not registered, cannot configure service %s (attempt %d/%d)",
+			log.Warn("⚠️  Agent not registered, cannot configure service %s (attempt %d/%d)",
 				config.Hostname, attempt, maxAttempts)
 			if attempt < maxAttempts {
 				time.Sleep(time.Duration(attempt) * time.Second) // Progressive delay
@@ -1738,7 +1763,7 @@ func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttem
 			return fmt.Errorf("agent not registered with server after %d attempts", maxAttempts)
 		}
 
-		logger.Info("⚙️  Configuring service: %s (attempt %d/%d)", config.Hostname, attempt, maxAttempts)
+		log.Info("⚙️  Configuring service: %s (attempt %d/%d)", config.Hostname, attempt, maxAttempts)
 
 		// Check if we have enhanced configuration for this service
 		var enhancedConfig *common.EnhancedServiceConfig
@@ -1767,22 +1792,22 @@ func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttem
 		}
 
 		if enhancedConfig != nil {
-			logger.Debug("📦 Sending enhanced service configuration for %s with %d upstreams",
+			log.Debug("📦 Sending enhanced service configuration for %s with %d upstreams",
 				config.Hostname, len(enhancedConfig.Upstreams))
 		} else {
-			logger.Debug("📄 Sending simple service configuration for %s", config.Hostname)
+			log.Debug("📄 Sending simple service configuration for %s", config.Hostname)
 		}
 
 		if err := a.SendMessage(msg); err != nil {
 			lastErr = fmt.Errorf("failed to send service configuration: %w", err)
-			logger.Error("❌ Failed to send service config (attempt %d/%d): %v", attempt, maxAttempts, err)
+			log.Error("❌ Failed to send service config (attempt %d/%d): %v", attempt, maxAttempts, err)
 
 			// Check if this is a connection error that might resolve with retry
 			if strings.Contains(err.Error(), "no connection") ||
 				strings.Contains(err.Error(), "i/o timeout") ||
 				strings.Contains(err.Error(), "connection reset") {
 				if attempt < maxAttempts {
-					logger.Info("🔄 Connection error, retrying service configuration in %ds", attempt)
+					log.Info("🔄 Connection error, retrying service configuration in %ds", attempt)
 					time.Sleep(time.Duration(attempt) * time.Second)
 					continue
 				}
@@ -1792,13 +1817,13 @@ func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttem
 
 		// Wait for response with progressive timeout (longer for later attempts)
 		timeout := time.Duration(15+10*attempt) * time.Second
-		logger.Debug("⏳ Waiting for service config response (timeout: %v)", timeout)
+		log.Debug("⏳ Waiting for service config response (timeout: %v)", timeout)
 
 		select {
 		case response := <-a.serviceRespCh:
 			if response.Error != "" {
 				lastErr = fmt.Errorf("service error: %s", response.Error)
-				logger.Error("❌ Service configuration error (attempt %d/%d): %s", attempt, maxAttempts, response.Error)
+				log.Error("❌ Service configuration error (attempt %d/%d): %s", attempt, maxAttempts, response.Error)
 				if attempt < maxAttempts {
 					time.Sleep(time.Duration(attempt) * time.Second)
 					continue
@@ -1807,23 +1832,23 @@ func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttem
 			}
 			if response.Type != "service_add_response" {
 				lastErr = fmt.Errorf("unexpected response type: %s", response.Type)
-				logger.Error("❌ Unexpected response type (attempt %d/%d): %s", attempt, maxAttempts, response.Type)
+				log.Error("❌ Unexpected response type (attempt %d/%d): %s", attempt, maxAttempts, response.Type)
 				if attempt < maxAttempts {
 					time.Sleep(time.Duration(attempt) * time.Second)
 					continue
 				}
 				return lastErr
 			}
-			logger.Info("✅ Service configuration successful: %s (attempt %d/%d)", config.Hostname, attempt, maxAttempts)
+			log.Info("✅ Service configuration successful: %s (attempt %d/%d)", config.Hostname, attempt, maxAttempts)
 			return nil
 
 		case <-time.After(timeout):
 			lastErr = fmt.Errorf("timeout waiting for service configuration response")
-			logger.Error("⏰ Timeout waiting for service config response (attempt %d/%d, timeout: %v)",
+			log.Error("⏰ Timeout waiting for service config response (attempt %d/%d, timeout: %v)",
 				attempt, maxAttempts, timeout)
 
 			if attempt < maxAttempts {
-				logger.Info("🔄 Retrying service configuration in %ds", attempt)
+				log.Info("🔄 Retrying service configuration in %ds", attempt)
 				time.Sleep(time.Duration(attempt) * time.Second)
 				continue
 			}
@@ -1971,7 +1996,7 @@ func (a *Agent) sendHeartbeat() {
 	lastSuccessfulHeartbeat := time.Now()
 	maxTimeBetweenHeartbeats := 5 * time.Minute // Force reconnection if no successful heartbeat for 5 minutes
 
-	logger.Info("💓 Starting heartbeat monitoring (30s interval)")
+	log.Info("💓 Starting heartbeat monitoring (30s interval)")
 
 	for {
 		select {
@@ -1979,7 +2004,7 @@ func (a *Agent) sendHeartbeat() {
 			// Check if too much time has passed without a successful heartbeat
 			timeSinceLastSuccess := time.Since(lastSuccessfulHeartbeat)
 			if timeSinceLastSuccess > maxTimeBetweenHeartbeats {
-				logger.Error("💀 No successful heartbeat for %v, forcing reconnection", timeSinceLastSuccess.Round(time.Second))
+				log.Error("💀 No successful heartbeat for %v, forcing reconnection", timeSinceLastSuccess.Round(time.Second))
 				a.attemptReconnection("heartbeat-timeout")
 				lastSuccessfulHeartbeat = time.Now() // Reset timer
 				consecutiveFailures = 0
@@ -1988,7 +2013,7 @@ func (a *Agent) sendHeartbeat() {
 
 			// Check if connection is already broken FIRST (before registration check)
 			if a.isConnectionBroken() {
-				logger.Debug("💔 Connection broken detected in heartbeat monitoring")
+				log.Debug("💔 Connection broken detected in heartbeat monitoring")
 				// Use coordinated reconnection
 				a.attemptReconnection("heartbeat-broken-connection")
 				continue
@@ -1996,14 +2021,14 @@ func (a *Agent) sendHeartbeat() {
 
 			// Check if connection is nil (no connection at all) - this handles failed reconnection scenarios
 			if a.conn == nil {
-				logger.Debug("💀 No connection detected, triggering reconnection")
+				log.Debug("💀 No connection detected, triggering reconnection")
 				a.attemptReconnection("heartbeat-no-connection")
 				continue
 			}
 
 			// Check if encoder/decoder are nil (connection not properly initialized)
 			if a.encoder == nil || a.decoder == nil {
-				logger.Warn("⚠️  Connection not properly initialized (encoder/decoder nil), triggering reconnection")
+				log.Warn("⚠️  Connection not properly initialized (encoder/decoder nil), triggering reconnection")
 				a.attemptReconnection("heartbeat-invalid-connection")
 				continue
 			}
@@ -2014,19 +2039,19 @@ func (a *Agent) sendHeartbeat() {
 			a.mu.RUnlock()
 
 			if !registered {
-				logger.Debug("⏸️  Skipping heartbeat - agent not registered (will check for broken connection next cycle)")
+				log.Debug("⏸️  Skipping heartbeat - agent not registered (will check for broken connection next cycle)")
 				continue
 			}
 
 			// Skip heartbeat during reconnection
 			if a.isReconnectInProgress() {
-				logger.Debug("⏸️  Skipping heartbeat - reconnection in progress")
+				log.Debug("⏸️  Skipping heartbeat - reconnection in progress")
 				continue
 			}
 
 			// Skip heartbeat if we've had too many consecutive failures
 			if consecutiveFailures >= maxFailures {
-				logger.Error("💀 Too many heartbeat failures (%d), triggering reconnection", consecutiveFailures)
+				log.Error("💀 Too many heartbeat failures (%d), triggering reconnection", consecutiveFailures)
 				// Use coordinated reconnection and reset failure count
 				a.attemptReconnection("heartbeat-failures")
 				consecutiveFailures = 0 // Reset after triggering reconnection
@@ -2049,7 +2074,7 @@ func (a *Agent) sendHeartbeat() {
 			case err := <-heartbeatDone:
 				if err != nil {
 					consecutiveFailures++
-					logger.Error("💔 Failed to send heartbeat (failure %d/%d): %v", consecutiveFailures, maxFailures, err)
+					log.Error("💔 Failed to send heartbeat (failure %d/%d): %v", consecutiveFailures, maxFailures, err)
 
 					// Check for connection-related errors and trigger immediate reconnection
 					if strings.Contains(err.Error(), "broken pipe") ||
@@ -2057,7 +2082,7 @@ func (a *Agent) sendHeartbeat() {
 						strings.Contains(err.Error(), "connection refused") ||
 						strings.Contains(err.Error(), "use of closed network connection") ||
 						strings.Contains(err.Error(), "i/o timeout") {
-						logger.Error("🔌 Connection error detected in heartbeat, triggering immediate reconnection")
+						log.Error("🔌 Connection error detected in heartbeat, triggering immediate reconnection")
 						consecutiveFailures = maxFailures // Force immediate reconnection
 					}
 					continue
@@ -2067,7 +2092,7 @@ func (a *Agent) sendHeartbeat() {
 				}
 			case <-time.After(15 * time.Second):
 				consecutiveFailures++
-				logger.Error("⏰ Heartbeat send timeout (failure %d/%d)", consecutiveFailures, maxFailures)
+				log.Error("⏰ Heartbeat send timeout (failure %d/%d)", consecutiveFailures, maxFailures)
 				continue
 			}
 
@@ -2075,20 +2100,20 @@ func (a *Agent) sendHeartbeat() {
 			select {
 			case response := <-a.pongCh:
 				if response.Type == "pong" && response.ID == a.id {
-					logger.Debug("💓 Received pong response")
+					log.Debug("💓 Received pong response")
 					consecutiveFailures = 0              // Reset failure count on successful pong
 					lastSuccessfulHeartbeat = time.Now() // Record successful heartbeat
 					continue
 				}
-				logger.Error("❓ Unexpected response type or ID while waiting for pong: %s (ID: %s)", response.Type, response.ID)
+				log.Error("❓ Unexpected response type or ID while waiting for pong: %s (ID: %s)", response.Type, response.ID)
 				consecutiveFailures++
 			case <-time.After(5 * time.Second):
 				consecutiveFailures++
-				logger.Error("⏰ Timeout waiting for heartbeat response (failure %d/%d)", consecutiveFailures, maxFailures)
+				log.Error("⏰ Timeout waiting for heartbeat response (failure %d/%d)", consecutiveFailures, maxFailures)
 
 				// If we've reached max failures, trigger immediate reconnection
 				if consecutiveFailures >= maxFailures {
-					logger.Error("💀 Max heartbeat pong timeouts reached, triggering immediate reconnection")
+					log.Error("💀 Max heartbeat pong timeouts reached, triggering immediate reconnection")
 					// Use coordinated reconnection and reset failure count
 					a.attemptReconnection("heartbeat-pong-timeouts")
 					consecutiveFailures = 0 // Reset after triggering reconnection
@@ -2104,7 +2129,7 @@ func (a *Agent) monitorChannelHealth() {
 	ticker := time.NewTicker(60 * time.Second) // Report every minute
 	defer ticker.Stop()
 
-	logger.Debug("📊 Starting channel health monitoring (60s interval)")
+	log.Debug("📊 Starting channel health monitoring (60s interval)")
 
 	for {
 		select {
@@ -2117,7 +2142,7 @@ func (a *Agent) monitorChannelHealth() {
 
 			// Only log if any channel is significantly used
 			if registerUsage > 10 || httpRespUsage > 10 || pongUsage > 10 || serviceRespUsage > 10 {
-				logger.Info("📊 Channel usage - Register: %.1f%%, HTTP: %.1f%%, Pong: %.1f%%, Service: %.1f%%",
+				log.Info("📊 Channel usage - Register: %.1f%%, HTTP: %.1f%%, Pong: %.1f%%, Service: %.1f%%",
 					registerUsage, httpRespUsage, pongUsage, serviceRespUsage)
 			}
 
@@ -2126,7 +2151,7 @@ func (a *Agent) monitorChannelHealth() {
 			highPressureChannels := 0
 			for channelName, pressure := range a.channelPressure {
 				if pressure > 0 {
-					logger.Debug("⚠️  Channel pressure - %s: %d", channelName, pressure)
+					log.Debug("⚠️  Channel pressure - %s: %d", channelName, pressure)
 					if pressure > 5 {
 						highPressureChannels++
 					}
@@ -2136,7 +2161,7 @@ func (a *Agent) monitorChannelHealth() {
 
 			// Alert if multiple channels have high pressure
 			if highPressureChannels > 2 {
-				logger.Warn("🚨 High pressure detected on %d channels - performance may be impacted", highPressureChannels)
+				log.Warn("🚨 High pressure detected on %d channels - performance may be impacted", highPressureChannels)
 			}
 		}
 	}
@@ -2168,13 +2193,13 @@ func (a *Agent) startWebSocketHealthMonitoring() {
 func (a *Agent) logWebSocketStats() {
 	total, healthy, stale := a.wsManager.GetStats()
 	if total > 0 {
-		logger.Info("📊 Agent WebSocket Stats: Total=%d, Healthy=%d, Stale=%d", total, healthy, stale)
+		log.Info("📊 Agent WebSocket Stats: Total=%d, Healthy=%d, Stale=%d", total, healthy, stale)
 	}
 }
 
 // Start starts the agent
 func (a *Agent) Start() error {
-	logger.Info("🚀 Starting 0Trust agent: %s", a.id)
+	log.Info("🚀 Starting 0Trust agent: %s", a.id)
 
 	// Connect to server
 	if err := a.Connect(); err != nil {
@@ -2182,36 +2207,36 @@ func (a *Agent) Start() error {
 	}
 
 	// Start heartbeat loop
-	logger.Info("💓 Starting heartbeat monitoring")
+	log.Info("💓 Starting heartbeat monitoring")
 	go a.sendHeartbeat()
 
 	// Start WebSocket health monitoring
-	logger.Info("🔌 Starting WebSocket health monitoring")
+	log.Info("🔌 Starting WebSocket health monitoring")
 	a.startWebSocketHealthMonitoring()
 
 	// Start shared hot reload system
-	logger.Info("🔥 Starting shared hot reload system")
+	log.Info("🔥 Starting shared hot reload system")
 	if err := a.hotReloadManager.RegisterReloader(a); err != nil {
-		logger.Error("❌ Failed to register hot reload: %v", err)
+		log.Error("❌ Failed to register hot reload: %v", err)
 	}
 
 	// Load and register services
-	logger.Info("📋 Loading and registering services")
+	log.Info("📋 Loading and registering services")
 	if err := a.loadAndRegisterServices(); err != nil {
 		return fmt.Errorf("❌ failed to load and register services: %v", err)
 	}
 
 	// Start channel health monitoring
-	logger.Info("📊 Starting channel health monitoring")
+	log.Info("📊 Starting channel health monitoring")
 	go a.monitorChannelHealth()
 
-	logger.Info("✅ Agent %s started successfully and ready to handle requests", a.id)
+	log.Info("✅ Agent %s started successfully and ready to handle requests", a.id)
 	return nil
 }
 
 // reconnect attempts to reconnect to the server with exponential backoff
 func (a *Agent) reconnect() error {
-	logger.Info("🔄 Attempting to reconnect to server...")
+	log.Info("🔄 Attempting to reconnect to server...")
 
 	// Close existing connection if any - use proper locking to prevent race conditions
 	a.writeMu.Lock()
@@ -2255,7 +2280,7 @@ func (a *Agent) reconnect() error {
 				delay = 60 * time.Second
 			}
 
-			logger.Error("❌ Failed to connect (attempt %d): %v - retrying in %v", attempt, err, delay)
+			log.Error("❌ Failed to connect (attempt %d): %v - retrying in %v", attempt, err, delay)
 
 			// Wait before next attempt
 			time.Sleep(delay)
@@ -2274,19 +2299,19 @@ func (a *Agent) reconnect() error {
 		// Reset connection state for the new connection
 		a.resetConnectionState()
 
-		logger.Info("🔌 Reconnected to server, starting message handler...")
+		log.Info("🔌 Reconnected to server, starting message handler...")
 
 		// Restart message handling goroutine for the new connection
 		go a.handleMessages()
 
 		// Send registration message
-		logger.Info("📋 Sending registration message to server")
+		log.Info("📋 Sending registration message to server")
 		if err := a.SendMessage(&common.Message{
 			Type: "register",
 			ID:   a.id,
 		}); err != nil {
 			lastErr = err
-			logger.Error("❌ Failed to send registration message (attempt %d): %v", attempt, err)
+			log.Error("❌ Failed to send registration message (attempt %d): %v", attempt, err)
 			// Close this connection and try again with delay
 			conn.Close()
 			a.writeMu.Lock()
@@ -2302,18 +2327,18 @@ func (a *Agent) reconnect() error {
 			if delay > 60*time.Second {
 				delay = 60 * time.Second
 			}
-			logger.Debug("⏰ Retrying registration in %v", delay)
+			log.Debug("⏰ Retrying registration in %v", delay)
 			time.Sleep(delay)
 			continue
 		}
 
 		// Wait for registration response with timeout
-		logger.Info("⏳ Waiting for registration response...")
+		log.Info("⏳ Waiting for registration response...")
 		select {
 		case response := <-a.registerCh:
 			if response.Type != "register_response" {
 				lastErr = fmt.Errorf("unexpected response type during registration: %s", response.Type)
-				logger.Error("❌ Registration failed (attempt %d): %v", attempt, lastErr)
+				log.Error("❌ Registration failed (attempt %d): %v", attempt, lastErr)
 				// Close this connection and try again with delay
 				conn.Close()
 				a.writeMu.Lock()
@@ -2329,12 +2354,12 @@ func (a *Agent) reconnect() error {
 				if delay > 60*time.Second {
 					delay = 60 * time.Second
 				}
-				logger.Debug("⏰ Retrying registration in %v", delay)
+				log.Debug("⏰ Retrying registration in %v", delay)
 				time.Sleep(delay)
 				continue
 			}
 
-			logger.Info("✅ Successfully re-registered with server")
+			log.Info("✅ Successfully re-registered with server")
 
 			// Initialize last successful heartbeat timestamp for successful reconnection
 			a.mu.Lock()
@@ -2343,14 +2368,14 @@ func (a *Agent) reconnect() error {
 
 			// Re-register all services after reconnection
 			if err := a.reregisterServices(); err != nil {
-				logger.Error("⚠️  Failed to re-register services after reconnection: %v", err)
+				log.Error("⚠️  Failed to re-register services after reconnection: %v", err)
 				// Don't fail reconnection for this, services can be registered later
 			}
 
 			return nil
 		case <-time.After(10 * time.Second):
 			lastErr = fmt.Errorf("timeout waiting for registration confirmation")
-			logger.Error("⏰ Registration timeout (attempt %d)", attempt)
+			log.Error("⏰ Registration timeout (attempt %d)", attempt)
 			// Close this connection and try again with delay
 			conn.Close()
 			a.writeMu.Lock()
@@ -2366,7 +2391,7 @@ func (a *Agent) reconnect() error {
 			if delay > 60*time.Second {
 				delay = 60 * time.Second
 			}
-			logger.Debug("⏰ Retrying registration in %v", delay)
+			log.Debug("⏰ Retrying registration in %v", delay)
 			time.Sleep(delay)
 			continue
 		}
@@ -2383,21 +2408,21 @@ func (a *Agent) reregisterServices() error {
 	a.mu.RUnlock()
 
 	if len(services) == 0 {
-		logger.Debug("📝 No services to re-register")
+		log.Debug("📝 No services to re-register")
 		return nil
 	}
 
-	logger.Info("🔄 Re-registering %d services after reconnection", len(services))
+	log.Info("🔄 Re-registering %d services after reconnection", len(services))
 
 	for hostname, serviceConfig := range services {
-		logger.Debug("📋 Re-registering service: %s", hostname)
+		log.Debug("📋 Re-registering service: %s", hostname)
 		if err := a.ConfigureService(serviceConfig); err != nil {
-			logger.Error("❌ Failed to re-register service %s: %v", hostname, err)
+			log.Error("❌ Failed to re-register service %s: %v", hostname, err)
 			return fmt.Errorf("failed to re-register service %s: %w", hostname, err)
 		}
 	}
 
-	logger.Info("✅ Successfully re-registered all services")
+	log.Info("✅ Successfully re-registered all services")
 	return nil
 }
 
@@ -2415,7 +2440,7 @@ func (a *Agent) trackChannelPressure(channelName string, success bool) {
 		// Increase pressure on failure
 		a.channelPressure[channelName]++
 		if a.channelPressure[channelName] > 10 {
-			logger.Error("🚨 High channel pressure detected for %s: %d failures", channelName, a.channelPressure[channelName])
+			log.Error("🚨 High channel pressure detected for %s: %d failures", channelName, a.channelPressure[channelName])
 		}
 	}
 }
@@ -2473,7 +2498,7 @@ func (a *Agent) SendMessage(msg *common.Message) error {
 			strings.Contains(err.Error(), "network is unreachable") ||
 			strings.Contains(err.Error(), "use of closed network connection") ||
 			strings.Contains(err.Error(), "i/o timeout") {
-			logger.Debug("🔗 Detected broken connection in SendMessage: %v", err)
+			log.Debug("🔗 Detected broken connection in SendMessage: %v", err)
 		}
 		return fmt.Errorf("failed to send message: %v", err)
 	}
@@ -2512,7 +2537,7 @@ func (a *Agent) signalConnectionBroken() {
 	// Non-blocking send to avoid deadlock
 	select {
 	case a.connectionBroken <- struct{}{}:
-		logger.Debug("📡 Signaled connection broken to all goroutines")
+		log.Debug("📡 Signaled connection broken to all goroutines")
 	default:
 		// Channel already has a signal, no need to send another
 	}
@@ -2529,7 +2554,7 @@ func (a *Agent) resetConnectionState() {
 	default:
 	}
 
-	logger.Debug("🔄 Reset connection state for new connection")
+	log.Debug("🔄 Reset connection state for new connection")
 }
 
 // isConnectionBroken checks if the connection is broken (non-blocking)
@@ -2582,11 +2607,11 @@ func (a *Agent) isReconnectInProgress() bool {
 func (a *Agent) attemptReconnection(source string) {
 	// Try to set reconnection in progress
 	if !a.setReconnectInProgress(true) {
-		logger.Debug("🔄 Reconnection already in progress, skipping %s trigger", source)
+		log.Debug("🔄 Reconnection already in progress, skipping %s trigger", source)
 		return
 	}
 
-	logger.Info("🔄 Starting reconnection process (triggered by %s)", source)
+	log.Info("🔄 Starting reconnection process (triggered by %s)", source)
 
 	// Run reconnection in background
 	go func() {
@@ -2597,21 +2622,21 @@ func (a *Agent) attemptReconnection(source string) {
 
 		// Add small delay for heartbeat-triggered reconnections to avoid hammering server
 		if strings.Contains(source, "heartbeat") {
-			logger.Debug("⏰ Adding 2s delay for heartbeat-triggered reconnection")
+			log.Debug("⏰ Adding 2s delay for heartbeat-triggered reconnection")
 			time.Sleep(2 * time.Second)
 		}
 
 		if err := a.reconnect(); err != nil {
-			logger.Error("🔄 Reconnection failed (%s trigger): %v", source, err)
+			log.Error("🔄 Reconnection failed (%s trigger): %v", source, err)
 		} else {
-			logger.Info("🎉 Reconnection successful (%s trigger)", source)
+			log.Info("🎉 Reconnection successful (%s trigger)", source)
 		}
 	}()
 }
 
 // reloadConfig reloads the configuration and updates services
 func (a *Agent) reloadConfig() error {
-	logger.Info("🔄 Reloading configuration from %s", a.config.ConfigPath)
+	log.Info("🔄 Reloading configuration from %s", a.config.ConfigPath)
 
 	// Load new config
 	newConfig, err := LoadConfig(a.config.ConfigPath)
@@ -2635,7 +2660,7 @@ func (a *Agent) reloadConfig() error {
 	a.config = newConfig
 	a.mu.Unlock()
 
-	logger.Info("✅ Configuration reloaded successfully: %d services configured", len(newConfig.Services))
+	log.Info("✅ Configuration reloaded successfully: %d services configured", len(newConfig.Services))
 
 	// Log what changed
 	a.logConfigChanges(oldConfig, newConfig)
@@ -2675,12 +2700,12 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 			newCommonService := a.convertToCommonServiceConfig(service, host)
 			if !a.servicesEqual(currentService, newCommonService) {
 				hostsToUpdate[host] = service
-				logger.Debug("🔄 Service %s needs update", host)
+				log.Debug("🔄 Service %s needs update", host)
 			}
 		} else {
 			// New service
 			hostsToAdd[host] = service
-			logger.Debug("➕ New service: %s", host)
+			log.Debug("➕ New service: %s", host)
 		}
 	}
 
@@ -2688,7 +2713,7 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 	for host := range currentServices {
 		if _, exists := newServiceHosts[host]; !exists {
 			hostsToRemove = append(hostsToRemove, host)
-			logger.Debug("➖ Service to remove: %s", host)
+			log.Debug("➖ Service to remove: %s", host)
 		}
 	}
 
@@ -2698,9 +2723,9 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 	// Remove services
 	for _, host := range hostsToRemove {
 		if err := a.removeService(host); err != nil {
-			logger.Error("❌ Failed to remove service %s: %v", host, err)
+			log.Error("❌ Failed to remove service %s: %v", host, err)
 		} else {
-			logger.Info("➖ Removed service: %s", host)
+			log.Info("➖ Removed service: %s", host)
 			changeCount++
 		}
 	}
@@ -2708,7 +2733,7 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 	// Add new services (with validation)
 	for host, service := range hostsToAdd {
 		// Validate service configuration for new services
-		logger.Debug("🔍 Validating new service configuration for host: %s", host)
+		log.Debug("🔍 Validating new service configuration for host: %s", host)
 		commonServiceToValidate := a.convertToCommonServiceConfig(service, host)
 		typesServiceToValidate := convertCommonToTypes(commonServiceToValidate)
 		validationResult := a.caddyValidator.ValidateServiceConfig(typesServiceToValidate)
@@ -2718,19 +2743,19 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 			for _, err := range validationResult.Errors {
 				errorMessages = append(errorMessages, err.Error())
 			}
-			logger.Error("❌ Validation failed for new service %s: %s", host, strings.Join(errorMessages, "; "))
+			log.Error("❌ Validation failed for new service %s: %s", host, strings.Join(errorMessages, "; "))
 			continue // Skip this service but continue with others
 		}
 
 		commonService := a.convertToCommonServiceConfig(service, host)
 		if err := a.ConfigureService(commonService); err != nil {
-			logger.Error("❌ Failed to add service %s: %v", host, err)
+			log.Error("❌ Failed to add service %s: %v", host, err)
 		} else {
 			// Store service config locally
 			a.mu.Lock()
 			a.services[host] = commonService
 			a.mu.Unlock()
-			logger.Info("➕ Added service: %s -> %s", host, a.getPrimaryUpstream(service))
+			log.Info("➕ Added service: %s -> %s", host, a.getPrimaryUpstream(service))
 			changeCount++
 		}
 	}
@@ -2742,7 +2767,7 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 		a.caddyValidator.RemoveExistingService(host)
 
 		// Validate service configuration for updated services
-		logger.Debug("🔍 Validating updated service configuration for host: %s", host)
+		log.Debug("🔍 Validating updated service configuration for host: %s", host)
 		commonServiceToValidate := a.convertToCommonServiceConfig(service, host)
 		typesServiceToValidate := convertCommonToTypes(commonServiceToValidate)
 		validationResult := a.caddyValidator.ValidateServiceConfig(typesServiceToValidate)
@@ -2752,7 +2777,7 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 			for _, err := range validationResult.Errors {
 				errorMessages = append(errorMessages, err.Error())
 			}
-			logger.Error("❌ Validation failed for updated service %s: %s", host, strings.Join(errorMessages, "; "))
+			log.Error("❌ Validation failed for updated service %s: %s", host, strings.Join(errorMessages, "; "))
 
 			// Re-add the old service back to validator tracking since validation failed
 			if currentService, exists := currentServices[host]; exists {
@@ -2764,7 +2789,7 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 
 		commonService := a.convertToCommonServiceConfig(service, host)
 		if err := a.ConfigureService(commonService); err != nil {
-			logger.Error("❌ Failed to update service %s: %v", host, err)
+			log.Error("❌ Failed to update service %s: %v", host, err)
 
 			// Re-add the old service back to validator tracking since update failed
 			if currentService, exists := currentServices[host]; exists {
@@ -2780,15 +2805,15 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 			// Add the new service to validator tracking (replaces the temporarily removed one)
 			a.caddyValidator.AddExistingService(host, typesServiceToValidate)
 
-			logger.Info("🔄 Updated service: %s -> %s", host, a.getPrimaryUpstream(service))
+			log.Info("🔄 Updated service: %s -> %s", host, a.getPrimaryUpstream(service))
 			changeCount++
 		}
 	}
 
 	if changeCount == 0 {
-		logger.Info("ℹ️  No service changes detected")
+		log.Info("ℹ️  No service changes detected")
 	} else {
-		logger.Info("✅ Applied %d service changes", changeCount)
+		log.Info("✅ Applied %d service changes", changeCount)
 	}
 
 	return nil
@@ -2806,7 +2831,7 @@ func (a *Agent) removeService(hostname string) error {
 
 	// Send remove message to server (if we have this functionality)
 	// For now, we'll just log since the current protocol focuses on adding services
-	logger.Debug("🗑️  Service %s removed from local storage and validator tracking", hostname)
+	log.Debug("🗑️  Service %s removed from local storage and validator tracking", hostname)
 
 	return nil
 }
@@ -2830,19 +2855,74 @@ func (a *Agent) logConfigChanges(oldConfig, newConfig *AgentConfig) {
 		changes = append(changes, fmt.Sprintf("services: %d → %d", len(oldConfig.Services), len(newConfig.Services)))
 	}
 
-	// Check log level changes
+	// Check application logging configuration changes
+	if a.shouldUpdateApplicationLogging(oldConfig.Logging, newConfig.Logging) {
+		oldLoggingDesc := fmt.Sprintf("level=%s,format=%s,output=%s",
+			oldConfig.Logging.Level, oldConfig.Logging.Format, oldConfig.Logging.Output)
+		newLoggingDesc := fmt.Sprintf("level=%s,format=%s,output=%s",
+			newConfig.Logging.Level, newConfig.Logging.Format, newConfig.Logging.Output)
+		changes = append(changes, fmt.Sprintf("application_logging: %s → %s", oldLoggingDesc, newLoggingDesc))
+
+		// Apply new logging configuration
+		log.Info("🔧 Application logging configuration changed, updating logger...")
+		applyLoggingConfig(newConfig.Logging)
+		log.Info("✅ Application logging configuration updated successfully")
+	}
+
+	// Check legacy log level changes (deprecated but maintained for compatibility)
 	if oldConfig.LogLevel != newConfig.LogLevel {
-		changes = append(changes, fmt.Sprintf("log_level: %s → %s", oldConfig.LogLevel, newConfig.LogLevel))
-		// Apply new log level
-		if newConfig.LogLevel != "" {
+		changes = append(changes, fmt.Sprintf("legacy_log_level: %s → %s", oldConfig.LogLevel, newConfig.LogLevel))
+
+		// Apply new log level only if new logging.level is not set
+		if newConfig.LogLevel != "" && newConfig.Logging.Level == "" {
 			logger.SetLogLevel(newConfig.LogLevel)
-			logger.Info("🔧 Log level changed to: %s", newConfig.LogLevel)
+			log.Info("🔧 Legacy log level changed to: %s", newConfig.LogLevel)
 		}
 	}
 
 	if len(changes) > 0 {
-		logger.Info("📝 Config changes: %s", strings.Join(changes, ", "))
+		log.Info("📝 Agent config changes: %s", strings.Join(changes, ", "))
 	}
+}
+
+// shouldUpdateApplicationLogging checks if application logging configuration needs to be updated
+func (a *Agent) shouldUpdateApplicationLogging(oldLogging, newLogging LoggingConfig) bool {
+	// Check if logging level changed
+	if oldLogging.Level != newLogging.Level {
+		return true
+	}
+
+	// Check if logging format changed
+	if oldLogging.Format != newLogging.Format {
+		return true
+	}
+
+	// Check if logging output changed
+	if oldLogging.Output != newLogging.Output {
+		return true
+	}
+
+	return false
+}
+
+// mapsEqual compares two maps for equality
+func mapsEqual(a, b map[string]interface{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || !interfaceEqual(v, bv) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// interfaceEqual compares two interface{} values for equality
+func interfaceEqual(a, b interface{}) bool {
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
 }
 
 // Implement ConfigReloader interface for shared hot reload

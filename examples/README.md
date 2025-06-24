@@ -13,8 +13,10 @@ This directory contains ready-to-use configuration examples and deployment files
 - **[`server-config.yaml`](server-config.yaml)** - Complete server configuration with detailed comments
 - **[`agent-config.yaml`](agent-config.yaml)** - Basic agent configuration with multiple service examples
 - **[`agent-homelab-config.yaml`](agent-homelab-config.yaml)** - Production homelab configuration with real services
+- **[`agent-logging-config.yaml`](agent-logging-config.yaml)** - Comprehensive agent logging configuration for production
 - **[`server-logging-config.yaml`](server-logging-config.yaml)** - Comprehensive Caddy logging configuration for production
 - **[`server-logging-simple.yaml`](server-logging-simple.yaml)** - Simple Caddy logging setup for development
+- **[`server-logging-production.yaml`](server-logging-production.yaml)** - Production JSON logging for log aggregation
 
 ### 🔧 **Legacy Examples** (from existing configs)
 - **[`agent-hot-reload-config.yaml`](agent-hot-reload-config.yaml)** - Hot reload configuration example
@@ -98,225 +100,387 @@ caddy:
     output: "stdout"                     # stdout, stderr, or file path
 ```
 
-### **Caddy Logging Configuration**
+### **Agent Configuration**
 
-The Zero Trust Proxy now supports comprehensive Caddy logging configuration. Use [`server-logging-config.yaml`](server-logging-config.yaml) for production or [`server-logging-simple.yaml`](server-logging-simple.yaml) for development.
+The [`agent-config.yaml`](agent-config.yaml) and [`agent-logging-config.yaml`](agent-logging-config.yaml) demonstrate comprehensive agent setup including:
+- **Agent Identity**: ID, name, region, and tags for organization
+- **Server Connection**: TLS certificate configuration
+- **Service Definitions**: Backend service configurations with load balancing
+- **Application Logging**: Structured logging for agent operations
 
-#### **Development Setup (Simple)**
+Key settings to customize:
 ```yaml
-caddy:
-  logging:
-    enabled: true
-    level: "INFO"
-    format: "console"      # Easy to read in terminal
-    output: "stdout"       # Output to Docker logs
-    
-    include:               # Basic fields to log
-      - "status"
-      - "method" 
-      - "uri"
-      - "duration"
-    
-    exclude:               # Exclude sensitive data
-      - "request>headers>Authorization"
-      - "request>headers>Cookie"
+agent:
+  id: "production-agent-01"         # Unique agent identifier
+  name: "Production Agent 01"       # Human-readable name
+  region: "us-west-1"               # Deployment region
+  tags: ["production", "critical"]  # Organization tags
+
+server:
+  address: "server.example.com:8443"  # Your server address
+  cert: "/config/certs/agent.crt"     # Agent certificate
+  key: "/config/certs/agent.key"      # Agent private key
+  ca_cert: "/config/certs/ca.crt"     # Certificate Authority
+
+# Agent application logging
+# Each module automatically sets its own hierarchical component name:
+# - agent: Agent core functionality
+# - caddy.manager: Caddy configuration management  
+# - caddy.validation: Caddy configuration validation
+# - common.websocket: WebSocket connection management
+# - common.cert: Certificate handling
+# - common.hotreload: Configuration hot reloading
+logging:
+  level: "INFO"                       # DEBUG, INFO, WARN, ERROR, FATAL
+  format: "console"                   # console or json
+  output: "stdout"                    # stdout, stderr, or file path
 ```
 
-#### **Production Setup (Comprehensive)**
+#### **Agent Service Configuration**
+
+Each service defines how to proxy traffic to backend applications:
+
 ```yaml
+services:
+  - id: "webapp"                      # Service identifier
+    name: "Web Application"           # Human-readable name
+    hosts:                            # Domain names to handle
+      - "app.example.com"
+      - "www.example.com"
+    protocol: "https"                 # Backend protocol
+    websocket: true                   # Enable WebSocket support
+    http_redirect: true               # Redirect HTTP to HTTPS
+    listen_on: "both"                 # "http", "https", or "both"
+    upstreams:                        # Backend servers
+      - address: "192.168.1.10:8080"
+        weight: 100                   # Load balancing weight
+        health_check:                 # Health monitoring
+          path: "/health"
+          interval: 30s
+          timeout: 5s
+    load_balancing:                   # Load balancing options
+      policy: "round_robin"           # round_robin, least_conn, ip_hash
+      health_check_required: true
+      session_affinity: true
+```
+
+### **Caddy Logging Configuration**
+
+The Zero Trust Proxy now supports two separate logging systems:
+
+#### **1. Application Logging (`logging` section)**
+
+Controls the internal Go application logs (server operations, agent communication, etc.)
+
+```yaml
+# Zero Trust Proxy Application Logging
+logging:
+  level: "INFO"                    # DEBUG, INFO, WARN, ERROR, FATAL
+  format: "console"                # console (human-readable) or json (structured)
+  output: "stdout"                 # stdout, stderr, or file path
+  component: "zero-trust-proxy"    # Component name for structured logging
+```
+
+**Format Options:**
+- **`console`**: Human-readable format with colors (good for development)
+- **`json`**: Structured JSON format (good for production and log aggregation)
+
+**Output Options:**
+- **`stdout`**: Standard output (default)
+- **`stderr`**: Standard error
+- **File path**: e.g., `/var/log/app.log` (file output support coming soon)
+
+#### **2. Caddy Logging (`caddy.logging` section)**
+
+Controls Caddy's HTTP access logs and operational logs
+
+```yaml
+caddy:
+  logging:
+    enabled: true                  # Enable Caddy logging
+    level: "INFO"                  # Caddy log level
+    format: "console"              # console or json
+    output: "stdout"               # stdout, stderr, or file path
+    
+    # HTTP access log fields to include
+    include:
+      - "ts"                       # Timestamp
+      - "request>method"           # HTTP method
+      - "request>uri"              # Request URI
+      - "status"                   # HTTP status code
+      - "duration"                 # Request duration
+    
+    # Fields to exclude (for security)
+    exclude:
+      - "request>headers>Authorization"
+      - "request>headers>Cookie"
+    
+    # Custom fields for all Caddy logs
+    fields:
+      service: "caddy-proxy"
+    
+    # Log sampling for high traffic
+    sampling_first: 100            # Log first 100 requests fully
+    sampling_thereafter: 100       # Then log every 100th request
+```
+
+## **Example Configurations by Use Case**
+
+### **Development Setup**
+
+**Recommended**: `server-logging-simple.yaml` + `agent-config.yaml`
+- Console format for easy reading
+- DEBUG level logging for detailed troubleshooting
+- All logs to stdout
+- No log sampling
+
+**Server Configuration:**
+```yaml
+logging:
+  level: "DEBUG"
+  format: "console"
+  output: "stdout"
+
 caddy:
   logging:
     enabled: true
     level: "INFO"
-    format: "json"                          # Structured logging
-    output: "/var/log/caddy-access.log"     # Persistent file logging
-    
-    include:                                # Detailed request tracking
-      - "user_id"
+    format: "console"
+    output: "stdout"
+```
+
+**Agent Configuration:**
+```yaml
+logging:
+  level: "DEBUG"
+  format: "console"
+  output: "stdout"
+  component: "zero-trust-agent-dev"
+  fields:
+    service: "zero-trust-agent"
+    environment: "development"
+```
+
+### **Production Setup**
+
+**Recommended**: `server-logging-production.yaml` + `agent-logging-config.yaml`
+- JSON format for log aggregation
+- Separate log files for application and access logs
+- Comprehensive field inclusion
+- Security-conscious field exclusion
+- Log sampling for high traffic
+
+**Server Configuration:**
+```yaml
+logging:
+  level: "INFO"
+  format: "json"
+  output: "/var/log/zero-trust-proxy/server.log"
+  fields:
+    service: "zero-trust-proxy"
+    environment: "production"
+    datacenter: "us-east-1"
+
+caddy:
+  logging:
+    enabled: true
+    format: "json"
+    output: "/var/log/zero-trust-proxy/access.log"
+    include:
+      - "ts"
+      - "request>method"
+      - "request>uri"
+      - "request>host"
+      - "request>remote_ip"
+      - "status"
       - "duration"
       - "size"
-      - "status"
-      - "method"
-      - "uri"
-      - "host"
-      - "request>remote_ip"
-      - "request>headers>User-Agent"
-      - "common_log"
-    
-    exclude:                                # Security: exclude sensitive data
+    exclude:
       - "request>headers>Authorization"
       - "request>headers>Cookie"
-      - "request>headers>X-API-Key"
-      - "request>body"
-      - "resp_headers>Set-Cookie"
-    
-    fields:                                 # Custom context fields
-      component: "zero-trust-caddy-proxy"
-      environment: "production"
-      version: "1.0.0"
-    
-    # Optional: Log sampling for high traffic
-    sampling_first: 100
+    sampling_first: 1000
     sampling_thereafter: 50
 ```
 
-#### **Hot Reload Support**
-
-Caddy logging configuration supports hot reload - changes to logging settings are applied without server restart:
-
-```bash
-# Edit your server configuration
-nano config/server.yaml
-
-# The logging configuration will be automatically updated
-# Check logs for confirmation:
-# "Caddy logging configuration changed, updating Caddy config..."
-# "Caddy logging configuration updated successfully"
-```
-
-### **Agent Configuration**
-
-Basic agent setup ([`agent-config.yaml`](agent-config.yaml)):
+**Agent Configuration:**
 ```yaml
-agent:
-  id: "your-agent-id"                    # Must match certificate CN
-  name: "Your Agent Name"
-
-server:
-  address: "your-server:8443"            # Your server address
-  
-services:
-  - id: "web-service"
-    hosts: ["app.example.com"]
-    protocol: "http"
-    upstreams:
-      - address: "localhost:3000"
+logging:
+  level: "INFO"
+  format: "json"
+  output: "/var/log/zero-trust-proxy/agent.log"
+  component: "zero-trust-agent-prod"
+  fields:
+    service: "zero-trust-agent"
+    environment: "production"
+    datacenter: "us-east-1"
+    deployment: "kubernetes"
+    pod_name: "${POD_NAME:-unknown}"
+    node_name: "${NODE_NAME:-unknown}"
 ```
 
-### **Homelab Configuration**
+### **Homelab/Self-Hosted Setup**
 
-The homelab example ([`agent-homelab-config.yaml`](agent-homelab-config.yaml)) demonstrates:
-- **Multi-service setup** with different protocols
-- **WebSocket support** for real-time applications
-- **Multiple hostnames** per service
-- **Real IP addresses** and container names
+**Recommended**: `server-config.yaml` + `agent-homelab-config.yaml`
+- Console format for easy troubleshooting
+- INFO level for normal operation
+- All logs to stdout (captured by Docker)
+- Minimal log sampling
 
-## 🔐 Certificate Management
-
-### **Automated Certificate Generation**
-
-Use the provided script for easy certificate generation:
-
-```bash
-# Make script executable (if not already)
-chmod +x examples/generate-certificates.sh
-
-# Generate all certificates
-./examples/generate-certificates.sh
-```
-
-This script will:
-1. Create `config/certs/` directory
-2. Generate CA certificate and key
-3. Generate server certificate and key
-4. Generate agent certificate and key
-5. Set proper file permissions
-6. Verify certificate validity
-
-### **Manual Certificate Generation**
-
-If you prefer manual generation:
-
-```bash
-# Generate CA
-docker run --rm -v $(pwd)/config/certs:/certs \
-  ghcr.io/devhatro/zero-trust-proxy/certgen:latest \
-  --ca /certs/ca.crt --ca-key /certs/ca.key \
-  --out /certs --name root --type ca
-
-# Generate server certificate
-docker run --rm -v $(pwd)/config/certs:/certs \
-  ghcr.io/devhatro/zero-trust-proxy/certgen:latest \
-  --ca /certs/ca.crt --ca-key /certs/ca.key \
-  --out /certs --name server --type server
-
-# Generate agent certificate
-docker run --rm -v $(pwd)/config/certs:/certs \
-  ghcr.io/devhatro/zero-trust-proxy/certgen:latest \
-  --ca /certs/ca.crt --ca-key /certs/ca.key \
-  --out /certs --name agent --type agent
-```
-
-## 🌐 Service Configuration Examples
-
-### **Basic Web Application**
+**Server Configuration:**
 ```yaml
-- id: "web-app"
-  hosts: ["app.example.com"]
-  protocol: "http"
-  upstreams:
-    - address: "web-app:3000"
+logging:
+  level: "INFO"
+  format: "console"
+  output: "stdout"
+  component: "zero-trust-proxy"
+  fields:
+    service: "zero-trust-proxy"
+    environment: "homelab"
+
+caddy:
+  logging:
+    enabled: true
+    level: "INFO"
+    format: "console"
+    output: "stdout"
 ```
 
-### **WebSocket Application**
+**Agent Configuration:**
 ```yaml
-- id: "websocket-app"
-  hosts: ["ws.example.com"]
-  websocket: true
-  protocol: "http"
-  upstreams:
-    - address: "websocket-app:4000"
+logging:
+  level: "INFO"
+  format: "console"
+  output: "stdout"
+  component: "zero-trust-agent-homelab"
+  fields:
+    service: "zero-trust-agent"
+    environment: "homelab"
+    location: "synology-nas"
 ```
 
-### **Load Balanced Service**
+## **Log Aggregation Integration**
+
+### **ELK Stack (Elasticsearch, Logstash, Kibana)**
+
+Use JSON format with structured fields:
+
 ```yaml
-- id: "api-service"
-  hosts: ["api.example.com"]
-  protocol: "https"
-  upstreams:
-    - address: "api-1:8080"
-      weight: 70
-    - address: "api-2:8080"
-      weight: 30
-  load_balancing:
-    policy: "weighted_round_robin"
+logging:
+  format: "json"
+  fields:
+    service: "zero-trust-proxy"
+    environment: "production"
+    cluster: "prod-cluster"
+
+caddy:
+  logging:
+    format: "json"
+    include: ["ts", "request>method", "request>uri", "status", "duration"]
 ```
 
-### **Multiple Hostnames (Homelab Style)**
+### **Grafana Loki**
+
+Works well with both console and JSON formats. JSON provides better querying:
+
 ```yaml
-- id: "synology"
-  hosts:
-    - nas.example.com
-    - drive.example.com
-    - photos.example.com
-  websocket: true
-  protocol: "https"
-  upstreams:
-    - address: "192.168.1.100:443"
+logging:
+  format: "json"
+  output: "stdout"  # Captured by Promtail
+
+caddy:
+  logging:
+    format: "json"
+    output: "stdout"
 ```
 
-## 🔧 Customization Tips
+### **Prometheus + Grafana**
 
-### **Environment-Specific Changes**
+Use structured logging to expose metrics:
 
-1. **Update Server Address**: Change `server.address` in agent config to your server's IP/hostname
-2. **Modify Service Hostnames**: Update `hosts` arrays to match your domain names
-3. **Adjust Backend Addresses**: Change `upstreams.address` to point to your actual services
-4. **Certificate Paths**: Ensure certificate paths match your deployment structure
+```yaml
+logging:
+  format: "json"
+  fields:
+    service: "zero-trust-proxy"
+    
+caddy:
+  logging:
+    format: "json"
+    include: ["status", "duration", "size"]  # For response time and error rate metrics
+```
 
-### **Production Considerations**
+## **Field Reference**
 
-1. **Log Levels**: Use `WARN` or `ERROR` for production to reduce log noise
-2. **Health Checks**: Enable health checks for critical services
-3. **Load Balancing**: Configure appropriate weights and policies
-4. **WebSocket Support**: Enable only for services that need real-time features
+### **Application Log Fields**
 
-### **Security Best Practices**
+| Field | Description | Example |
+|-------|-------------|---------|
+| `ts` | Timestamp | `2025-06-23T19:34:04.337+03:00` |
+| `level` | Log level | `info`, `error`, `debug` |
+| `msg` | Log message | `Agent connected successfully` |
+| `component` | Component name | `zero-trust-proxy` |
+| `fields` | Custom fields | `{"user_id": "123", "action": "login"}` |
 
-1. **Certificate Security**: Keep private keys secure with proper permissions (600)
-2. **Network Isolation**: Use Docker networks to isolate components
-3. **API Access**: Keep server API on localhost for security
-4. **Regular Updates**: Update certificates before expiration
+### **Caddy Access Log Fields**
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `ts` | Timestamp | `1640995200.123` |
+| `request>method` | HTTP method | `GET`, `POST` |
+| `request>uri` | Request URI | `/api/v1/status` |
+| `request>host` | Host header | `api.example.com` |
+| `request>remote_ip` | Client IP | `192.168.1.100` |
+| `status` | HTTP status | `200`, `404`, `500` |
+| `duration` | Request duration | `0.123` (seconds) |
+| `size` | Response size | `1024` (bytes) |
+
+## **Security Considerations**
+
+### **Sensitive Data Exclusion**
+
+Always exclude sensitive headers from logs:
+
+```yaml
+caddy:
+  logging:
+    exclude:
+      - "request>headers>Authorization"   # OAuth tokens, Basic auth
+      - "request>headers>Cookie"          # Session cookies
+      - "request>headers>X-Api-Key"       # API keys
+      - "request>headers>X-Auth-Token"    # Authentication tokens
+      - "request>body"                    # Request body (may contain secrets)
+```
+
+### **PII (Personal Identifiable Information)**
+
+Be careful with fields that might contain PII:
+
+```yaml
+caddy:
+  logging:
+    exclude:
+      - "request>headers>X-User-Email"    # User email addresses
+      - "request>uri"                     # May contain user IDs in path
+    # Instead, use sanitized versions or hashed values in custom fields
+```
+
+## **Performance Considerations**
+
+### **Log Sampling**
+
+For high-traffic environments, use sampling:
+
+```yaml
+caddy:
+  logging:
+    sampling_first: 1000        # Log first 1000 requests fully
+    sampling_thereafter: 100    # Then log every 100th request
+```
+
+### **File vs. Stdout**
+
+- **Stdout**: Better for containers and log aggregation systems
+- **Files**: Better for traditional deployments with log rotation
 
 ## 🚨 Troubleshooting
 

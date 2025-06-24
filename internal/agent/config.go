@@ -17,11 +17,12 @@ type AgentConfig struct {
 	ConfigPath       string                 `yaml:"-"` // File path for hot reload (not serialized)
 	Agent            AgentSettings          `yaml:"agent"`
 	Server           ServerConfig           `yaml:"server"`
+	Logging          LoggingConfig          `yaml:"logging,omitempty"` // Zero Trust Proxy agent logging
 	Services         []ServiceConfig        `yaml:"services"`
 	GlobalMiddleware []MiddlewareConfig     `yaml:"global_middleware,omitempty"`
 	HealthChecks     HealthCheckSettings    `yaml:"health_checks,omitempty"`
 	HotReload        common.HotReloadConfig `yaml:"hot_reload,omitempty"`
-	LogLevel         string                 `yaml:"log_level,omitempty"`
+	LogLevel         string                 `yaml:"log_level,omitempty"` // Deprecated: use logging.level instead
 }
 
 // ServerConfig contains server connection configuration
@@ -38,6 +39,13 @@ type AgentSettings struct {
 	Name   string   `yaml:"name,omitempty"`
 	Region string   `yaml:"region,omitempty"`
 	Tags   []string `yaml:"tags,omitempty"`
+}
+
+// LoggingConfig represents the application logging configuration
+type LoggingConfig struct {
+	Level  string `yaml:"level"`  // Log level (DEBUG, INFO, WARN, ERROR, FATAL)
+	Format string `yaml:"format"` // Output format (console, json)
+	Output string `yaml:"output"` // Output destination (stdout, stderr, or file path)
 }
 
 // ServiceConfig represents an enhanced service configuration
@@ -255,7 +263,12 @@ func createDefaultConfig() *AgentConfig {
 			Cert:    "/config/certs/agent.crt",
 			Key:     "/config/certs/agent.key",
 		},
-		LogLevel: "INFO",
+		Logging: LoggingConfig{
+			Level:  "INFO",
+			Format: "console",
+			Output: "stdout",
+		},
+		LogLevel: "INFO",            // Deprecated: maintained for backward compatibility
 		Services: []ServiceConfig{}, // No default services - user should configure their own
 	}
 }
@@ -265,6 +278,22 @@ func validateAndApplyDefaults(config *AgentConfig) error {
 	// Validate agent settings
 	if config.Agent.ID == "" {
 		return fmt.Errorf("agent.id is required")
+	}
+
+	// Apply defaults for logging configuration
+	if config.Logging.Level == "" {
+		// Use legacy log_level if new logging.level is not set
+		if config.LogLevel != "" {
+			config.Logging.Level = config.LogLevel
+		} else {
+			config.Logging.Level = "INFO"
+		}
+	}
+	if config.Logging.Format == "" {
+		config.Logging.Format = "console"
+	}
+	if config.Logging.Output == "" {
+		config.Logging.Output = "stdout"
 	}
 
 	// Validate services

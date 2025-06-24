@@ -19,6 +19,9 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
 )
 
+// Component-specific logger for certificate generation
+var log = logger.WithComponent("certgen")
+
 // Removed global flag definitions here
 // var (
 // 	outputDir = flag.String("output", "certs", "Output directory for certificates")
@@ -83,14 +86,14 @@ func main() {
 
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(*outputDir, 0755); err != nil {
-		logger.Fatal("❌ Failed to create output directory: %v", err)
+		log.Fatal("❌ Failed to create output directory: %v", err)
 	}
 
 	// Generate certificates based on flags
 	if *rootCA {
 		cert, key, err := generateRootCA()
 		if err != nil {
-			logger.Fatal("❌ Failed to generate Root CA: %v", err)
+			log.Fatal("❌ Failed to generate Root CA: %v", err)
 		}
 		saveCertificate(cert, key, *outputDir, "root")
 	}
@@ -98,7 +101,7 @@ func main() {
 	if *intermediateCA {
 		cert, key, err := generateIntermediateCA(nil, nil) // Root CA is self-signed
 		if err != nil {
-			logger.Fatal("❌ Failed to generate Intermediate CA: %v", err)
+			log.Fatal("❌ Failed to generate Intermediate CA: %v", err)
 		}
 		saveCertificate(cert, key, *outputDir, "intermediate")
 	}
@@ -106,42 +109,42 @@ func main() {
 	if *serverCA {
 		err := generateServerCert(*validity, *outputDir, *serverIP, *serverDNS)
 		if err != nil {
-			logger.Fatal("❌ Failed to generate Server CA: %v", err)
+			log.Fatal("❌ Failed to generate Server CA: %v", err)
 		}
 	}
 
 	if *clientCA {
 		if *clientID == "" {
-			logger.Fatal("❌ Client ID is required for generating Client CA")
+			log.Fatal("❌ Client ID is required for generating Client CA")
 		}
 		err := generateClientCert(*clientID, *validity, *outputDir)
 		if err != nil {
-			logger.Fatal("❌ Failed to generate Client CA: %v", err)
+			log.Fatal("❌ Failed to generate Client CA: %v", err)
 		}
 	}
 
 	if *proxyCert {
 		err := generateProxyCert()
 		if err != nil {
-			logger.Fatal("❌ Failed to generate proxy certificate: %v", err)
+			log.Fatal("❌ Failed to generate proxy certificate: %v", err)
 		}
 	}
 
 	// Log success messages only for the certificates that were actually generated
 	if *rootCA {
-		logger.Info("🔐 Root CA certificate generated successfully")
+		log.Info("🔐 Root CA certificate generated successfully")
 	}
 	if *intermediateCA {
-		logger.Info("🔑 Intermediate CA certificate generated successfully")
+		log.Info("🔑 Intermediate CA certificate generated successfully")
 	}
 	if *serverCA {
-		logger.Info("🖥️  Server certificate generated successfully")
+		log.Info("🖥️  Server certificate generated successfully")
 	}
 	if *clientCA {
-		logger.Info("👤 Client certificate for %s generated successfully", *clientID)
+		log.Info("👤 Client certificate for %s generated successfully", *clientID)
 	}
 	if *proxyCert {
-		logger.Info("🔗 Proxy certificate generated successfully")
+		log.Info("🔗 Proxy certificate generated successfully")
 	}
 }
 
@@ -225,11 +228,11 @@ func generateClientCert(clientID string, validity int, outputDir string) error {
 	}
 
 	// Create client certificate
-	logger.Info("🔨 Creating client certificate for %s:", clientID)
-	logger.Info("  📋 Subject: %s", clientTemplate.Subject.CommonName)
-	logger.Info("  🔧 Key Usage: %v", clientTemplate.KeyUsage)
-	logger.Info("  🎯 Extended Key Usage: %v", clientTemplate.ExtKeyUsage)
-	logger.Info("  📅 Valid from: %v to %v", clientTemplate.NotBefore, clientTemplate.NotAfter)
+	log.Info("🔨 Creating client certificate for %s:", clientID)
+	log.Info("  📋 Subject: %s", clientTemplate.Subject.CommonName)
+	log.Info("  🔧 Key Usage: %v", clientTemplate.KeyUsage)
+	log.Info("  🎯 Extended Key Usage: %v", clientTemplate.ExtKeyUsage)
+	log.Info("  📅 Valid from: %v to %v", clientTemplate.NotBefore, clientTemplate.NotAfter)
 
 	// Create client certificate signed by intermediate CA
 	clientCertDER, err := x509.CreateCertificate(rand.Reader, &clientTemplate, intermediateCert, &clientKey.PublicKey, intermediateKey)
@@ -407,24 +410,24 @@ func saveCertificate(cert *x509.Certificate, key *ecdsa.PrivateKey, outputDir st
 		Bytes: cert.Raw,
 	})
 	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
-		logger.Fatal("❌ Failed to save certificate: %v", err)
+		log.Fatal("❌ Failed to save certificate: %v", err)
 	}
 
 	// Save private key
 	keyFile := filepath.Join(outputDir, name+".key")
 	keyBytes, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		logger.Fatal("❌ Failed to marshal private key: %v", err)
+		log.Fatal("❌ Failed to marshal private key: %v", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "EC PRIVATE KEY",
 		Bytes: keyBytes,
 	})
 	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
-		logger.Fatal("❌ Failed to save private key: %v", err)
+		log.Fatal("❌ Failed to save private key: %v", err)
 	}
 
-	logger.Info("✅ %s certificate generated successfully", name)
+	log.Info("✅ %s certificate generated successfully", name)
 }
 
 func generateProxyCert() error {

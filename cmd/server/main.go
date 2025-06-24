@@ -8,6 +8,9 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/server"
 )
 
+// Component-specific logger for server main
+var log = logger.WithComponent("server")
+
 var (
 	configFile = flag.String("config", "/config/server.yaml", "Configuration file path")
 	listenAddr = flag.String("listen", "", "Server listen address (overrides config file)")
@@ -21,13 +24,13 @@ var (
 func main() {
 	flag.Parse()
 
-	logger.Info("🚀 0Trust Server Starting...")
-	logger.Info("🔧 Loading configuration from: %s", *configFile)
+	log.Info("🚀 0Trust Server Starting...")
+	log.Info("🔧 Loading configuration from: %s", *configFile)
 
 	// Load configuration from file
 	config, err := server.LoadServerConfig(*configFile)
 	if err != nil {
-		logger.Error("❌ Failed to load configuration: %v", err)
+		log.Error("❌ Failed to load configuration: %v", err)
 		os.Exit(1)
 	}
 
@@ -61,25 +64,25 @@ func main() {
 	}
 	logger.SetLogLevel(level)
 
-	logger.Info("🔧 Configuration: Listen=%s, API=%s, LogLevel=%s", config.Server.ListenAddr, config.API.ListenAddr, level)
+	log.Info("🔧 Configuration: Listen=%s, API=%s, LogLevel=%s", config.Server.ListenAddr, config.API.ListenAddr, level)
 
 	// Validate required configuration
 	if config.Server.CertFile == "" || config.Server.KeyFile == "" || config.Server.CAFile == "" {
-		logger.Error("❌ Missing required certificate files in configuration")
+		log.Error("❌ Missing required certificate files in configuration")
 		os.Exit(1)
 	}
 
-	logger.Debug("🔐 Certificate files: cert=%s, key=%s, ca=%s", config.Server.CertFile, config.Server.KeyFile, config.Server.CAFile)
+	log.Debug("🔐 Certificate files: cert=%s, key=%s, ca=%s", config.Server.CertFile, config.Server.KeyFile, config.Server.CAFile)
 
 	// Create and start server with configuration
 	s := server.NewServerWithConfig(config)
-	logger.Info("🌐 Starting server on %s (API on %s)", config.Server.ListenAddr, config.API.ListenAddr)
+	log.Info("🌐 Starting server on %s (API on %s)", config.Server.ListenAddr, config.API.ListenAddr)
 	if err := s.Start(); err != nil {
-		logger.Error("💥 Server error: %v", err)
+		log.Error("💥 Server error: %v", err)
 		os.Exit(1)
 	}
 
 	// Keep the program running
-	logger.Info("✅ Server is running and ready to accept connections")
+	log.Info("✅ Server is running and ready to accept connections")
 	select {}
 }

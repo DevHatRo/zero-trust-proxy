@@ -14,6 +14,9 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/types"
 )
 
+// Component-specific logger for Caddy manager
+var log = logger.WithComponent("caddy.manager")
+
 // NewManager creates a new enhanced Caddy manager with validation
 func NewManager(adminAPI string) *Manager {
 	return &Manager{
@@ -55,7 +58,7 @@ func (cm *Manager) AddFullServiceConfig(hostname, backend, protocol string, webS
 	}
 
 	// SERVER-SIDE VALIDATION: Validate configuration before applying
-	logger.Debug("🔍 Server-side validation for service: %s", hostname)
+	log.Debug("🔍 Server-side validation for service: %s", hostname)
 
 	// Convert to types.ServiceConfig for validation
 	typesConfig := convertServiceConfigToTypes(serviceConfig)
@@ -66,13 +69,13 @@ func (cm *Manager) AddFullServiceConfig(hostname, backend, protocol string, webS
 		for _, err := range validationResult.Errors {
 			errorMessages = append(errorMessages, err.Error())
 		}
-		logger.Error("❌ Server-side validation failed for service %s: %s",
+		log.Error("❌ Server-side validation failed for service %s: %s",
 			hostname, strings.Join(errorMessages, "; "))
 		return fmt.Errorf("server-side validation failed for service %s: %s",
 			hostname, strings.Join(errorMessages, "; "))
 	}
 
-	logger.Info("✅ Server-side validation passed for service: %s", hostname)
+	log.Info("✅ Server-side validation passed for service: %s", hostname)
 
 	// Store configuration after validation passes
 	cm.config[hostname] = serviceConfig
@@ -89,7 +92,7 @@ func (cm *Manager) AddEnhancedService(serviceConfig *agent.ServiceConfig) error 
 	defer cm.mu.Unlock()
 
 	// SERVER-SIDE VALIDATION: Validate enhanced configuration before applying
-	logger.Debug("🔍 Server-side validation for enhanced service: %s", serviceConfig.Hostname)
+	log.Debug("🔍 Server-side validation for enhanced service: %s", serviceConfig.Hostname)
 
 	// Create simple config for validation
 	simpleConfig := &ServiceConfig{
@@ -110,13 +113,13 @@ func (cm *Manager) AddEnhancedService(serviceConfig *agent.ServiceConfig) error 
 		for _, err := range validationResult.Errors {
 			errorMessages = append(errorMessages, err.Error())
 		}
-		logger.Error("❌ Server-side validation failed for enhanced service %s: %s",
+		log.Error("❌ Server-side validation failed for enhanced service %s: %s",
 			serviceConfig.Hostname, strings.Join(errorMessages, "; "))
 		return fmt.Errorf("server-side validation failed for enhanced service %s: %s",
 			serviceConfig.Hostname, strings.Join(errorMessages, "; "))
 	}
 
-	logger.Info("✅ Server-side validation passed for enhanced service: %s", serviceConfig.Hostname)
+	log.Info("✅ Server-side validation passed for enhanced service: %s", serviceConfig.Hostname)
 
 	// Store enhanced config for advanced Caddy features
 	cm.enhancedServices[serviceConfig.Hostname] = serviceConfig
@@ -141,7 +144,7 @@ func (cm *Manager) RemoveService(hostname string) error {
 	// Remove from validator tracking
 	cm.validator.RemoveExistingService(hostname)
 
-	logger.Info("🗑️  Removed service %s from Caddy configuration and validator tracking", hostname)
+	log.Info("🗑️  Removed service %s from Caddy configuration and validator tracking", hostname)
 
 	return cm.reloadConfig()
 }
@@ -210,17 +213,17 @@ func (cm *Manager) reloadConfig() error {
 		// Configure protocols based on WebSocket requirements
 		if hasWebSocketServices {
 			httpsServer["protocols"] = []string{"h1"}
-			logger.Info("🔌 Configuring HTTPS server with HTTP/1.1 only due to WebSocket services")
+			log.Info("🔌 Configuring HTTPS server with HTTP/1.1 only due to WebSocket services")
 		} else {
 			httpsServer["protocols"] = []string{"h1", "h2"}
-			logger.Debug("⚡ Configuring HTTPS server with HTTP/1.1 and HTTP/2 support")
+			log.Debug("⚡ Configuring HTTPS server with HTTP/1.1 and HTTP/2 support")
 		}
 
 		// Enable access logging for HTTPS server using default logger
 		httpsServer["logs"] = map[string]interface{}{
 			"default_logger_name": "default",
 		}
-		logger.Debug("🔧 Enabled access logging for HTTPS server")
+		log.Debug("🔧 Enabled access logging for HTTPS server")
 
 		servers["https"] = httpsServer
 	}
@@ -239,7 +242,7 @@ func (cm *Manager) reloadConfig() error {
 		httpServer["logs"] = map[string]interface{}{
 			"default_logger_name": "default",
 		}
-		logger.Debug("🔧 Enabled access logging for HTTP server")
+		log.Debug("🔧 Enabled access logging for HTTP server")
 
 		servers["http"] = httpServer
 	}
@@ -264,7 +267,7 @@ func (cm *Manager) reloadConfig() error {
 			"module": "file_system",
 			"root":   configDir,
 		}
-		logger.Debug("📁 Using custom certificate storage for config reload: %s", configDir)
+		log.Debug("📁 Using custom certificate storage for config reload: %s", configDir)
 	}
 
 	// Convert to JSON
@@ -285,7 +288,7 @@ func (cm *Manager) reloadConfig() error {
 		return fmt.Errorf("❌ Caddy API returned non-200 status: %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	logger.Info("✅ Successfully reloaded enhanced Caddy configuration with %d services", len(cm.config))
+	log.Info("✅ Successfully reloaded enhanced Caddy configuration with %d services", len(cm.config))
 	return nil
 }
 
@@ -381,7 +384,7 @@ func (cm *Manager) buildHTTPRoutes() []map[string]interface{} {
 				},
 			}
 			routes = append(routes, redirectRoute)
-			logger.Debug("🔀 Added HTTP to HTTPS redirect for: %s", hostname)
+			log.Debug("🔀 Added HTTP to HTTPS redirect for: %s", hostname)
 		}
 	}
 
@@ -454,7 +457,7 @@ func (cm *Manager) buildSimpleServiceRoute(service *ServiceConfig) map[string]in
 	// Add WebSocket identification if enabled
 	if service.WebSocket {
 		requestHeaders["X-WebSocket-Enabled"] = []string{"true"}
-		logger.Debug("🔌 Simple service %s: WebSocket support enabled", service.Hostname)
+		log.Debug("🔌 Simple service %s: WebSocket support enabled", service.Hostname)
 	}
 
 	return map[string]interface{}{
@@ -743,7 +746,7 @@ func (cm *Manager) buildHeadersHandler(middleware *agent.MiddlewareConfig) map[s
 func (cm *Manager) buildRateLimitHandler(middleware *agent.MiddlewareConfig) map[string]interface{} {
 	// Rate limiting would require a Caddy plugin
 	// For now, we'll log that it's configured but not implemented in Caddy
-	logger.Info("⚠️  Rate limiting configured for service but requires Caddy plugin")
+	log.Info("⚠️  Rate limiting configured for service but requires Caddy plugin")
 	return nil
 }
 
@@ -786,7 +789,7 @@ func (cm *Manager) buildReverseProxyHandler(service *ServiceConfig, enhancedServ
 	}
 
 	// Enhanced security features would be configured here
-	logger.Debug("🌐 Service %s: configured for transparent header passthrough", service.Hostname)
+	log.Debug("🌐 Service %s: configured for transparent header passthrough", service.Hostname)
 
 	return handler
 }
