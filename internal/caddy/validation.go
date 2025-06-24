@@ -13,6 +13,9 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/types"
 )
 
+// Component-specific logger for Caddy validation
+var validationLog = logger.WithComponent("caddy.validation")
+
 // ValidationContext indicates where the validation is being performed
 type ValidationContext string
 
@@ -93,7 +96,7 @@ func (v *Validator) ValidateServiceConfig(config *types.ServiceConfig) *types.Va
 	if v.context == ServerValidation {
 		expectedBackend := "127.0.0.1:9443"
 		if config.Backend != expectedBackend {
-			logger.Warn("⚠️  Backend %s does not match expected server API address %s", config.Backend, expectedBackend)
+			validationLog.Warn("⚠️  Backend %s does not match expected server API address %s", config.Backend, expectedBackend)
 		}
 	}
 
@@ -101,7 +104,7 @@ func (v *Validator) ValidateServiceConfig(config *types.ServiceConfig) *types.Va
 	if result.Valid && !v.skipBinaryValidation {
 		// Check if Caddy binary is available
 		if _, err := exec.LookPath(v.caddyBinary); err != nil {
-			logger.Debug("⚠️  Caddy binary not found at '%s', skipping binary validation: %v", v.caddyBinary, err)
+			validationLog.Debug("⚠️  Caddy binary not found at '%s', skipping binary validation: %v", v.caddyBinary, err)
 		} else {
 			if err := v.validateWithCaddyBinary(config); err != nil {
 				result.Valid = false
@@ -380,7 +383,7 @@ func (v *Validator) runCaddyValidate(configFile string) error {
 		return fmt.Errorf("caddy validate command failed: %w (output: %s)", err, outputStr)
 	}
 
-	logger.Debug("✅ Caddy binary validation passed for hostname: %s", configFile)
+	validationLog.Debug("✅ Caddy binary validation passed for hostname: %s", configFile)
 	return nil
 }
 

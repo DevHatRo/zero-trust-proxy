@@ -8,6 +8,9 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
 )
 
+// Component-specific logger for WebSocket management
+var wsLog = logger.WithComponent("common.websocket")
+
 // WebSocketConnection represents an active WebSocket connection with health monitoring
 type WebSocketConnection struct {
 	conn         net.Conn
@@ -92,17 +95,17 @@ func (wsc *WebSocketConnection) startHealthMonitoring() {
 				isHealthy := wsc.IsHealthy()
 
 				if !isHealthy {
-					logger.Info("💀 WebSocket connection unhealthy (last activity: %v), closing",
+					wsLog.Info("💀 WebSocket connection unhealthy (last activity: %v), closing",
 						timeSinceActivity.Round(time.Second))
 					wsc.Close()
 					return
 				} else {
-					logger.Debug("✅ WebSocket health check passed (last activity: %v)",
+					wsLog.Debug("✅ WebSocket health check passed (last activity: %v)",
 						timeSinceActivity.Round(time.Second))
 				}
 
 			case <-wsc.done:
-				logger.Debug("🛑 WebSocket health monitoring stopped")
+				wsLog.Debug("🛑 WebSocket health monitoring stopped")
 				return
 			}
 		}
@@ -180,7 +183,7 @@ func (wsm *WebSocketManager) CleanupStaleConnections() int {
 		if !wsc.IsHealthy() {
 			lastActivity := time.Since(wsc.GetLastActivity())
 			staleConnections = append(staleConnections, id)
-			logger.Info("💀 Marking unhealthy connection for cleanup: ID=%s, LastActivity=%v",
+			wsLog.Info("💀 Marking unhealthy connection for cleanup: ID=%s, LastActivity=%v",
 				id[:min(8, len(id))]+"...", lastActivity.Round(time.Second))
 			wsc.Close()
 		} else {
@@ -195,7 +198,7 @@ func (wsm *WebSocketManager) CleanupStaleConnections() int {
 
 	if len(staleConnections) > 0 {
 		totalBefore := len(wsm.connections) + len(staleConnections)
-		logger.Info("🧹 WebSocket cleanup: Removed=%d, Healthy=%d, Total=%d→%d",
+		wsLog.Info("🧹 WebSocket cleanup: Removed=%d, Healthy=%d, Total=%d→%d",
 			len(staleConnections), healthyCount, totalBefore, len(wsm.connections))
 	}
 
@@ -224,12 +227,12 @@ func (wsm *WebSocketManager) CloseAll() {
 	wsm.mu.Lock()
 	defer wsm.mu.Unlock()
 
-	logger.Info("🧹 Closing all %d WebSocket connections", len(wsm.connections))
+	wsLog.Info("🧹 Closing all %d WebSocket connections", len(wsm.connections))
 
 	for id, wsc := range wsm.connections {
 		if wsc != nil {
 			wsc.Close()
-			logger.Debug("🗑️  Closed WebSocket connection: ID=%s", id[:min(8, len(id))]+"...")
+			wsLog.Debug("🗑️  Closed WebSocket connection: ID=%s", id[:min(8, len(id))]+"...")
 		}
 	}
 

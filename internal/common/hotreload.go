@@ -11,6 +11,9 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// Component-specific logger for hot reload functionality
+var log = logger.WithComponent("common.hotreload")
+
 // HotReloadConfig represents generic hot reload configuration
 type HotReloadConfig struct {
 	Enabled         bool          `yaml:"enabled,omitempty"`
@@ -55,13 +58,13 @@ func NewFileWatcher(reloader ConfigReloader) *FileWatcher {
 func (fw *FileWatcher) Start() error {
 	// Check if hot reload is enabled
 	if !fw.reloader.IsHotReloadEnabled() {
-		logger.Info("🔥 Hot reload disabled for %s", fw.reloader.GetComponentName())
+		log.Info("🔥 Hot reload disabled for %s", fw.reloader.GetComponentName())
 		return nil
 	}
 
 	configPath := fw.reloader.GetConfigPath()
 	if configPath == "" {
-		logger.Debug("🔥 Hot reload disabled: no config path available for %s", fw.reloader.GetComponentName())
+		log.Debug("🔥 Hot reload disabled: no config path available for %s", fw.reloader.GetComponentName())
 		return nil
 	}
 
@@ -88,7 +91,7 @@ func (fw *FileWatcher) Start() error {
 	// Also watch the directory for atomic writes (editors often write to temp file then rename)
 	configDir := filepath.Dir(configPath)
 	if err := fw.watcher.Add(configDir); err != nil {
-		logger.Warn("⚠️  Failed to watch config directory %s: %v", configDir, err)
+		log.Warn("⚠️  Failed to watch config directory %s: %v", configDir, err)
 	}
 
 	fw.running = true
@@ -97,7 +100,7 @@ func (fw *FileWatcher) Start() error {
 	// Start watching in background
 	go fw.watchLoop()
 
-	logger.Info("🔥 Hot reload enabled for %s: watching %s for changes",
+	log.Info("🔥 Hot reload enabled for %s: watching %s for changes",
 		fw.reloader.GetComponentName(), configPath)
 
 	return nil
@@ -121,13 +124,13 @@ func (fw *FileWatcher) Stop() error {
 	// Close the watcher
 	if fw.watcher != nil {
 		if err := fw.watcher.Close(); err != nil {
-			logger.Error("❌ Error closing file watcher: %v", err)
+			log.Error("❌ Error closing file watcher: %v", err)
 		}
 		fw.watcher = nil
 	}
 
 	fw.running = false
-	logger.Info("🔥 Hot reload stopped for %s", fw.reloader.GetComponentName())
+	log.Info("🔥 Hot reload stopped for %s", fw.reloader.GetComponentName())
 
 	return nil
 }
@@ -135,7 +138,7 @@ func (fw *FileWatcher) Stop() error {
 // watchLoop handles file system events and triggers reloads
 func (fw *FileWatcher) watchLoop() {
 	defer func() {
-		logger.Debug("🔥 File watcher loop exiting for %s", fw.reloader.GetComponentName())
+		log.Debug("🔥 File watcher loop exiting for %s", fw.reloader.GetComponentName())
 	}()
 
 	configPath := fw.reloader.GetConfigPath()
@@ -146,7 +149,7 @@ func (fw *FileWatcher) watchLoop() {
 	fw.mu.RUnlock()
 
 	if watcher == nil {
-		logger.Debug("🔥 File watcher is nil, exiting loop for %s", fw.reloader.GetComponentName())
+		log.Debug("🔥 File watcher is nil, exiting loop for %s", fw.reloader.GetComponentName())
 		return
 	}
 
@@ -154,7 +157,7 @@ func (fw *FileWatcher) watchLoop() {
 		select {
 		case event, ok := <-watcher.Events:
 			if !ok {
-				logger.Debug("🔥 Config watcher events channel closed for %s", fw.reloader.GetComponentName())
+				log.Debug("🔥 Config watcher events channel closed for %s", fw.reloader.GetComponentName())
 				return
 			}
 
@@ -162,7 +165,7 @@ func (fw *FileWatcher) watchLoop() {
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
 				// Handle both direct writes and atomic writes (temp file renames)
 				if event.Name == configPath || filepath.Base(event.Name) == filepath.Base(configPath) {
-					logger.Info("🔥 Config file changed: %s (event: %s) for %s",
+					log.Info("🔥 Config file changed: %s (event: %s) for %s",
 						event.Name, event.Op.String(), fw.reloader.GetComponentName())
 
 					// Use debouncing to handle rapid successive writes
@@ -172,10 +175,10 @@ func (fw *FileWatcher) watchLoop() {
 
 		case err, ok := <-watcher.Errors:
 			if !ok {
-				logger.Debug("🔥 Config watcher errors channel closed for %s", fw.reloader.GetComponentName())
+				log.Debug("🔥 Config watcher errors channel closed for %s", fw.reloader.GetComponentName())
 				return
 			}
-			logger.Error("🔥 Config watcher error for %s: %v", fw.reloader.GetComponentName(), err)
+			log.Error("🔥 Config watcher error for %s: %v", fw.reloader.GetComponentName(), err)
 		}
 	}
 }
@@ -190,7 +193,7 @@ func (fw *FileWatcher) scheduleReload() {
 	// Start new timer
 	fw.debounceTimer = time.AfterFunc(fw.debounceDelay, func() {
 		if err := fw.performReload(); err != nil {
-			logger.Error("❌ Failed to reload config for %s: %v", fw.reloader.GetComponentName(), err)
+			log.Error("❌ Failed to reload config for %s: %v", fw.reloader.GetComponentName(), err)
 		}
 	})
 }
@@ -199,7 +202,7 @@ func (fw *FileWatcher) scheduleReload() {
 func (fw *FileWatcher) performReload() error {
 	// Prevent too frequent reloads
 	if time.Since(fw.lastReloadTime) < 500*time.Millisecond {
-		logger.Debug("🔥 Skipping reload due to rate limiting for %s", fw.reloader.GetComponentName())
+		log.Debug("🔥 Skipping reload due to rate limiting for %s", fw.reloader.GetComponentName())
 		return nil
 	}
 
@@ -208,19 +211,19 @@ func (fw *FileWatcher) performReload() error {
 
 // performReloadImmediate executes the actual configuration reload without rate limiting
 func (fw *FileWatcher) performReloadImmediate() error {
-	logger.Info("🔄 Reloading configuration for %s from %s",
+	log.Info("🔄 Reloading configuration for %s from %s",
 		fw.reloader.GetComponentName(), fw.reloader.GetConfigPath())
 
 	startTime := time.Now()
 	if err := fw.reloader.ReloadConfig(); err != nil {
-		logger.Error("❌ Configuration reload failed for %s: %v", fw.reloader.GetComponentName(), err)
+		log.Error("❌ Configuration reload failed for %s: %v", fw.reloader.GetComponentName(), err)
 		return err
 	}
 
 	fw.lastReloadTime = time.Now()
 	reloadDuration := time.Since(startTime)
 
-	logger.Info("✅ Configuration reloaded successfully for %s (took %v)",
+	log.Info("✅ Configuration reloaded successfully for %s (took %v)",
 		fw.reloader.GetComponentName(), reloadDuration.Round(time.Millisecond))
 	return nil
 }
@@ -264,7 +267,7 @@ func (hrm *HotReloadManager) RegisterReloader(reloader ConfigReloader) error {
 		return fmt.Errorf("failed to start watcher for %s: %w", componentName, err)
 	}
 
-	logger.Info("🔥 Registered hot reload for component: %s", componentName)
+	log.Info("🔥 Registered hot reload for component: %s", componentName)
 	return nil
 }
 
@@ -279,11 +282,11 @@ func (hrm *HotReloadManager) UnregisterReloader(componentName string) error {
 	}
 
 	if err := watcher.Stop(); err != nil {
-		logger.Error("❌ Error stopping watcher for %s: %v", componentName, err)
+		log.Error("❌ Error stopping watcher for %s: %v", componentName, err)
 	}
 
 	delete(hrm.watchers, componentName)
-	logger.Info("🔥 Unregistered hot reload for component: %s", componentName)
+	log.Info("🔥 Unregistered hot reload for component: %s", componentName)
 	return nil
 }
 
@@ -294,12 +297,12 @@ func (hrm *HotReloadManager) StopAll() {
 
 	for componentName, watcher := range hrm.watchers {
 		if err := watcher.Stop(); err != nil {
-			logger.Error("❌ Error stopping watcher for %s: %v", componentName, err)
+			log.Error("❌ Error stopping watcher for %s: %v", componentName, err)
 		}
 	}
 
 	hrm.watchers = make(map[string]*FileWatcher)
-	logger.Info("🔥 Stopped all hot reload watchers")
+	log.Info("🔥 Stopped all hot reload watchers")
 }
 
 // GetStatus returns the status of all registered watchers
@@ -327,7 +330,7 @@ func (hrm *HotReloadManager) TriggerReload(componentName string) error {
 		return fmt.Errorf("no reloader registered for component: %s", componentName)
 	}
 
-	logger.Info("🔄 Manually triggering reload for %s", componentName)
+	log.Info("🔄 Manually triggering reload for %s", componentName)
 	// Bypass rate limiting for manual triggers
 	return watcher.performReloadImmediate()
 }

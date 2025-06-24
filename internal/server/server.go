@@ -25,6 +25,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// Component-specific logger for server
+var log = logger.WithComponent("server")
+
 // Server represents the main server
 type Server struct {
 	listenAddr       string
@@ -97,12 +100,35 @@ func NewServerWithConfig(config *ServerConfig) *Server {
 		config:           config,
 		hotReloadManager: common.NewHotReloadManager(),
 	}
+
+	// Apply logging configuration from config
+	applyLoggingConfig(config.Logging)
+
 	return s
+}
+
+// applyLoggingConfig applies the logging configuration to the logger package
+func applyLoggingConfig(config LoggingConfig) {
+	// Set log level
+	if config.Level != "" {
+		logger.SetLogLevel(config.Level)
+	}
+
+	// Set format
+	if config.Format != "" {
+		logger.SetFormat(config.Format)
+	}
+
+	// Note: Output redirection to files would require more complex implementation
+	// For now, we support stdout/stderr via the default logger output
+	if config.Output != "" && config.Output != "stdout" && config.Output != "stderr" {
+		logger.Warn("File output for application logging not yet implemented, using stdout")
+	}
 }
 
 // Start starts the server
 func (s *Server) Start() error {
-	logger.Info("🚀 Starting 0Trust server...")
+	log.Info("🚀 Starting 0Trust server...")
 
 	// Load certificates
 	cert, err := tls.LoadX509KeyPair(s.certFile, s.keyFile)
@@ -125,14 +151,14 @@ func (s *Server) Start() error {
 	s.cert = cert
 	s.caCertPool = caCertPool
 
-	logger.Info("🔐 SSL certificates loaded successfully")
+	log.Info("🔐 SSL certificates loaded successfully")
 
 	// Initialize WebSocket manager
 	s.wsManager = common.NewWebSocketManager()
 
 	// Initialize CaddyManager
 	s.caddyManager = caddy.NewManager("http://localhost:2019")
-	logger.Info("⚙️  Caddy manager initialized")
+	log.Info("⚙️  Caddy manager initialized")
 
 	// Start Caddy
 	if err := s.startCaddy(); err != nil {
@@ -140,16 +166,16 @@ func (s *Server) Start() error {
 	}
 
 	// Start shared hot reload system
-	logger.Info("🔥 Starting shared hot reload system")
+	log.Info("🔥 Starting shared hot reload system")
 	if err := s.hotReloadManager.RegisterReloader(s); err != nil {
-		logger.Error("❌ Failed to register server hot reload: %v", err)
+		log.Error("❌ Failed to register server hot reload: %v", err)
 	}
 
 	// Start WebSocket health monitoring
-	logger.Info("🔌 Starting WebSocket health monitoring")
+	log.Info("🔌 Starting WebSocket health monitoring")
 	s.startWebSocketHealthMonitoring()
 
-	logger.Info("🌐 Server listening on %s (API on %s)", s.listenAddr, s.apiAddr)
+	log.Info("🌐 Server listening on %s (API on %s)", s.listenAddr, s.apiAddr)
 
 	// Start both API servers (this will block and handle all connections)
 	return s.startAPIServer()
@@ -157,7 +183,7 @@ func (s *Server) Start() error {
 
 // startCaddy starts the Caddy server
 func (s *Server) startCaddy() error {
-	logger.Info("🚀 Starting Caddy reverse proxy...")
+	log.Info("🚀 Starting Caddy reverse proxy...")
 
 	// Kill any existing Caddy processes
 	exec.Command("pkill", "caddy").Run()
@@ -165,10 +191,10 @@ func (s *Server) startCaddy() error {
 	// Create /config directory structure for certificates
 	configDir := "/config/caddy"
 	if err := os.MkdirAll(configDir, 0755); err != nil {
-		logger.Info("⚠️  Could not create %s directory (may not have permissions), using default storage: %v", configDir, err)
+		log.Info("⚠️  Could not create %s directory (may not have permissions), using default storage: %v", configDir, err)
 		configDir = "" // Use default storage
 	} else {
-		logger.Info("📁 Using custom certificate storage: %s", configDir)
+		log.Info("📁 Using custom certificate storage: %s", configDir)
 	}
 
 	// Create initial Caddy config with custom storage
@@ -198,6 +224,124 @@ func (s *Server) startCaddy() error {
 		},
 	}
 
+	// Add logging configuration if enabled
+	s.configMu.RLock()
+	loggingConfig := s.config.Caddy.Logging
+	s.configMu.RUnlock()
+
+	if loggingConfig.Enabled {
+		log.Info("🔧 Configuring Caddy logging: level=%s, format=%s, output=%s",
+			loggingConfig.Level, loggingConfig.Format, loggingConfig.Output)
+
+		caddyLogging := map[string]interface{}{
+			"logs": map[string]interface{}{
+				"default": map[string]interface{}{},
+			},
+		}
+
+		// Set log level
+		if loggingConfig.Level != "" {
+			caddyLogging["logs"].(map[string]interface{})["default"].(map[string]interface{})["level"] = strings.ToUpper(loggingConfig.Level)
+		}
+
+		// Configure encoder (format)
+		encoderConfig := map[string]interface{}{}
+
+		switch strings.ToLower(loggingConfig.Format) {
+		case "json":
+			encoderConfig["format"] = "json"
+		case "console":
+			encoderConfig["format"] = "console"
+		case "single_field":
+			encoderConfig["format"] = "single_field"
+		case "filter":
+			encoderConfig["format"] = "filter"
+		default:
+			encoderConfig["format"] = "console" // Default to console
+		}
+
+		// Add custom fields if specified
+		if len(loggingConfig.Fields) > 0 {
+			encoderConfig["fields"] = loggingConfig.Fields
+		}
+
+		// Set encoder configuration
+		caddyLogging["logs"].(map[string]interface{})["default"].(map[string]interface{})["encoder"] = encoderConfig
+
+		// Configure writer (output)
+		writerConfig := map[string]interface{}{}
+
+		switch strings.ToLower(loggingConfig.Output) {
+		case "stdout":
+			writerConfig["output"] = "stdout"
+		case "stderr":
+			writerConfig["output"] = "stderr"
+		case "discard":
+			writerConfig["output"] = "discard"
+		default:
+			// Assume it's a file path if not one of the standard outputs
+			if loggingConfig.Output != "" && !strings.Contains(strings.ToLower(loggingConfig.Output), "std") {
+				writerConfig["output"] = "file"
+				writerConfig["filename"] = loggingConfig.Output
+			} else {
+				writerConfig["output"] = "stdout" // Default to stdout
+			}
+		}
+
+		caddyLogging["logs"].(map[string]interface{})["default"].(map[string]interface{})["writer"] = writerConfig
+
+		// Configure HTTP server access logs (always enable when logging is enabled)
+		accessLogConfig := map[string]interface{}{
+			"default_logger_name": "default", // Use the main logger
+		}
+
+		// Add include/exclude fields if specified
+		if len(loggingConfig.Include) > 0 {
+			accessLogConfig["include"] = loggingConfig.Include
+		}
+
+		if len(loggingConfig.Exclude) > 0 {
+			accessLogConfig["exclude"] = loggingConfig.Exclude
+		}
+
+		// Apply access logging to ALL HTTP servers that exist
+		if httpApp, ok := config["apps"].(map[string]interface{})["http"].(map[string]interface{}); ok {
+			if servers, ok := httpApp["servers"].(map[string]interface{}); ok {
+				// Apply to srv0 (if it exists from initial startup)
+				if srv0, ok := servers["srv0"].(map[string]interface{}); ok {
+					srv0["logs"] = accessLogConfig
+					log.Debug("🔧 Applied access logging to srv0")
+				}
+
+				// Also apply to any dynamically created servers (https, http)
+				for serverName, serverConfig := range servers {
+					if serverMap, ok := serverConfig.(map[string]interface{}); ok {
+						serverMap["logs"] = accessLogConfig
+						log.Debug("🔧 Applied access logging to server: %s", serverName)
+					}
+				}
+			}
+		}
+
+		// Add sampling configuration if specified
+		if loggingConfig.SamplingFirst > 0 || loggingConfig.SamplingThereafter > 0 {
+			samplingConfig := map[string]interface{}{}
+
+			if loggingConfig.SamplingFirst > 0 {
+				samplingConfig["first"] = loggingConfig.SamplingFirst
+			}
+
+			if loggingConfig.SamplingThereafter > 0 {
+				samplingConfig["thereafter"] = loggingConfig.SamplingThereafter
+			}
+
+			caddyLogging["logs"].(map[string]interface{})["default"].(map[string]interface{})["sampling"] = samplingConfig
+		}
+
+		// Add logging configuration to main config
+		config["logging"] = caddyLogging
+	}
+
 	// Add custom storage configuration if we have permissions
 	if configDir != "" {
 		config["storage"] = map[string]interface{}{
@@ -216,7 +360,7 @@ func (s *Server) startCaddy() error {
 		return fmt.Errorf("❌ failed to write Caddy config: %v", err)
 	}
 
-	logger.Debug("📄 Caddy configuration written to %s", configFile)
+	log.Debug("📄 Caddy configuration written to %s", configFile)
 
 	// Start Caddy process
 	cmd := exec.Command("caddy", "run", "--config", configFile)
@@ -232,17 +376,17 @@ func (s *Server) startCaddy() error {
 		return fmt.Errorf("❌ failed to start Caddy: %v", err)
 	}
 
-	logger.Info("🔄 Caddy process started, waiting for API to be ready...")
+	log.Info("🔄 Caddy process started, waiting for API to be ready...")
 
 	// Wait for Caddy to start
 	for i := 0; i < 10; i++ {
-		logger.Debug("⏱️  Waiting for Caddy to start on %s (attempt %d/10): ", s.caddyAdminAPI, i+1)
+		log.Debug("⏱️  Waiting for Caddy to start on %s (attempt %d/10): ", s.caddyAdminAPI, i+1)
 		// Use the correct URL with trailing slash and follow redirects
 		resp, err := http.Get(s.caddyAdminAPI + "/config/")
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				logger.Info("✅ Caddy started successfully")
+				log.Info("✅ Caddy started successfully")
 				return nil
 			}
 		}
@@ -262,18 +406,18 @@ func (s *Server) handleAgentConnection(conn net.Conn) {
 	var msg common.Message
 	decoder := json.NewDecoder(conn)
 	if err := decoder.Decode(&msg); err != nil {
-		logger.Error("❌ Failed to read initial message: %v", err)
+		log.Error("❌ Failed to read initial message: %v", err)
 		return
 	}
 
 	if msg.Type != "register" {
-		logger.Error("❌ Invalid initial message type: %s", msg.Type)
+		log.Error("❌ Invalid initial message type: %s", msg.Type)
 		return
 	}
 
 	agentID := msg.ID
 	if agentID == "" {
-		logger.Error("❌ Missing agent ID in registration message")
+		log.Error("❌ Missing agent ID in registration message")
 		return
 	}
 
@@ -292,11 +436,11 @@ func (s *Server) handleAgentConnection(conn net.Conn) {
 		ID:   agentID,
 	}
 	if err := agent.SendMessage(response); err != nil {
-		logger.Error("❌ Failed to send registration response: %v", err)
+		log.Error("❌ Failed to send registration response: %v", err)
 		return
 	}
 
-	logger.Info("🔗 Agent %s connected (Total: %d)", agentID, totalAgents)
+	log.Info("🔗 Agent %s connected (Total: %d)", agentID, totalAgents)
 
 	// Handle messages from agent
 	for {
@@ -308,13 +452,13 @@ func (s *Server) handleAgentConnection(conn net.Conn) {
 		agent.readMu.Unlock()
 
 		if err != nil {
-			logger.Error("❌ Failed to read message from agent %s: %v", agentID, err)
+			log.Error("❌ Failed to read message from agent %s: %v", agentID, err)
 			break
 		}
 
 		// Use local agent variable instead of map lookup to avoid race condition
 		if err := s.handleAgentMessage(agent, &msg); err != nil {
-			logger.Error("❌ Failed to handle message from agent %s: %v", agentID, err)
+			log.Error("❌ Failed to handle message from agent %s: %v", agentID, err)
 			break
 		}
 	}
@@ -325,7 +469,7 @@ func (s *Server) handleAgentConnection(conn net.Conn) {
 	remainingAgents := len(s.agents)
 	s.mu.Unlock()
 
-	logger.Info("📤 Agent %s disconnected (Remaining: %d)", agentID, remainingAgents)
+	log.Info("📤 Agent %s disconnected (Remaining: %d)", agentID, remainingAgents)
 }
 
 // GetAgent returns an agent by ID
@@ -375,7 +519,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 	// Peek at raw data to help diagnose non-HTTP requests
 	rawData, err := reader.Peek(256) // Look at first 256 bytes
 	if err != nil && err != io.EOF {
-		logger.Error("❌ Failed to peek at request data from %s: %v", remoteAddr, err)
+		log.Error("❌ Failed to peek at request data from %s: %v", remoteAddr, err)
 		return
 	}
 
@@ -398,28 +542,28 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 			}
 		}
 
-		logger.Error("❌ Failed to read API request from %s: %v", remoteAddr, err)
-		logger.Debug("📋 Request details - Error: %T, Raw data (%d bytes): %q",
+		log.Error("❌ Failed to read API request from %s: %v", remoteAddr, err)
+		log.Debug("📋 Request details - Error: %T, Raw data (%d bytes): %q",
 			err, len(rawData), cleanPreview)
 
 		// Try to categorize the error for better insights
 		if len(rawData) == 0 {
-			logger.Debug("📊 Analysis: Empty request (client closed connection immediately)")
+			log.Debug("📊 Analysis: Empty request (client closed connection immediately)")
 		} else if !strings.HasPrefix(strings.ToUpper(cleanPreview), "GET") &&
 			!strings.HasPrefix(strings.ToUpper(cleanPreview), "POST") &&
 			!strings.HasPrefix(strings.ToUpper(cleanPreview), "PUT") &&
 			!strings.HasPrefix(strings.ToUpper(cleanPreview), "DELETE") &&
 			!strings.HasPrefix(strings.ToUpper(cleanPreview), "HEAD") &&
 			!strings.HasPrefix(strings.ToUpper(cleanPreview), "OPTIONS") {
-			logger.Debug("📊 Analysis: Non-HTTP request (doesn't start with HTTP method)")
+			log.Debug("📊 Analysis: Non-HTTP request (doesn't start with HTTP method)")
 		} else if strings.Contains(cleanPreview, "\\x") {
-			logger.Debug("📊 Analysis: Binary data detected (likely non-HTTP protocol)")
+			log.Debug("📊 Analysis: Binary data detected (likely non-HTTP protocol)")
 		} else if strings.Contains(strings.ToLower(cleanPreview), "favicon") {
-			logger.Debug("📊 Analysis: Likely favicon request")
+			log.Debug("📊 Analysis: Likely favicon request")
 		} else if strings.Contains(strings.ToLower(cleanPreview), "health") {
-			logger.Debug("📊 Analysis: Likely health check request")
+			log.Debug("📊 Analysis: Likely health check request")
 		} else {
-			logger.Debug("📊 Analysis: Malformed HTTP request")
+			log.Debug("📊 Analysis: Malformed HTTP request")
 		}
 
 		return
@@ -428,7 +572,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 	// Extract the Host header
 	host := req.Host
 	if host == "" {
-		logger.Error("❌ Missing Host header in API request")
+		log.Error("❌ Missing Host header in API request")
 		// Create a response writer
 		resp := &http.Response{
 			StatusCode: http.StatusBadRequest,
@@ -442,7 +586,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 		return
 	}
 
-	logger.Debug("🌐 Handling API request for host: %s, path: %s", host, req.URL.Path)
+	log.Debug("🌐 Handling API request for host: %s, path: %s", host, req.URL.Path)
 
 	// Find the agent responsible for this host
 	s.mu.RLock()
@@ -456,7 +600,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 	s.mu.RUnlock()
 
 	if targetAgent == nil {
-		logger.Error("❌ No agent found for host: %s", host)
+		log.Error("❌ No agent found for host: %s", host)
 		// Create a response writer
 		resp := &http.Response{
 			StatusCode: http.StatusNotFound,
@@ -470,7 +614,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 		return
 	}
 
-	logger.Debug("🔗 Found agent %s for host %s", targetAgent.ID, host)
+	log.Debug("🔗 Found agent %s for host %s", targetAgent.ID, host)
 
 	// Read request body
 	body, err := io.ReadAll(req.Body)
@@ -479,23 +623,23 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 		contentLength := req.Header.Get("Content-Length")
 		transferEncoding := req.Header.Get("Transfer-Encoding")
 
-		logger.Error("❌ Failed to read request body from %s: %v", remoteAddr, err)
-		logger.Debug("📋 Request details - Method: %s, URL: %s, Host: %s, Content-Length: %s, Transfer-Encoding: %s, User-Agent: %s",
+		log.Error("❌ Failed to read request body from %s: %v", remoteAddr, err)
+		log.Debug("📋 Request details - Method: %s, URL: %s, Host: %s, Content-Length: %s, Transfer-Encoding: %s, User-Agent: %s",
 			req.Method, req.URL.String(), host, contentLength, transferEncoding, req.Header.Get("User-Agent"))
 
 		// Try to categorize the body reading error
 		if contentLength != "" {
-			logger.Debug("📊 Analysis: Request declares Content-Length: %s bytes", contentLength)
+			log.Debug("📊 Analysis: Request declares Content-Length: %s bytes", contentLength)
 		}
 		if transferEncoding != "" {
-			logger.Debug("📊 Analysis: Request uses Transfer-Encoding: %s", transferEncoding)
+			log.Debug("📊 Analysis: Request uses Transfer-Encoding: %s", transferEncoding)
 		}
 		if strings.Contains(err.Error(), "timeout") {
-			logger.Debug("📊 Analysis: Body reading timeout (slow client or network)")
+			log.Debug("📊 Analysis: Body reading timeout (slow client or network)")
 		} else if strings.Contains(err.Error(), "connection reset") {
-			logger.Debug("📊 Analysis: Client disconnected while sending body")
+			log.Debug("📊 Analysis: Client disconnected while sending body")
 		} else if strings.Contains(err.Error(), "unexpected EOF") {
-			logger.Debug("📊 Analysis: Incomplete body data (client disconnected early)")
+			log.Debug("📊 Analysis: Incomplete body data (client disconnected early)")
 		}
 
 		// Create a response writer
@@ -532,7 +676,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 	// Ensure Host header is set
 	httpMsg.HTTP.Headers["Host"] = []string{host}
 
-	logger.Debug("📨 Forwarding %s %s to agent %s (ID: %s)", req.Method, req.URL.Path, targetAgent.ID, msgID[:8]+"...")
+	log.Debug("📨 Forwarding %s %s to agent %s (ID: %s)", req.Method, req.URL.Path, targetAgent.ID, msgID[:8]+"...")
 
 	// Create a channel to receive the response - use larger buffer for streaming
 	var responseChan chan *common.Message
@@ -550,7 +694,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 			// Successfully queued
 		case <-time.After(30 * time.Second):
 			// If we can't send within 30 seconds, the connection is likely dead
-			logger.Error("⏰ Timeout sending response for ID: %s, connection may be dead", msgID)
+			log.Error("⏰ Timeout sending response for ID: %s, connection may be dead", msgID)
 		}
 	}
 	targetAgent.mu.Unlock()
@@ -565,14 +709,14 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 
 	// Send request to agent with connection check
 	if err := targetAgent.SendMessage(httpMsg); err != nil {
-		logger.Error("❌ Failed to send request to agent %s: %v", targetAgent.ID, err)
+		log.Error("❌ Failed to send request to agent %s: %v", targetAgent.ID, err)
 
 		// Remove the agent if send failed (likely disconnected)
 		s.mu.Lock()
 		delete(s.agents, targetAgent.ID)
 		s.mu.Unlock()
 
-		logger.Info("🗑️  Removed disconnected agent: %s", targetAgent.ID)
+		log.Info("🗑️  Removed disconnected agent: %s", targetAgent.ID)
 
 		// Create a response writer
 		resp := &http.Response{
@@ -591,7 +735,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 	select {
 	case response := <-responseChan:
 		if response.Error != "" {
-			logger.Error("❌ Agent returned error: %s", response.Error)
+			log.Error("❌ Agent returned error: %s", response.Error)
 			// Create a response writer
 			resp := &http.Response{
 				StatusCode: http.StatusInternalServerError,
@@ -607,7 +751,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 
 		// Write response back to client
 		if response.HTTP == nil {
-			logger.Error("❌ Invalid response from agent: missing HTTP data")
+			log.Error("❌ Invalid response from agent: missing HTTP data")
 			// Create a response writer
 			resp := &http.Response{
 				StatusCode: http.StatusInternalServerError,
@@ -623,7 +767,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 
 		// If this is a WebSocket upgrade response, handle specially
 		if response.HTTP.IsWebSocket {
-			logger.Debug("🔌 Handling WebSocket upgrade response for ID: %s", msgID)
+			log.Debug("🔌 Handling WebSocket upgrade response for ID: %s", msgID)
 
 			// Write WebSocket upgrade response headers
 			resp := &http.Response{
@@ -637,11 +781,11 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 
 			// Write response (this completes the WebSocket handshake)
 			if err := resp.Write(conn); err != nil {
-				logger.Error("❌ Failed to write WebSocket upgrade response: %v", err)
+				log.Error("❌ Failed to write WebSocket upgrade response: %v", err)
 				return
 			}
 
-			logger.Info("🎉 WebSocket upgrade completed for ID: %s", msgID)
+			log.Info("🎉 WebSocket upgrade completed for ID: %s", msgID)
 
 			// Store the client connection for WebSocket frame relay
 			s.wsManager.AddConnection(msgID, conn)
@@ -659,14 +803,14 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 						ID:   msgID,
 					}
 					if err := s.sendMessage(targetAgent, disconnectMsg); err != nil {
-						logger.Debug("⚠️  Failed to notify agent of WebSocket disconnect: %v", err)
+						log.Debug("⚠️  Failed to notify agent of WebSocket disconnect: %v", err)
 					}
 
-					logger.Info("🔌 WebSocket client disconnected, notified agent: ID=%s, Remaining=%d",
+					log.Info("🔌 WebSocket client disconnected, notified agent: ID=%s, Remaining=%d",
 						msgID[:8]+"...", totalConnections)
 				}()
 
-				logger.Debug("🔄 Starting client→agent relay for WebSocket ID: %s", msgID)
+				log.Debug("🔄 Starting client→agent relay for WebSocket ID: %s", msgID)
 
 				buffer := make([]byte, 16384) // 16KB buffer for better performance
 
@@ -677,9 +821,9 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 					n, err := conn.Read(buffer)
 					if err != nil {
 						if err != io.EOF {
-							logger.Error("❌ Error reading from client: %v", err)
+							log.Error("❌ Error reading from client: %v", err)
 						} else {
-							logger.Debug("📞 Client closed WebSocket connection")
+							log.Debug("📞 Client closed WebSocket connection")
 						}
 						return
 					}
@@ -688,7 +832,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 						// Update activity in our health monitoring system
 						s.wsManager.UpdateActivity(msgID)
 
-						logger.Debug("📤 Relaying %d bytes from client to agent", n)
+						log.Debug("📤 Relaying %d bytes from client to agent", n)
 
 						// Send WebSocket frame to agent through message system with exact buffer copy
 						frameData := make([]byte, n)
@@ -704,7 +848,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 						}
 
 						if err := s.sendMessage(targetAgent, frameMsg); err != nil {
-							logger.Error("❌ Failed to send WebSocket frame to agent: %v", err)
+							log.Error("❌ Failed to send WebSocket frame to agent: %v", err)
 							return
 						}
 					}
@@ -718,7 +862,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 
 		// If this is a streaming response, handle with flow control
 		if response.HTTP.IsStream {
-			logger.Info("📡 Starting streaming response for large file: %d bytes", response.HTTP.TotalSize)
+			log.Info("📡 Starting streaming response for large file: %d bytes", response.HTTP.TotalSize)
 
 			// Prepare proper HTTP headers for browser compatibility
 			headers := make(http.Header)
@@ -780,12 +924,12 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 				case chunk, ok := <-responseChan:
 					if !ok {
 						// Channel was closed, we're done
-						logger.Info("📊 Streaming completed: channel closed after %d chunks, %d bytes", chunkCount, totalReceived)
+						log.Info("📊 Streaming completed: channel closed after %d chunks, %d bytes", chunkCount, totalReceived)
 						return
 					}
 
 					if chunk == nil || chunk.HTTP == nil {
-						logger.Debug("📄 Received nil chunk, ending stream")
+						log.Debug("📄 Received nil chunk, ending stream")
 						return
 					}
 
@@ -796,7 +940,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 					// Write chunk data directly (no HTTP framing)
 					if _, err := conn.Write(chunk.HTTP.Body); err != nil {
 						// Client disconnected, stop processing
-						logger.Debug("📞 Client disconnected during streaming at chunk %d", chunkCount)
+						log.Debug("📞 Client disconnected during streaming at chunk %d", chunkCount)
 						return
 					}
 
@@ -813,10 +957,10 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 								eta = time.Duration(remainingBytes/rate/1024/1024) * time.Second
 							}
 
-							logger.Info("📈 Streaming progress: %.1f%% (%d chunks, %d MB, %.2f MB/s, ETA: %v)",
+							log.Info("📈 Streaming progress: %.1f%% (%d chunks, %d MB, %.2f MB/s, ETA: %v)",
 								progress, chunkCount, totalReceived/(1024*1024), rate, eta.Round(time.Second))
 						} else {
-							logger.Info("📊 Streaming progress: %.1f%% (%d chunks, %d MB)",
+							log.Info("📊 Streaming progress: %.1f%% (%d chunks, %d MB)",
 								progress, chunkCount, totalReceived/(1024*1024))
 						}
 						lastProgressTime = now
@@ -824,11 +968,11 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 
 					// If this was the last chunk, we're done
 					if chunk.HTTP.IsLastChunk {
-						logger.Info("✅ Streaming completed successfully: %d chunks, %d bytes total", chunkCount, totalReceived)
+						log.Info("✅ Streaming completed successfully: %d chunks, %d bytes total", chunkCount, totalReceived)
 
 						// Verify we sent the expected amount
 						if totalReceived != response.HTTP.TotalSize && response.HTTP.TotalSize > 0 {
-							logger.Warn("⚠️  Size mismatch: sent %d bytes, expected %d bytes", totalReceived, response.HTTP.TotalSize)
+							log.Warn("⚠️  Size mismatch: sent %d bytes, expected %d bytes", totalReceived, response.HTTP.TotalSize)
 						}
 
 						return
@@ -836,7 +980,7 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 
 				case <-time.After(timeoutDur):
 					// Timeout waiting for next chunk
-					logger.Error("⏰ Timeout waiting for chunk %d after %v (received %d bytes)",
+					log.Error("⏰ Timeout waiting for chunk %d after %v (received %d bytes)",
 						chunkCount+1, timeoutDur, totalReceived)
 					return
 				}
@@ -861,13 +1005,13 @@ func (s *Server) handleAPIRequest(conn net.Conn) {
 
 			// Write response
 			if err := resp.Write(conn); err != nil {
-				logger.Error("❌ Failed to write response: %v", err)
+				log.Error("❌ Failed to write response: %v", err)
 				return
 			}
 		}
 
 	case <-time.After(2 * time.Minute):
-		logger.Error("⏰ Timeout waiting for initial agent response")
+		log.Error("⏰ Timeout waiting for initial agent response")
 		// Create a response writer
 		resp := &http.Response{
 			StatusCode: http.StatusGatewayTimeout,
@@ -894,19 +1038,19 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		return fmt.Errorf("❌ message is nil")
 	}
 
-	logger.Debug("📨 Received message type: %s from agent %s", msg.Type, agent.ID)
+	log.Debug("📨 Received message type: %s from agent %s", msg.Type, agent.ID)
 
 	switch msg.Type {
 	case "register":
 		// Handle registration
 		if agent.Registered {
-			logger.Debug("✅ Agent %s already registered", agent.ID)
+			log.Debug("✅ Agent %s already registered", agent.ID)
 			return nil
 		}
 
 		// Register agent
 		agent.Registered = true
-		logger.Info("📋 Agent %s registered", agent.ID)
+		log.Info("📋 Agent %s registered", agent.ID)
 
 		// Send registration response
 		response := &common.Message{
@@ -930,11 +1074,11 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		if msg.EnhancedService != nil {
 			hostname = msg.EnhancedService.Hostname
 			isEnhanced = true
-			logger.Info("🌐 Enhanced service add request received for host: %s with %d upstreams",
+			log.Info("🌐 Enhanced service add request received for host: %s with %d upstreams",
 				hostname, len(msg.EnhancedService.Upstreams))
 		} else {
 			hostname = msg.Service.Hostname
-			logger.Info("🌐 Simple service add request received for host: %s", hostname)
+			log.Info("🌐 Simple service add request received for host: %s", hostname)
 		}
 
 		// Store service configuration (use simple format for agent Services map)
@@ -970,7 +1114,7 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 			if listenOn == "" {
 				listenOn = "both"
 			}
-			logger.Info("✅ Enhanced service %s added to Caddy successfully with %d upstreams, HTTP redirect: %s, Listen on: %s",
+			log.Info("✅ Enhanced service %s added to Caddy successfully with %d upstreams, HTTP redirect: %s, Listen on: %s",
 				hostname, len(msg.EnhancedService.Upstreams), redirectStatus, listenOn)
 		} else {
 			// Use full service configuration for simple services too
@@ -993,7 +1137,7 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 			if listenOn == "" {
 				listenOn = "both"
 			}
-			logger.Info("✅ Simple service %s added to Caddy successfully, HTTP redirect: %s, Listen on: %s",
+			log.Info("✅ Simple service %s added to Caddy successfully, HTTP redirect: %s, Listen on: %s",
 				hostname, redirectStatus, listenOn)
 		}
 
@@ -1026,7 +1170,7 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 			return fmt.Errorf("❌ failed to update service in Caddy: %v", err)
 		}
 
-		logger.Info("🔄 Service %s updated in Caddy successfully", msg.Service.Hostname)
+		log.Info("🔄 Service %s updated in Caddy successfully", msg.Service.Hostname)
 
 		// Send service update response
 		response := &common.Message{
@@ -1051,7 +1195,7 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 			return fmt.Errorf("❌ failed to remove service from Caddy: %v", err)
 		}
 
-		logger.Info("🗑️  Service %s removed from Caddy successfully", msg.Service.Hostname)
+		log.Info("🗑️  Service %s removed from Caddy successfully", msg.Service.Hostname)
 
 		// Send service remove response
 		response := &common.Message{
@@ -1071,7 +1215,7 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		if err := s.sendMessage(agent, response); err != nil {
 			return fmt.Errorf("❌ failed to send pong response: %v", err)
 		}
-		logger.Debug("💓 Pong sent to agent %s", agent.ID)
+		log.Debug("💓 Pong sent to agent %s", agent.ID)
 
 	case "http_response":
 		// Handle HTTP response
@@ -1086,7 +1230,7 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		if !ok {
 			// Don't treat missing response handlers as fatal errors - they could be late responses
 			// after timeouts or cleanup. Just log and continue to keep the agent connected.
-			logger.Debug("🔍 No response handler found for message ID: %s (possibly timed out or cleaned up)", msg.ID)
+			log.Debug("🔍 No response handler found for message ID: %s (possibly timed out or cleaned up)", msg.ID)
 			return nil
 		}
 
@@ -1103,13 +1247,13 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		wsConn, exists := s.wsManager.GetConnection(msg.ID)
 
 		if !exists {
-			logger.Debug("🔍 WebSocket frame dropped - client connection not found: ID=%s", msg.ID[:8]+"...")
+			log.Debug("🔍 WebSocket frame dropped - client connection not found: ID=%s", msg.ID[:8]+"...")
 			return nil
 		}
 
 		// Validate connection is still active
 		if wsConn == nil || wsConn.GetConn() == nil {
-			logger.Warn("⚠️  WebSocket frame dropped - nil client connection: ID=%s", msg.ID[:8]+"...")
+			log.Warn("⚠️  WebSocket frame dropped - nil client connection: ID=%s", msg.ID[:8]+"...")
 			s.wsManager.RemoveConnection(msg.ID)
 			return nil
 		}
@@ -1124,7 +1268,7 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		for totalWritten < len(data) {
 			n, err := wsConn.GetConn().Write(data[totalWritten:])
 			if err != nil {
-				logger.Error("❌ Failed to write WebSocket frame to client (ID=%s): %v", msg.ID[:8]+"...", err)
+				log.Error("❌ Failed to write WebSocket frame to client (ID=%s): %v", msg.ID[:8]+"...", err)
 				// Connection is broken, clean it up
 				s.wsManager.RemoveConnection(msg.ID)
 				totalConnections := s.wsManager.GetConnectionCount()
@@ -1135,18 +1279,18 @@ func (s *Server) handleAgentMessage(agent *Agent, msg *common.Message) error {
 					ID:   msg.ID,
 				}
 				if err := s.sendMessage(agent, disconnectMsg); err != nil {
-					logger.Debug("❌ Failed to notify agent of broken WebSocket connection: %v", err)
+					log.Debug("❌ Failed to notify agent of broken WebSocket connection: %v", err)
 				}
 
 				wsConn.Close()
-				logger.Info("🗑️  Removed broken client WebSocket connection: ID=%s, Remaining=%d",
+				log.Info("🗑️  Removed broken client WebSocket connection: ID=%s, Remaining=%d",
 					msg.ID[:8]+"...", totalConnections)
 				return nil
 			}
 			totalWritten += n
 		}
 
-		logger.Debug("📦 Forwarded %d bytes from agent to client for WebSocket ID: %s", len(data), msg.ID)
+		log.Debug("📦 Forwarded %d bytes from agent to client for WebSocket ID: %s", len(data), msg.ID)
 
 	default:
 		return fmt.Errorf("❓ unknown message type: %s", msg.Type)
@@ -1197,14 +1341,14 @@ func (a *Agent) SendMessage(msg *common.Message) error {
 
 // Stop stops the server
 func (s *Server) Stop() error {
-	logger.Info("🛑 Stopping 0Trust server...")
+	log.Info("🛑 Stopping 0Trust server...")
 
 	// Stop Caddy process if running
 	if s.caddyProcess != nil {
 		if err := s.caddyProcess.Kill(); err != nil {
-			logger.Error("❌ Failed to kill Caddy process: %v", err)
+			log.Error("❌ Failed to kill Caddy process: %v", err)
 		} else {
-			logger.Info("✅ Caddy process stopped")
+			log.Info("✅ Caddy process stopped")
 		}
 	}
 
@@ -1213,19 +1357,19 @@ func (s *Server) Stop() error {
 	agentCount := len(s.agents)
 	for agentID, agent := range s.agents {
 		if err := agent.Conn.Close(); err != nil {
-			logger.Error("❌ Failed to close agent connection %s: %v", agentID, err)
+			log.Error("❌ Failed to close agent connection %s: %v", agentID, err)
 		}
 	}
 	s.mu.Unlock()
 
-	logger.Info("📤 Closed %d agent connections", agentCount)
-	logger.Info("✅ Server stopped successfully")
+	log.Info("📤 Closed %d agent connections", agentCount)
+	log.Info("✅ Server stopped successfully")
 	return nil
 }
 
 // startAPIServer starts the API server
 func (s *Server) startAPIServer() error {
-	logger.Info("🚀 Starting API servers...")
+	log.Info("🚀 Starting API servers...")
 
 	// Start both agent API (with client certs) and HTTP proxy API (without client certs)
 	go s.startAgentAPIServer()
@@ -1252,28 +1396,28 @@ func (s *Server) startAgentAPIServer() error {
 	}
 	defer listener.Close()
 
-	logger.Info("🔗 Agent API server listening on %s", s.listenAddr)
+	log.Info("🔗 Agent API server listening on %s", s.listenAddr)
 
 	// Accept agent connections
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			// Enhanced error logging for agent connection acceptance
-			logger.Error("❌ Failed to accept agent connection on %s: %v", s.listenAddr, err)
+			log.Error("❌ Failed to accept agent connection on %s: %v", s.listenAddr, err)
 
 			// Categorize the error for better insights
 			if strings.Contains(err.Error(), "too many open files") {
-				logger.Debug("📊 Analysis: System file descriptor limit reached")
+				log.Debug("📊 Analysis: System file descriptor limit reached")
 			} else if strings.Contains(err.Error(), "connection reset") {
-				logger.Debug("📊 Analysis: Client disconnected during handshake")
+				log.Debug("📊 Analysis: Client disconnected during handshake")
 			} else if strings.Contains(err.Error(), "timeout") {
-				logger.Debug("📊 Analysis: TLS handshake timeout (likely port scan or invalid client)")
+				log.Debug("📊 Analysis: TLS handshake timeout (likely port scan or invalid client)")
 			} else if strings.Contains(err.Error(), "certificate") {
-				logger.Debug("📊 Analysis: TLS certificate validation failed (invalid client cert)")
+				log.Debug("📊 Analysis: TLS certificate validation failed (invalid client cert)")
 			} else if strings.Contains(err.Error(), "protocol") {
-				logger.Debug("📊 Analysis: TLS protocol error (non-TLS client or incompatible version)")
+				log.Debug("📊 Analysis: TLS protocol error (non-TLS client or incompatible version)")
 			} else if strings.Contains(err.Error(), "remote error") {
-				logger.Debug("📊 Analysis: Client rejected server certificate or TLS handshake")
+				log.Debug("📊 Analysis: Client rejected server certificate or TLS handshake")
 			}
 
 			continue
@@ -1298,28 +1442,28 @@ func (s *Server) startHTTPProxyServer() error {
 	}
 	defer listener.Close()
 
-	logger.Info("🌐 HTTP proxy server listening on %s", s.apiAddr)
+	log.Info("🌐 HTTP proxy server listening on %s", s.apiAddr)
 
 	// Accept HTTP proxy connections from Caddy
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			// Enhanced error logging for HTTP proxy connection acceptance
-			logger.Error("❌ Failed to accept HTTP proxy connection on %s: %v", s.apiAddr, err)
+			log.Error("❌ Failed to accept HTTP proxy connection on %s: %v", s.apiAddr, err)
 
 			// Categorize the error for better insights
 			if strings.Contains(err.Error(), "too many open files") {
-				logger.Debug("📊 Analysis: System file descriptor limit reached")
+				log.Debug("📊 Analysis: System file descriptor limit reached")
 			} else if strings.Contains(err.Error(), "connection reset") {
-				logger.Debug("📊 Analysis: Client disconnected during TLS handshake")
+				log.Debug("📊 Analysis: Client disconnected during TLS handshake")
 			} else if strings.Contains(err.Error(), "timeout") {
-				logger.Debug("📊 Analysis: TLS handshake timeout (likely non-HTTPS client)")
+				log.Debug("📊 Analysis: TLS handshake timeout (likely non-HTTPS client)")
 			} else if strings.Contains(err.Error(), "protocol") {
-				logger.Debug("📊 Analysis: TLS protocol error (non-TLS client or HTTP on HTTPS port)")
+				log.Debug("📊 Analysis: TLS protocol error (non-TLS client or HTTP on HTTPS port)")
 			} else if strings.Contains(err.Error(), "remote error") {
-				logger.Debug("📊 Analysis: Client rejected server certificate")
+				log.Debug("📊 Analysis: Client rejected server certificate")
 			} else if strings.Contains(err.Error(), "first record does not look like a TLS handshake") {
-				logger.Debug("📊 Analysis: Non-TLS client attempting connection (likely HTTP client on HTTPS port)")
+				log.Debug("📊 Analysis: Non-TLS client attempting connection (likely HTTP client on HTTPS port)")
 			}
 
 			continue
@@ -1477,7 +1621,7 @@ func (s *Server) startWebSocketHealthMonitoring() {
 		statsTicker := time.NewTicker(5 * time.Minute)
 		defer statsTicker.Stop()
 
-		logger.Debug("🔌 Server WebSocket health monitoring started")
+		log.Debug("🔌 Server WebSocket health monitoring started")
 
 		for {
 			select {
@@ -1499,7 +1643,7 @@ func (s *Server) cleanupStaleWebSocketConnections() {
 func (s *Server) logWebSocketStats() {
 	total, healthy, stale := s.wsManager.GetStats()
 	if total > 0 {
-		logger.Info("📊 Server WebSocket Stats: Total=%d, Healthy=%d, Stale=%d", total, healthy, stale)
+		log.Info("📊 Server WebSocket Stats: Total=%d, Healthy=%d, Stale=%d", total, healthy, stale)
 	}
 }
 
@@ -1511,7 +1655,7 @@ func (s *Server) ReloadConfig() error {
 	configPath := s.config.ConfigPath
 	s.configMu.RUnlock()
 
-	logger.Info("🔄 Reloading server configuration from %s", configPath)
+	log.Info("🔄 Reloading server configuration from %s", configPath)
 
 	// Load new config
 	newConfig, err := LoadServerConfig(configPath)
@@ -1530,7 +1674,7 @@ func (s *Server) ReloadConfig() error {
 		return fmt.Errorf("failed to apply config changes: %w", err)
 	}
 
-	logger.Info("✅ Server configuration reloaded successfully")
+	log.Info("✅ Server configuration reloaded successfully")
 
 	// Log what changed
 	s.logConfigChanges(oldConfig, newConfig)
@@ -1562,20 +1706,43 @@ func (s *Server) GetComponentName() string {
 
 // applyConfigChanges applies configuration changes to the running server
 func (s *Server) applyConfigChanges(oldConfig, newConfig *ServerConfig) error {
-	// Check for log level changes
+	// Check for application logging configuration changes
+	if s.shouldUpdateApplicationLogging(oldConfig.Logging, newConfig.Logging) {
+		log.Info("🔧 Application logging configuration changed, updating logger...")
+		applyLoggingConfig(newConfig.Logging)
+		log.Info("✅ Application logging configuration updated successfully")
+	}
+
+	// Check for legacy log level changes (deprecated but maintained for compatibility)
 	if oldConfig.LogLevel != newConfig.LogLevel {
-		if newConfig.LogLevel != "" {
+		if newConfig.LogLevel != "" && newConfig.Logging.Level == "" {
+			// Only apply legacy log level if new logging.level is not set
 			logger.SetLogLevel(newConfig.LogLevel)
-			logger.Info("🔧 Server log level changed to: %s", newConfig.LogLevel)
+			log.Info("🔧 Server log level changed to: %s (legacy config)", newConfig.LogLevel)
 		}
 	}
 
 	// Check for Caddy admin API changes
 	if oldConfig.Caddy.AdminAPI != newConfig.Caddy.AdminAPI {
-		logger.Info("🔧 Caddy admin API address changed: %s -> %s", oldConfig.Caddy.AdminAPI, newConfig.Caddy.AdminAPI)
+		log.Info("🔧 Caddy admin API address changed: %s -> %s", oldConfig.Caddy.AdminAPI, newConfig.Caddy.AdminAPI)
 		s.caddyAdminAPI = newConfig.Caddy.AdminAPI
 		// Note: This would require restarting Caddy for full effect
-		logger.Warn("⚠️  Caddy admin API change requires server restart for full effect")
+		log.Warn("⚠️  Caddy admin API change requires server restart for full effect")
+	}
+
+	// Check for Caddy logging configuration changes
+	oldLogging := oldConfig.Caddy.Logging
+	newLogging := newConfig.Caddy.Logging
+
+	if s.shouldUpdateCaddyLogging(oldLogging, newLogging) {
+		log.Info("🔧 Caddy logging configuration changed, updating Caddy config...")
+
+		if err := s.updateCaddyLoggingConfig(newLogging); err != nil {
+			log.Warn("⚠️  Failed to update Caddy logging config: %v", err)
+			// Continue with other config changes - logging update failure shouldn't stop the reload
+		} else {
+			log.Info("✅ Caddy logging configuration updated successfully")
+		}
 	}
 
 	// Note: TLS certificate changes and port changes would require a server restart
@@ -1583,12 +1750,12 @@ func (s *Server) applyConfigChanges(oldConfig, newConfig *ServerConfig) error {
 	if oldConfig.Server.CertFile != newConfig.Server.CertFile ||
 		oldConfig.Server.KeyFile != newConfig.Server.KeyFile ||
 		oldConfig.Server.CAFile != newConfig.Server.CAFile {
-		logger.Warn("⚠️  TLS certificate changes detected - server restart required for full effect")
+		log.Warn("⚠️  TLS certificate changes detected - server restart required for full effect")
 	}
 
 	if oldConfig.Server.ListenAddr != newConfig.Server.ListenAddr ||
 		oldConfig.API.ListenAddr != newConfig.API.ListenAddr {
-		logger.Warn("⚠️  Listen address changes detected - server restart required for full effect")
+		log.Warn("⚠️  Listen address changes detected - server restart required for full effect")
 	}
 
 	return nil
@@ -1598,16 +1765,342 @@ func (s *Server) applyConfigChanges(oldConfig, newConfig *ServerConfig) error {
 func (s *Server) logConfigChanges(oldConfig, newConfig *ServerConfig) {
 	changes := make([]string, 0)
 
-	// Check for changes
-	if oldConfig.LogLevel != newConfig.LogLevel {
-		changes = append(changes, fmt.Sprintf("log_level: %s → %s", oldConfig.LogLevel, newConfig.LogLevel))
+	// Check for application logging changes
+	if s.shouldUpdateApplicationLogging(oldConfig.Logging, newConfig.Logging) {
+		oldLoggingDesc := fmt.Sprintf("level=%s,format=%s,output=%s",
+			oldConfig.Logging.Level, oldConfig.Logging.Format, oldConfig.Logging.Output)
+		newLoggingDesc := fmt.Sprintf("level=%s,format=%s,output=%s",
+			newConfig.Logging.Level, newConfig.Logging.Format, newConfig.Logging.Output)
+		changes = append(changes, fmt.Sprintf("application_logging: %s → %s", oldLoggingDesc, newLoggingDesc))
 	}
 
+	// Check for legacy log level changes
+	if oldConfig.LogLevel != newConfig.LogLevel {
+		changes = append(changes, fmt.Sprintf("legacy_log_level: %s → %s", oldConfig.LogLevel, newConfig.LogLevel))
+	}
+
+	// Check for changes
 	if oldConfig.Caddy.AdminAPI != newConfig.Caddy.AdminAPI {
 		changes = append(changes, fmt.Sprintf("caddy_admin_api: %s → %s", oldConfig.Caddy.AdminAPI, newConfig.Caddy.AdminAPI))
 	}
 
-	if len(changes) > 0 {
-		logger.Info("📝 Server config changes: %s", fmt.Sprintf("[%s]", fmt.Sprintf("%v", changes)))
+	// Check for Caddy logging changes
+	if s.shouldUpdateCaddyLogging(oldConfig.Caddy.Logging, newConfig.Caddy.Logging) {
+		oldEnabled := "disabled"
+		newEnabled := "disabled"
+		if oldConfig.Caddy.Logging.Enabled {
+			oldEnabled = fmt.Sprintf("enabled(%s:%s)", oldConfig.Caddy.Logging.Level, oldConfig.Caddy.Logging.Format)
+		}
+		if newConfig.Caddy.Logging.Enabled {
+			newEnabled = fmt.Sprintf("enabled(%s:%s)", newConfig.Caddy.Logging.Level, newConfig.Caddy.Logging.Format)
+		}
+		changes = append(changes, fmt.Sprintf("caddy_logging: %s → %s", oldEnabled, newEnabled))
 	}
+
+	if len(changes) > 0 {
+		log.Info("📝 Server config changes: %s", fmt.Sprintf("[%s]", fmt.Sprintf("%v", changes)))
+	}
+}
+
+// shouldUpdateCaddyLogging checks if Caddy logging configuration needs to be updated
+func (s *Server) shouldUpdateCaddyLogging(oldLogging, newLogging CaddyLogging) bool {
+	// Check if logging was enabled/disabled
+	if oldLogging.Enabled != newLogging.Enabled {
+		return true
+	}
+
+	// If logging is disabled, no need to check other fields
+	if !newLogging.Enabled {
+		return false
+	}
+
+	// Check individual logging settings
+	if oldLogging.Level != newLogging.Level ||
+		oldLogging.Format != newLogging.Format ||
+		oldLogging.Output != newLogging.Output ||
+		oldLogging.SamplingFirst != newLogging.SamplingFirst ||
+		oldLogging.SamplingThereafter != newLogging.SamplingThereafter {
+		return true
+	}
+
+	// Check include/exclude slices
+	if !stringSlicesEqual(oldLogging.Include, newLogging.Include) ||
+		!stringSlicesEqual(oldLogging.Exclude, newLogging.Exclude) {
+		return true
+	}
+
+	// Check custom fields map
+	if !mapsEqual(oldLogging.Fields, newLogging.Fields) {
+		return true
+	}
+
+	return false
+}
+
+// updateCaddyLoggingConfig updates Caddy's logging configuration via the admin API
+func (s *Server) updateCaddyLoggingConfig(loggingConfig CaddyLogging) error {
+	// Build the logging configuration
+	loggingPayload := map[string]interface{}{}
+
+	if loggingConfig.Enabled {
+		// Configure general logging first
+		logs := map[string]interface{}{
+			"default": map[string]interface{}{},
+		}
+
+		// Set log level
+		if loggingConfig.Level != "" {
+			logs["default"].(map[string]interface{})["level"] = strings.ToUpper(loggingConfig.Level)
+		}
+
+		// Configure encoder (format)
+		encoderConfig := map[string]interface{}{}
+
+		switch strings.ToLower(loggingConfig.Format) {
+		case "json":
+			encoderConfig["format"] = "json"
+		case "console":
+			encoderConfig["format"] = "console"
+		case "single_field":
+			encoderConfig["format"] = "single_field"
+		case "filter":
+			encoderConfig["format"] = "filter"
+		default:
+			encoderConfig["format"] = "console"
+		}
+
+		// Add custom fields if specified
+		if len(loggingConfig.Fields) > 0 {
+			encoderConfig["fields"] = loggingConfig.Fields
+		}
+
+		logs["default"].(map[string]interface{})["encoder"] = encoderConfig
+
+		// Configure writer (output)
+		writerConfig := map[string]interface{}{}
+
+		switch strings.ToLower(loggingConfig.Output) {
+		case "stdout":
+			writerConfig["output"] = "stdout"
+		case "stderr":
+			writerConfig["output"] = "stderr"
+		case "discard":
+			writerConfig["output"] = "discard"
+		default:
+			if loggingConfig.Output != "" && !strings.Contains(strings.ToLower(loggingConfig.Output), "std") {
+				writerConfig["output"] = "file"
+				writerConfig["filename"] = loggingConfig.Output
+			} else {
+				writerConfig["output"] = "stdout"
+			}
+		}
+
+		logs["default"].(map[string]interface{})["writer"] = writerConfig
+
+		// Add sampling configuration if specified
+		if loggingConfig.SamplingFirst > 0 || loggingConfig.SamplingThereafter > 0 {
+			samplingConfig := map[string]interface{}{}
+
+			if loggingConfig.SamplingFirst > 0 {
+				samplingConfig["first"] = loggingConfig.SamplingFirst
+			}
+
+			if loggingConfig.SamplingThereafter > 0 {
+				samplingConfig["thereafter"] = loggingConfig.SamplingThereafter
+			}
+
+			logs["default"].(map[string]interface{})["sampling"] = samplingConfig
+		}
+
+		loggingPayload["logs"] = logs
+
+		// Update HTTP server access logs for all servers (https, http, srv0)
+		accessLogConfig := map[string]interface{}{
+			"default_logger_name": "default", // Use the same logger as general logs
+		}
+
+		// Add include/exclude fields if specified
+		if len(loggingConfig.Include) > 0 {
+			accessLogConfig["include"] = loggingConfig.Include
+		}
+
+		if len(loggingConfig.Exclude) > 0 {
+			accessLogConfig["exclude"] = loggingConfig.Exclude
+		}
+
+		// Update all known server types
+		serverTypes := []string{"https", "http", "srv0"}
+		for _, serverType := range serverTypes {
+			serverLogsURL := fmt.Sprintf("%s/config/apps/http/servers/%s/logs", s.caddyAdminAPI, serverType)
+			if err := s.updateCaddyConfig(serverLogsURL, accessLogConfig); err != nil {
+				log.Debug("⚠️  Failed to update %s server logs (may not exist): %v", serverType, err)
+			} else {
+				log.Debug("✅ Updated access logs for %s server", serverType)
+			}
+		}
+	} else {
+		// Disable access logs by removing the configuration from all servers
+		serverTypes := []string{"https", "http", "srv0"}
+		for _, serverType := range serverTypes {
+			serverLogsURL := fmt.Sprintf("%s/config/apps/http/servers/%s/logs", s.caddyAdminAPI, serverType)
+			if err := s.deleteCaddyConfig(serverLogsURL); err != nil {
+				log.Debug("⚠️  Failed to disable %s server logs (may not exist): %v", serverType, err)
+			} else {
+				log.Debug("✅ Disabled access logs for %s server", serverType)
+			}
+		}
+	}
+
+	// Update the main logging configuration
+	loggingURL := fmt.Sprintf("%s/config/logging", s.caddyAdminAPI)
+	return s.updateCaddyConfig(loggingURL, loggingPayload)
+}
+
+// updateCaddyConfig updates a specific part of Caddy's configuration via the admin API
+func (s *Server) updateCaddyConfig(url string, config interface{}) error {
+	// Marshal the configuration to JSON
+	configData, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %v", err)
+	}
+
+	// Try PATCH first (for updating existing config)
+	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(configData))
+	if err != nil {
+		return fmt.Errorf("failed to create PATCH request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send request to Caddy admin API
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send PATCH request to Caddy admin API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// If PATCH works, we're done
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+
+	// If PATCH fails with 404 (not found), try PUT to create new config
+	if resp.StatusCode == http.StatusNotFound {
+		req, err := http.NewRequest("PUT", url, bytes.NewBuffer(configData))
+		if err != nil {
+			return fmt.Errorf("failed to create PUT request: %v", err)
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to send PUT request to Caddy admin API: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			return nil
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Caddy admin API PUT returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// If PATCH fails with 409 (conflict), the config already exists and matches
+	// This is actually OK - it means the configuration is already set correctly
+	if resp.StatusCode == http.StatusConflict {
+		log.Debug("🔧 Caddy config already exists and matches desired state")
+		return nil
+	}
+
+	// For any other error, report it
+	body, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("Caddy admin API PATCH returned status %d: %s", resp.StatusCode, string(body))
+}
+
+// deleteCaddyConfig deletes a specific part of Caddy's configuration via the admin API
+func (s *Server) deleteCaddyConfig(url string) error {
+	// Create HTTP DELETE request
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create delete request: %v", err)
+	}
+
+	// Send request to Caddy admin API
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send delete request to Caddy admin API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Check response status (200 OK or 404 Not Found are both acceptable)
+	// 404 means the config doesn't exist, which is fine for deletion
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+
+	// For any other status, it's likely an error we should report
+	body, _ := io.ReadAll(resp.Body)
+
+	// Log the error but don't fail completely - deletion failures shouldn't break the system
+	log.Warn("⚠️  Caddy admin API delete returned status %d: %s", resp.StatusCode, string(body))
+	return nil
+}
+
+// stringSlicesEqual compares two string slices for equality
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// mapsEqual compares two maps for equality
+func mapsEqual(a, b map[string]interface{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || !interfaceEqual(v, bv) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// interfaceEqual compares two interface{} values for equality
+func interfaceEqual(a, b interface{}) bool {
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+}
+
+// shouldUpdateApplicationLogging checks if application logging configuration needs to be updated
+func (s *Server) shouldUpdateApplicationLogging(oldLogging, newLogging LoggingConfig) bool {
+	// Check if logging level changed
+	if oldLogging.Level != newLogging.Level {
+		return true
+	}
+
+	// Check if logging format changed
+	if oldLogging.Format != newLogging.Format {
+		return true
+	}
+
+	// Check if logging output changed
+	if oldLogging.Output != newLogging.Output {
+		return true
+	}
+
+	return false
 }

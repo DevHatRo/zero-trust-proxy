@@ -1,0 +1,201 @@
+# Zero Trust Proxy Agent Configuration with Comprehensive Logging
+# This example demonstrates all logging configuration options
+
+# Agent identification
+agent:
+  id: "production-agent-01"
+  name: "Production Agent 01"
+  region: "us-west-1"
+  tags:
+    - "production"
+    - "web-services"
+    - "critical"
+
+# Server connection configuration
+server:
+  address: "zt-proxy.example.com:8443"
+  ca_cert: "/config/certs/ca.crt"
+  cert: "/config/certs/agent.crt"
+  key: "/config/certs/agent.key"
+
+# ============================================================================
+# ZERO TRUST PROXY AGENT LOGGING CONFIGURATION
+# ============================================================================
+
+# Zero Trust Proxy agent application logging configuration
+# Note: Each module automatically sets its own hierarchical component name:
+# - agent: Agent core functionality
+# - caddy.manager: Caddy configuration management
+# - caddy.validation: Caddy configuration validation
+# - common.websocket: WebSocket connection management
+# - common.cert: Certificate handling
+# - common.hotreload: Configuration hot reloading
+logging:
+  # Log level: DEBUG, INFO, WARN, ERROR, FATAL
+  # - DEBUG: Verbose logging for development and troubleshooting
+  # - INFO: General operational logs (recommended for production)
+  # - WARN: Warning messages and non-critical issues
+  # - ERROR: Error messages and failures
+  # - FATAL: Critical errors that cause application termination
+  level: "INFO"
+
+  # Log format: console or json
+  # - console: Human-readable format for development
+  # - json: Structured format for log aggregation and analysis
+  format: "json"
+
+  # Log output destination: stdout, stderr, or file path
+  # - stdout: Standard output (default)
+  # - stderr: Standard error stream
+  # - /path/to/file: Write logs to a specific file
+  output: "stdout"
+
+# Legacy log level configuration (deprecated)
+# Use logging.level instead for new configurations
+# log_level: "INFO"
+
+# ============================================================================
+# SERVICE CONFIGURATIONS
+# ============================================================================
+
+services:
+  # High-performance web application with load balancing
+  - id: "webapp-cluster"
+    name: "Production Web Application"
+    hosts:
+      - "app.example.com"
+      - "www.example.com"
+    protocol: "https"
+    websocket: true
+    http_redirect: true
+    listen_on: "both"
+    upstreams:
+      - address: "192.168.1.10:8080"
+        weight: 100
+        health_check:
+          path: "/health"
+          interval: 30s
+          timeout: 5s
+          method: "GET"
+          headers:
+            "User-Agent": "ZeroTrustProxy-HealthCheck/1.0"
+      - address: "192.168.1.11:8080"
+        weight: 100
+        health_check:
+          path: "/health"
+          interval: 30s
+          timeout: 5s
+          method: "GET"
+      - address: "192.168.1.12:8080"
+        weight: 50 # Lower weight for backup server
+        health_check:
+          path: "/health"
+          interval: 60s
+          timeout: 10s
+          method: "GET"
+    load_balancing:
+      policy: "round_robin"
+      health_check_required: true
+      session_affinity: true
+      affinity_duration: 1h
+    routes:
+      - match:
+          path: "/api/*"
+        handle:
+          - type: "rate_limit"
+            config:
+              rate: "1000/minute"
+              burst: 100
+          - type: "reverse_proxy"
+      - match:
+          path: "/*"
+        handle:
+          - type: "reverse_proxy"
+    security:
+      cors:
+        origins:
+          - "https://admin.example.com"
+          - "https://dashboard.example.com"
+        methods: ["GET", "POST", "PUT", "DELETE"]
+        headers: ["Content-Type", "Authorization", "X-Requested-With"]
+    monitoring:
+      metrics_enabled: true
+      logging_format: "json"
+      logging_fields: ["request_id", "user_agent", "response_time"]
+    traffic_shaping:
+      upload_limit: "10MB/s"
+      download_limit: "100MB/s"
+      per_ip_limit: "1MB/s"
+
+  # API microservice with enhanced security
+  - id: "api-service"
+    name: "API Microservice"
+    hosts:
+      - "api.example.com"
+    protocol: "https"
+    websocket: false
+    http_redirect: true
+    listen_on: "https" # HTTPS only for API
+    upstreams:
+      - address: "10.0.1.50:3000"
+        weight: 100
+        health_check:
+          path: "/v1/health"
+          interval: 15s
+          timeout: 3s
+          method: "GET"
+          headers:
+            "Authorization": "Bearer health-check-token"
+    routes:
+      - match:
+          path: "/v1/admin/*"
+        handle:
+          - type: "ip_whitelist"
+            config:
+              allowed_ips:
+                - "10.0.0.0/8"
+                - "192.168.0.0/16"
+          - type: "rate_limit"
+            config:
+              rate: "100/minute"
+          - type: "reverse_proxy"
+      - match:
+          path: "/v1/*"
+        handle:
+          - type: "rate_limit"
+            config:
+              rate: "500/minute"
+          - type: "reverse_proxy"
+    security:
+      auth:
+        type: "jwt"
+        config:
+          secret: "${JWT_SECRET}"
+          algorithm: "HS256"
+          required_claims: ["sub", "aud"]
+
+# ============================================================================
+# GLOBAL HEALTH CHECK CONFIGURATION
+# ============================================================================
+
+health_checks:
+  global_settings:
+    check_interval: 30s
+    timeout: 10s
+    unhealthy_threshold: 3
+    healthy_threshold: 2
+  endpoints:
+    - path: "/agent/health"
+      response: "OK"
+    - path: "/agent/ready"
+      response: "READY"
+
+# ============================================================================
+# HOT RELOAD CONFIGURATION
+# ============================================================================
+
+hot_reload:
+  enabled: true
+  watch_config: true
+  reload_signal: "SIGHUP"
+  graceful_timeout: "30s"

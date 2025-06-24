@@ -1,0 +1,69 @@
+# 0Trust Server Configuration - Caddy Logging Example
+# This example demonstrates comprehensive Caddy logging configuration options
+
+# Global log level for the 0Trust server itself
+log_level: "DEBUG"
+
+# Core server settings
+server:
+  listen_addr: ":8443"
+  cert_file: "/config/certs/server.crt"
+  key_file: "/config/certs/server.key"
+  ca_file: "/config/certs/ca.crt"
+
+# API server settings (for HTTP proxy from Caddy)
+api:
+  listen_addr: "localhost:9443"
+
+# Caddy reverse proxy settings with comprehensive logging
+caddy:
+  admin_api: "http://localhost:2019"
+  config_dir: "/config/caddy"
+  storage_dir: "/config/caddy/storage"
+
+  # Comprehensive Caddy logging configuration
+  logging:
+    enabled: true
+    level: "DEBUG" # DEBUG, INFO, WARN, ERROR
+    format: "json" # json, console, single_field - structured logging for production
+    output: "/var/log/caddy-access.log" # File path for persistent logging
+
+    # Request/response fields to include in access logs
+    include:
+      - "user_id" # User identification
+      - "duration" # Request duration
+      - "size" # Response size
+      - "status" # HTTP status code
+      - "method" # HTTP method (GET, POST, etc.)
+      - "uri" # Request URI
+      - "host" # Host header
+      - "request>remote_ip" # Client IP address
+      - "request>headers>User-Agent" # Client user agent
+      - "request>headers>Referer" # Referer header
+      - "resp_headers>Content-Type" # Response content type
+      - "resp_headers>Cache-Control" # Cache control headers
+      - "common_log" # Apache-style common log format
+
+    # Sensitive fields to exclude from logs (for privacy/security)
+    exclude:
+      - "request>headers>Authorization" # Authentication tokens
+      - "request>headers>Cookie" # Session cookies
+      - "request>headers>X-API-Key" # API keys
+      - "request>body" # Request body content
+      - "resp_headers>Set-Cookie" # Response cookies
+
+    # Custom fields to add to every log entry
+    fields:
+      component: "zero-trust-caddy-proxy"
+      environment: "production"
+      version: "1.0.0"
+      deployment: "homelab"
+      region: "us-east-1"
+
+    # Log sampling for high-traffic scenarios (optional)
+    sampling_first: 100 # Log first 100 requests normally
+    sampling_thereafter: 50 # Then log every 50th request to reduce volume
+
+# Hot reload configuration
+hot_reload:
+  enabled: true

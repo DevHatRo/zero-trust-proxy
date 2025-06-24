@@ -2,48 +2,38 @@ package logger
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // TestNewLogger tests creating a new logger with different configurations
 func TestNewLogger(t *testing.T) {
-	tests := []struct {
-		name     string
-		level    LogLevel
-		module   string
-		useColor bool
-	}{
-		{"debug logger", DEBUG, "test", true},
-		{"info logger", INFO, "server", false},
-		{"error logger", ERROR, "", true},
-		{"fatal logger", FATAL, "agent", false},
+	var buf bytes.Buffer
+	logger := NewLogger(&buf, INFO, ConsoleFormat, "test-component", false)
+
+	if logger == nil {
+		t.Fatal("NewLogger returned nil")
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			logger := NewLogger(&buf, tt.level, tt.module, tt.useColor)
+	if logger.level != INFO {
+		t.Errorf("Expected level INFO, got %v", logger.level)
+	}
 
-			if logger.level != tt.level {
-				t.Errorf("expected level %v, got %v", tt.level, logger.level)
-			}
-			if logger.module != tt.module {
-				t.Errorf("expected module %q, got %q", tt.module, logger.module)
-			}
-			if logger.useColor != tt.useColor {
-				t.Errorf("expected useColor %v, got %v", tt.useColor, logger.useColor)
-			}
-		})
+	if logger.format != ConsoleFormat {
+		t.Errorf("Expected format ConsoleFormat, got %v", logger.format)
+	}
+
+	if logger.component != "test-component" {
+		t.Errorf("Expected component 'test-component', got %s", logger.component)
 	}
 }
 
 // TestLogLevels tests that only appropriate log levels are output
 func TestLogLevels(t *testing.T) {
 	var buf bytes.Buffer
-	logger := NewLogger(&buf, WARN, "test", false)
+	logger := NewLogger(&buf, WARN, ConsoleFormat, "test", false)
 
 	// These should not appear (below WARN level)
 	logger.log(DEBUG, "debug message")
@@ -85,7 +75,7 @@ func TestLogLevels(t *testing.T) {
 // TestLogFormatting tests log message formatting
 func TestLogFormatting(t *testing.T) {
 	var buf bytes.Buffer
-	logger := NewLogger(&buf, DEBUG, "test", false)
+	logger := NewLogger(&buf, DEBUG, ConsoleFormat, "test", false)
 
 	logger.log(INFO, "formatted %s %d", "message", 42)
 
@@ -112,7 +102,7 @@ func TestColorOutput(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			logger := NewLogger(&buf, DEBUG, "test", tt.useColor)
+			logger := NewLogger(&buf, DEBUG, ConsoleFormat, "test", tt.useColor)
 
 			logger.log(tt.level, "test message")
 			output := buf.String()
@@ -137,11 +127,8 @@ func TestColorOutput(t *testing.T) {
 
 // TestSetLogLevel tests setting the global log level
 func TestSetLogLevel(t *testing.T) {
-	// Save original logger to restore later
-	origLogger := defaultLogger
-
 	tests := []struct {
-		levelStr string
+		input    string
 		expected LogLevel
 	}{
 		{"DEBUG", DEBUG},
@@ -149,174 +136,404 @@ func TestSetLogLevel(t *testing.T) {
 		{"WARN", WARN},
 		{"ERROR", ERROR},
 		{"FATAL", FATAL},
-		{"debug", DEBUG}, // Test case insensitivity
-		{"info", INFO},
-		{"invalid", INFO}, // Should default to INFO for invalid levels
+		{"debug", DEBUG},  // Test case insensitivity
+		{"invalid", INFO}, // Invalid levels should default to INFO
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.levelStr, func(t *testing.T) {
+		t.Run(tt.input, func(t *testing.T) {
 			// Reset default logger for each test
 			defaultLogger = nil
 			once = sync.Once{}
 
-			SetLogLevel(tt.levelStr)
-
+			SetLogLevel(tt.input)
 			if defaultLogger.level != tt.expected {
-				t.Errorf("expected level %v, got %v", tt.expected, defaultLogger.level)
+				t.Errorf("SetLogLevel(%s): expected %v, got %v", tt.input, tt.expected, defaultLogger.level)
 			}
 		})
 	}
-
-	// Restore original logger
-	defaultLogger = origLogger
 }
 
-// TestGlobalLogFunctions tests the global logging functions
-func TestGlobalLogFunctions(t *testing.T) {
-	// Save original defaults
-	origLogger := defaultLogger
-	origOnce := once
+// TestSetFormat tests setting the global log format
+func TestSetFormat(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected Format
+	}{
+		{"json", JSONFormat},
+		{"console", ConsoleFormat},
+		{"JSON", JSONFormat}, // Test case insensitivity
+		{"CONSOLE", ConsoleFormat},
+		{"invalid", ConsoleFormat}, // Invalid formats should default to console
+	}
 
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			// Reset default logger for each test
+			defaultLogger = nil
+			once = sync.Once{}
+
+			SetFormat(tt.input)
+			if defaultLogger.format != tt.expected {
+				t.Errorf("SetFormat(%s): expected %v, got %v", tt.input, tt.expected, defaultLogger.format)
+			}
+		})
+	}
+}
+
+// TestConsoleFormatOutput tests console format output
+func TestConsoleFormatOutput(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf, DEBUG, ConsoleFormat, "test", false)
+
+	logger.log(INFO, "Test message")
+
+	output := buf.String()
+	if !strings.Contains(output, "INFO") {
+		t.Error("Console output should contain log level")
+	}
+	if !strings.Contains(output, "Test message") {
+		t.Error("Console output should contain log message")
+	}
+	// Should contain timestamp
+	if !strings.Contains(output, "/") {
+		t.Error("Console output should contain timestamp")
+	}
+}
+
+// TestJSONFormatOutput tests JSON format output
+func TestJSONFormatOutput(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf, DEBUG, JSONFormat, "test-component", false)
+
+	logger.log(INFO, "Test message")
+
+	output := strings.TrimSpace(buf.String())
+
+	// Parse JSON to validate structure
+	var entry LogEntry
+	if err := json.Unmarshal([]byte(output), &entry); err != nil {
+		t.Fatalf("JSON output should be valid JSON: %v", err)
+	}
+
+	if entry.Level != "info" {
+		t.Errorf("Expected level 'info', got %s", entry.Level)
+	}
+	if entry.Message != "Test message" {
+		t.Errorf("Expected message 'Test message', got %s", entry.Message)
+	}
+	if entry.Component != "test-component" {
+		t.Errorf("Expected component 'test-component', got %s", entry.Component)
+	}
+	if entry.Timestamp == "" {
+		t.Error("JSON output should contain timestamp")
+	}
+}
+
+// TestLogWithFields tests logging with fields
+func TestLogWithFields(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf, DEBUG, JSONFormat, "test", false)
+
+	fields := map[string]interface{}{
+		"user_id": "12345",
+		"action":  "login",
+		"ip":      "192.168.1.1",
+	}
+
+	logger.logWithFields(INFO, fields, "User action completed")
+
+	output := strings.TrimSpace(buf.String())
+
+	// Parse as a general map since fields are now merged into the main JSON object
+	var entry map[string]interface{}
+	if err := json.Unmarshal([]byte(output), &entry); err != nil {
+		t.Fatalf("JSON output should be valid JSON: %v", err)
+	}
+
+	if entry["user_id"] != "12345" {
+		t.Errorf("Expected user_id '12345', got %v", entry["user_id"])
+	}
+	if entry["action"] != "login" {
+		t.Errorf("Expected action 'login', got %v", entry["action"])
+	}
+	if entry["ip"] != "192.168.1.1" {
+		t.Errorf("Expected ip '192.168.1.1', got %v", entry["ip"])
+	}
+}
+
+// TestLogWithFieldsConsoleFormat tests console format with fields
+func TestLogWithFieldsConsoleFormat(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf, DEBUG, ConsoleFormat, "test", false)
+
+	fields := map[string]interface{}{
+		"user_id": "12345",
+		"action":  "login",
+	}
+
+	logger.logWithFields(INFO, fields, "User action completed")
+
+	output := buf.String()
+
+	// Console format should include fields as key=value pairs
+	if !strings.Contains(output, "user_id=12345") {
+		t.Error("Console output should contain user_id field")
+	}
+	if !strings.Contains(output, "action=login") {
+		t.Error("Console output should contain action field")
+	}
+	if !strings.Contains(output, "User action completed") {
+		t.Error("Console output should contain log message")
+	}
+}
+
+// TestDebugWithFields tests logging with fields at the debug level
+func TestDebugWithFields(t *testing.T) {
+	// Reset default logger for this test
+	savedLogger := defaultLogger
+	savedOnce := once
 	defer func() {
-		// Restore originals
-		defaultLogger = origLogger
-		once = origOnce
+		defaultLogger = savedLogger
+		once = savedOnce
 	}()
 
-	// Create a test buffer and set up test logger
 	var buf bytes.Buffer
-	defaultLogger = NewLogger(&buf, DEBUG, "", false)
+	defaultLogger = NewLogger(&buf, DEBUG, JSONFormat, "test", false)
+	once = sync.Once{}
+	once.Do(func() {}) // Mark as initialized
 
-	// Make the once flag think it has already run by calling it with a dummy function
-	once.Do(func() {})
-
-	// Test each global function
-	Debug("debug %s", "message")
-	Info("info %s", "message")
-	Warn("warn %s", "message")
-	Error("error %s", "message")
-
-	output := buf.String()
-
-	// Verify all messages appear
-	expectedMessages := []string{
-		"DEBUG debug message",
-		"INFO info message",
-		"WARN warn message",
-		"ERROR error message",
+	fields := map[string]interface{}{
+		"debug_field": "debug_value",
 	}
 
-	for _, expected := range expectedMessages {
-		if !strings.Contains(output, expected) {
-			t.Errorf("expected message %q not found in output", expected)
-		}
+	DebugWithFields(fields, "Debug message with fields")
+
+	output := strings.TrimSpace(buf.String())
+
+	// Parse as a general map since fields are now merged into the main JSON object
+	var entry map[string]interface{}
+	if err := json.Unmarshal([]byte(output), &entry); err != nil {
+		t.Fatalf("JSON output should be valid JSON: %v", err)
+	}
+
+	if entry["level"] != "debug" {
+		t.Errorf("Expected level 'debug', got %s", entry["level"])
+	}
+	if entry["debug_field"] != "debug_value" {
+		t.Errorf("Expected debug_field 'debug_value', got %v", entry["debug_field"])
 	}
 }
 
-// TestTimestampFormat tests that timestamps are properly formatted
-func TestTimestampFormat(t *testing.T) {
+// TestLogLevelFiltering tests filtering logs based on log level
+func TestLogLevelFiltering(t *testing.T) {
 	var buf bytes.Buffer
-	logger := NewLogger(&buf, INFO, "test", false)
+	logger := NewLogger(&buf, WARN, ConsoleFormat, "test", false)
 
-	logger.log(INFO, "test message")
+	// These should not appear (below WARN level)
+	logger.log(DEBUG, "Debug message")
+	logger.log(INFO, "Info message")
+
+	// These should appear (WARN level and above)
+	logger.log(WARN, "Warning message")
+	logger.log(ERROR, "Error message")
+
 	output := buf.String()
 
-	// Check timestamp format: should start with YYYY/MM/DD HH:MM:SS.mmm
+	if strings.Contains(output, "Debug message") {
+		t.Error("DEBUG message should be filtered out")
+	}
+	if strings.Contains(output, "Info message") {
+		t.Error("INFO message should be filtered out")
+	}
+	if !strings.Contains(output, "Warning message") {
+		t.Error("WARN message should appear")
+	}
+	if !strings.Contains(output, "Error message") {
+		t.Error("ERROR message should appear")
+	}
+}
+
+// TestSetComponent tests setting the component for logging
+func TestSetComponent(t *testing.T) {
+	// Reset default logger for this test
+	savedLogger := defaultLogger
+	savedOnce := once
+	defer func() {
+		defaultLogger = savedLogger
+		once = savedOnce
+	}()
+
+	var buf bytes.Buffer
+	defaultLogger = NewLogger(&buf, INFO, JSONFormat, "", false)
+	once = sync.Once{}
+	once.Do(func() {}) // Mark as initialized
+
+	SetComponent("my-component")
+	Info("Test message")
+
+	output := strings.TrimSpace(buf.String())
+
+	var entry LogEntry
+	if err := json.Unmarshal([]byte(output), &entry); err != nil {
+		t.Fatalf("JSON output should be valid JSON: %v", err)
+	}
+
+	if entry.Component != "my-component" {
+		t.Errorf("Expected component 'my-component', got %s", entry.Component)
+	}
+}
+
+// TestJSONMarshalError tests handling JSON marshaling errors
+func TestJSONMarshalError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf, DEBUG, JSONFormat, "test", false)
+
+	// Create a field that cannot be marshaled to JSON
+	fields := map[string]interface{}{
+		"invalid": make(chan int), // channels cannot be marshaled to JSON
+	}
+
+	logger.logWithFields(INFO, fields, "Test message")
+
+	output := buf.String()
+
+	// Should fall back to console format when JSON marshaling fails
+	if !strings.Contains(output, "JSON marshal error") {
+		t.Error("Should contain JSON marshal error message")
+	}
+	if !strings.Contains(output, "Test message") {
+		t.Error("Should still contain original message")
+	}
+}
+
+// Benchmark tests
+func BenchmarkConsoleLogging(b *testing.B) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf, INFO, ConsoleFormat, "benchmark", false)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		logger.log(INFO, "Benchmark message %d", i)
+	}
+}
+
+func BenchmarkJSONLogging(b *testing.B) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf, INFO, JSONFormat, "benchmark", false)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		logger.log(INFO, "Benchmark message %d", i)
+	}
+}
+
+func BenchmarkJSONLoggingWithFields(b *testing.B) {
+	var buf bytes.Buffer
+	logger := NewLogger(&buf, INFO, JSONFormat, "benchmark", false)
+
+	fields := map[string]interface{}{
+		"field1": "value1",
+		"field2": 42,
+		"field3": true,
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		logger.logWithFields(INFO, fields, "Benchmark message %d", i)
+	}
+}
+
+// TestWithComponent tests creating logger instances with specific component names
+func TestWithComponent(t *testing.T) {
+	// Reset default logger for this test
+	savedLogger := defaultLogger
+	savedOnce := once
+	defer func() {
+		defaultLogger = savedLogger
+		once = savedOnce
+	}()
+
+	var buf bytes.Buffer
+	defaultLogger = NewLogger(&buf, INFO, JSONFormat, "", false)
+	once = sync.Once{}
+	once.Do(func() {}) // Mark as initialized
+
+	// Create component-specific loggers
+	serverLogger := WithComponent("server")
+	agentLogger := WithComponent("agent")
+	caddyLogger := WithComponent("caddy.manager")
+
+	// Test that each logger has the correct component
+	if serverLogger.component != "server" {
+		t.Errorf("Expected server logger component 'server', got %s", serverLogger.component)
+	}
+	if agentLogger.component != "agent" {
+		t.Errorf("Expected agent logger component 'agent', got %s", agentLogger.component)
+	}
+	if caddyLogger.component != "caddy.manager" {
+		t.Errorf("Expected caddy logger component 'caddy.manager', got %s", caddyLogger.component)
+	}
+
+	// Test that they inherit the default logger settings dynamically
+	// Component loggers should have the isComponentLogger flag set
+	if !serverLogger.isComponentLogger {
+		t.Error("Expected server logger to be marked as component logger")
+	}
+
+	// Test effective configuration behavior by checking what they would actually use
+	level, format, _, _ := serverLogger.getEffectiveConfig()
+	if level != INFO {
+		t.Errorf("Expected server logger effective level INFO, got %v", level)
+	}
+	if format != JSONFormat {
+		t.Errorf("Expected server logger effective format JSONFormat, got %v", format)
+	}
+
+	// Test actual logging with different components
+	serverLogger.log(INFO, "Server message")
+	agentLogger.log(INFO, "Agent message")
+	caddyLogger.log(INFO, "Caddy manager message")
+
+	output := buf.String()
 	lines := strings.Split(strings.TrimSpace(output), "\n")
-	if len(lines) == 0 {
-		t.Fatal("no output generated")
+
+	if len(lines) != 3 {
+		t.Errorf("Expected 3 log lines, got %d", len(lines))
 	}
 
-	line := lines[0]
-	parts := strings.Fields(line)
-	if len(parts) < 2 {
-		t.Fatal("log line format incorrect")
+	// Parse and verify each log entry
+	var serverEntry, agentEntry, caddyEntry map[string]interface{}
+
+	if err := json.Unmarshal([]byte(lines[0]), &serverEntry); err != nil {
+		t.Fatalf("Failed to parse server log entry: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &agentEntry); err != nil {
+		t.Fatalf("Failed to parse agent log entry: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[2]), &caddyEntry); err != nil {
+		t.Fatalf("Failed to parse caddy log entry: %v", err)
 	}
 
-	// Parse timestamp
-	timestamp := parts[0] + " " + parts[1]
-	_, err := time.Parse("2006/01/02 15:04:05.000", timestamp)
-	if err != nil {
-		t.Errorf("timestamp format incorrect: %s, error: %v", timestamp, err)
+	// Verify components
+	if serverEntry["component"] != "server" {
+		t.Errorf("Expected server component 'server', got %v", serverEntry["component"])
 	}
-}
-
-// TestConcurrentLogging tests thread safety of logging
-func TestConcurrentLogging(t *testing.T) {
-	var buf bytes.Buffer
-	logger := NewLogger(&buf, INFO, "test", false)
-
-	// Run concurrent logging
-	done := make(chan bool, 10)
-
-	for i := 0; i < 10; i++ {
-		go func(id int) {
-			for j := 0; j < 100; j++ {
-				logger.log(INFO, "goroutine %d message %d", id, j)
-			}
-			done <- true
-		}(i)
+	if agentEntry["component"] != "agent" {
+		t.Errorf("Expected agent component 'agent', got %v", agentEntry["component"])
+	}
+	if caddyEntry["component"] != "caddy.manager" {
+		t.Errorf("Expected caddy component 'caddy.manager', got %v", caddyEntry["component"])
 	}
 
-	// Wait for all goroutines to complete
-	for i := 0; i < 10; i++ {
-		<-done
+	// Verify messages
+	if serverEntry["msg"] != "Server message" {
+		t.Errorf("Expected server message 'Server message', got %v", serverEntry["msg"])
 	}
-
-	output := buf.String()
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-
-	// Should have 1000 lines (10 goroutines * 100 messages each)
-	if len(lines) != 1000 {
-		t.Errorf("expected 1000 log lines, got %d", len(lines))
+	if agentEntry["msg"] != "Agent message" {
+		t.Errorf("Expected agent message 'Agent message', got %v", agentEntry["msg"])
 	}
-}
-
-// TestFatalDoesNotExit tests Fatal function behavior (but avoids actual exit)
-func TestFatalFunction(t *testing.T) {
-	// We can't actually test os.Exit(), but we can test that Fatal logs properly
-	var buf bytes.Buffer
-	logger := NewLogger(&buf, FATAL, "test", false)
-
-	// Test that fatal level messages are logged
-	logger.log(FATAL, "fatal error occurred")
-
-	output := buf.String()
-	if !strings.Contains(output, "FATAL fatal error occurred") {
-		t.Error("FATAL message not logged correctly")
-	}
-}
-
-// BenchmarkLogging benchmarks logging performance
-func BenchmarkLogging(b *testing.B) {
-	var buf bytes.Buffer
-	logger := NewLogger(&buf, INFO, "benchmark", false)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		logger.log(INFO, "benchmark message %d", i)
-	}
-}
-
-// BenchmarkColoredLogging benchmarks colored logging performance
-func BenchmarkColoredLogging(b *testing.B) {
-	var buf bytes.Buffer
-	logger := NewLogger(&buf, INFO, "benchmark", true)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		logger.log(INFO, "benchmark message %d", i)
-	}
-}
-
-// BenchmarkFilteredLogging benchmarks logging when messages are filtered out
-func BenchmarkFilteredLogging(b *testing.B) {
-	var buf bytes.Buffer
-	logger := NewLogger(&buf, ERROR, "benchmark", false)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		logger.log(DEBUG, "filtered message %d", i) // This should be filtered out
+	if caddyEntry["msg"] != "Caddy manager message" {
+		t.Errorf("Expected caddy message 'Caddy manager message', got %v", caddyEntry["msg"])
 	}
 }

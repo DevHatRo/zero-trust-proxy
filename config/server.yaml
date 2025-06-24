@@ -1,21 +1,68 @@
-# 0Trust Server Configuration
-
-# Log level configuration
-log_level: "INFO"
+# Zero Trust Proxy Server Configuration
 
 # Core server settings
 server:
-  listen_addr: ":8443"
-  cert_file: "/config/certs/server.crt"
-  key_file: "/config/certs/server.key"
-  ca_file: "/config/certs/ca.crt"
+  listen_addr: ":8443" # Agent connections (mTLS required)
+  cert_file: "/config/certs/server.crt" # Server certificate
+  key_file: "/config/certs/server.key" # Server private key
+  ca_file: "/config/certs/ca.crt" # CA certificate for client verification
 
-# API server settings (for HTTP proxy from Caddy)
+# HTTP proxy API settings
 api:
-  listen_addr: "localhost:9443"
+  listen_addr: ":9443" # HTTP proxy connections (no client certs)
 
-# Caddy reverse proxy settings
+# Zero Trust Proxy Application Logging Configuration
+# This controls the internal Go application logs (server, agent communication, etc.)
+logging:
+  level: "INFO" # DEBUG, INFO, WARN, ERROR, FATAL
+  format: "console" # console, json
+  output: "stdout" # stdout, stderr, or file path
+
+# Caddy Configuration
 caddy:
-  admin_api: "http://localhost:2019"
-  config_dir: "/config/caddy"
-  storage_dir: "/config/caddy/storage" 
+  admin_api: "http://localhost:2019" # Caddy admin API endpoint
+  config_dir: "/config/caddy" # Caddy configuration storage
+  storage_dir: "/config/caddy/storage" # Caddy certificate storage
+
+  # Caddy Access & Operational Logging Configuration
+  # This controls Caddy's HTTP access logs and internal operational logs
+  logging:
+    enabled: true # Enable Caddy logging
+    level: "INFO" # Caddy log level
+    format: "console" # console or json
+    output: "stdout" # stdout, stderr, or file path
+
+    # HTTP access log fields to include
+    include:
+      - "ts" # Timestamp
+      - "request>method" # HTTP method (GET, POST, etc.)
+      - "request>uri" # Request URI
+      - "request>host" # Host header
+      - "request>remote_ip" # Client IP address
+      - "status" # HTTP status code
+      - "duration" # Request duration
+      - "size" # Response size in bytes
+
+    # HTTP access log fields to exclude (for security)
+    exclude:
+      - "request>headers>Authorization" # Hide auth headers
+      - "request>headers>Cookie" # Hide cookies
+      - "request>headers>X-Api-Key" # Hide API keys
+
+    # Custom fields added to all Caddy logs
+    fields:
+      service: "caddy-proxy"
+      component: "reverse-proxy"
+
+    # Log sampling for high-traffic scenarios
+    sampling_first: 100 # Log first 100 messages fully
+    sampling_thereafter: 100 # Then log every 100th message
+
+# Hot reload configuration
+hot_reload:
+  enabled: true # Enable configuration hot reload
+  watch_config: true # Watch config file for changes
+  watch_certs: true # Watch certificate files for changes
+
+# Legacy log level (deprecated - use logging.level instead)
+# log_level: "INFO"

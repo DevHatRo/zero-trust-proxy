@@ -563,6 +563,208 @@ func TestReloadConfigHTTPRedirect(t *testing.T) {
 	}
 }
 
+// TestAccessLoggingConfiguration tests that servers have access logging enabled
+func TestAccessLoggingConfiguration(t *testing.T) {
+	var receivedConfig map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedConfig)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewManager(server.URL)
+
+	// Add services that create both HTTP and HTTPS servers
+	err := manager.AddFullServiceConfig("https.example.com", "backend", "https", false, false, "https")
+	if err != nil {
+		t.Fatalf("AddFullServiceConfig failed: %v", err)
+	}
+
+	err = manager.AddFullServiceConfig("redirect.example.com", "backend", "http", false, true, "both")
+	if err != nil {
+		t.Fatalf("AddFullServiceConfig failed: %v", err)
+	}
+
+	// Verify config was received
+	if receivedConfig == nil {
+		t.Fatal("no config was sent to mock server")
+	}
+
+	// Navigate to servers configuration
+	apps, ok := receivedConfig["apps"].(map[string]interface{})
+	if !ok {
+		t.Fatal("config should have apps section")
+	}
+
+	httpApp, ok := apps["http"].(map[string]interface{})
+	if !ok {
+		t.Fatal("config should have http app")
+	}
+
+	servers, ok := httpApp["servers"].(map[string]interface{})
+	if !ok {
+		t.Fatal("http app should have servers")
+	}
+
+	// Check that both servers have logging configuration
+	serverCount := 0
+	for serverName, serverConfigInterface := range servers {
+		serverConfig, ok := serverConfigInterface.(map[string]interface{})
+		if !ok {
+			t.Fatalf("server %s config should be a map", serverName)
+		}
+
+		// Verify logging configuration exists
+		logs, hasLogs := serverConfig["logs"]
+		if !hasLogs {
+			t.Errorf("server %s should have logs configuration", serverName)
+			continue
+		}
+
+		logsMap, ok := logs.(map[string]interface{})
+		if !ok {
+			t.Errorf("server %s logs should be a map", serverName)
+			continue
+		}
+
+		// Verify default logger name is set
+		loggerName, hasLoggerName := logsMap["default_logger_name"]
+		if !hasLoggerName {
+			t.Errorf("server %s should have default_logger_name in logs config", serverName)
+			continue
+		}
+
+		if loggerName != "default" {
+			t.Errorf("server %s should use 'default' logger, got %v", serverName, loggerName)
+		}
+
+		serverCount++
+	}
+
+	// Should have at least 2 servers (http and https)
+	if serverCount < 2 {
+		t.Errorf("expected at least 2 servers with logging config, got %d", serverCount)
+	}
+}
+
+// TestHTTPSOnlyServiceLogging tests logging configuration for HTTPS-only services
+func TestHTTPSOnlyServiceLogging(t *testing.T) {
+	var receivedConfig map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedConfig)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewManager(server.URL)
+
+	// Add HTTPS-only service
+	err := manager.AddFullServiceConfig("secure.example.com", "backend", "https", false, false, "https")
+	if err != nil {
+		t.Fatalf("AddFullServiceConfig failed: %v", err)
+	}
+
+	// Check HTTPS server has logging
+	apps, ok := receivedConfig["apps"].(map[string]interface{})
+	if !ok {
+		t.Fatal("config should have apps section")
+	}
+
+	httpApp, ok := apps["http"].(map[string]interface{})
+	if !ok {
+		t.Fatal("config should have http app")
+	}
+
+	servers, ok := httpApp["servers"].(map[string]interface{})
+	if !ok {
+		t.Fatal("http app should have servers")
+	}
+
+	httpsServer, hasHTTPS := servers["https"]
+	if !hasHTTPS {
+		t.Fatal("should have HTTPS server")
+	}
+
+	httpsConfig, ok := httpsServer.(map[string]interface{})
+	if !ok {
+		t.Fatal("HTTPS server config should be a map")
+	}
+
+	// Verify logging is enabled
+	logs, hasLogs := httpsConfig["logs"]
+	if !hasLogs {
+		t.Error("HTTPS server should have logs configuration")
+	}
+
+	logsMap, ok := logs.(map[string]interface{})
+	if !ok {
+		t.Error("HTTPS server logs should be a map")
+	}
+
+	if logsMap["default_logger_name"] != "default" {
+		t.Error("HTTPS server should use 'default' logger")
+	}
+}
+
+// TestHTTPOnlyServiceLogging tests logging configuration for HTTP-only services
+func TestHTTPOnlyServiceLogging(t *testing.T) {
+	var receivedConfig map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedConfig)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := NewManager(server.URL)
+
+	// Add HTTP-only service (no redirect)
+	err := manager.AddFullServiceConfig("insecure.example.com", "backend", "http", false, false, "http")
+	if err != nil {
+		t.Fatalf("AddFullServiceConfig failed: %v", err)
+	}
+
+	// Check HTTP server has logging
+	apps, ok := receivedConfig["apps"].(map[string]interface{})
+	if !ok {
+		t.Fatal("config should have apps section")
+	}
+
+	httpApp, ok := apps["http"].(map[string]interface{})
+	if !ok {
+		t.Fatal("config should have http app")
+	}
+
+	servers, ok := httpApp["servers"].(map[string]interface{})
+	if !ok {
+		t.Fatal("http app should have servers")
+	}
+
+	httpServer, hasHTTP := servers["http"]
+	if !hasHTTP {
+		t.Fatal("should have HTTP server")
+	}
+
+	httpConfig, ok := httpServer.(map[string]interface{})
+	if !ok {
+		t.Fatal("HTTP server config should be a map")
+	}
+
+	// Verify logging is enabled
+	logs, hasLogs := httpConfig["logs"]
+	if !hasLogs {
+		t.Error("HTTP server should have logs configuration")
+	}
+
+	logsMap, ok := logs.(map[string]interface{})
+	if !ok {
+		t.Error("HTTP server logs should be a map")
+	}
+
+	if logsMap["default_logger_name"] != "default" {
+		t.Error("HTTP server should use 'default' logger")
+	}
+}
+
 // TestConcurrentOperations tests thread safety of manager operations
 func TestConcurrentOperations(t *testing.T) {
 	server := mockCaddyServer(t, nil)

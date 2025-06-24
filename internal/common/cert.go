@@ -9,6 +9,9 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
 )
 
+// Component-specific logger for certificate operations
+var certLog = logger.WithComponent("cert")
+
 // LoadCertificate loads a certificate and key from files
 func LoadCertificate(certFile, keyFile string) (tls.Certificate, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -22,9 +25,9 @@ func LoadCertificate(certFile, keyFile string) (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("failed to parse certificate: %w", err)
 	}
 
-	logger.Info("🔐 Using certificate with CN: %s", x509Cert.Subject.CommonName)
-	logger.Info("🔧 Certificate key usage: %d", x509Cert.KeyUsage)
-	logger.Info("🎯 Certificate extended key usage: %v", x509Cert.ExtKeyUsage)
+	certLog.Info("🔐 Using certificate with CN: %s", x509Cert.Subject.CommonName)
+	certLog.Info("🔧 Certificate key usage: %d", x509Cert.KeyUsage)
+	certLog.Info("🎯 Certificate extended key usage: %v", x509Cert.ExtKeyUsage)
 
 	return cert, nil
 }
@@ -58,9 +61,9 @@ func LoadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to parse certificate: %v", err)
 	}
 
-	logger.Info("🔐 Using certificate with CN: %s", x509Cert.Subject.CommonName)
-	logger.Info("🔧 Certificate key usage: %d", x509Cert.KeyUsage)
-	logger.Info("🎯 Certificate extended key usage: %v", x509Cert.ExtKeyUsage)
+	certLog.Info("🔐 Using certificate with CN: %s", x509Cert.Subject.CommonName)
+	certLog.Info("🔧 Certificate key usage: %d", x509Cert.KeyUsage)
+	certLog.Info("🎯 Certificate extended key usage: %v", x509Cert.ExtKeyUsage)
 
 	// Load CA certificate
 	caCert, err := os.ReadFile(caFile)
@@ -86,9 +89,9 @@ func LoadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to parse server certificate: %w", err)
 	}
 
-	logger.Info("🔐 Using certificate with CN: %s", serverCert.Subject.CommonName)
-	logger.Info("🔧 Certificate key usage: %d", serverCert.KeyUsage)
-	logger.Info("🎯 Certificate extended key usage: %v", serverCert.ExtKeyUsage)
+	certLog.Info("🔐 Using certificate with CN: %s", serverCert.Subject.CommonName)
+	certLog.Info("🔧 Certificate key usage: %d", serverCert.KeyUsage)
+	certLog.Info("🎯 Certificate extended key usage: %v", serverCert.ExtKeyUsage)
 
 	return tlsConfig, nil
 }
@@ -107,9 +110,9 @@ func LoadServerTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) 
 		return nil, fmt.Errorf("failed to parse server certificate: %v", err)
 	}
 
-	logger.Info("🔐 Using certificate with CN: %s", x509Cert.Subject.CommonName)
-	logger.Info("🔧 Certificate key usage: %d", x509Cert.KeyUsage)
-	logger.Info("🎯 Certificate extended key usage: %v", x509Cert.ExtKeyUsage)
+	certLog.Info("🔐 Using certificate with CN: %s", x509Cert.Subject.CommonName)
+	certLog.Info("🔧 Certificate key usage: %d", x509Cert.KeyUsage)
+	certLog.Info("🎯 Certificate extended key usage: %v", x509Cert.ExtKeyUsage)
 
 	// Load CA certificate
 	caCert, err := os.ReadFile(caFile)

@@ -30,6 +30,17 @@ func TestLoadConfig(t *testing.T) {
 				if config.LogLevel != "INFO" {
 					t.Errorf("Expected default LogLevel INFO, got %s", config.LogLevel)
 				}
+				// Check new logging configuration defaults
+				if config.Logging.Level != "INFO" {
+					t.Errorf("Expected default logging level INFO, got %s", config.Logging.Level)
+				}
+				if config.Logging.Format != "console" {
+					t.Errorf("Expected default logging format console, got %s", config.Logging.Format)
+				}
+				if config.Logging.Output != "stdout" {
+					t.Errorf("Expected default logging output stdout, got %s", config.Logging.Output)
+				}
+				// Note: Component field removed - each module now sets its own component via WithComponent()
 				if len(config.Services) != 0 {
 					t.Errorf("Expected no default services, got %d", len(config.Services))
 				}
@@ -855,6 +866,199 @@ func TestConfigRoundTrip(t *testing.T) {
 				loadedService.LoadBalancing.Policy, originalService.LoadBalancing.Policy)
 		}
 	}
+}
+
+func TestLoggingConfiguration(t *testing.T) {
+	tests := []struct {
+		name       string
+		configYAML string
+		wantErr    bool
+		validate   func(t *testing.T, config *AgentConfig)
+	}{
+		{
+			name: "complete logging configuration",
+			configYAML: `
+agent:
+  id: "test-agent"
+server:
+  address: "localhost:8443"
+logging:
+  level: "DEBUG"
+  format: "json"
+  output: "stderr"
+  component: "my-custom-agent"
+services: []
+`,
+			wantErr: false,
+			validate: func(t *testing.T, config *AgentConfig) {
+				if config.Logging.Level != "DEBUG" {
+					t.Errorf("Expected logging level DEBUG, got %s", config.Logging.Level)
+				}
+				if config.Logging.Format != "json" {
+					t.Errorf("Expected logging format json, got %s", config.Logging.Format)
+				}
+				if config.Logging.Output != "stderr" {
+					t.Errorf("Expected logging output stderr, got %s", config.Logging.Output)
+				}
+				// Note: Component field removed - each module now sets its own component via WithComponent()
+
+			},
+		},
+		{
+			name: "partial logging configuration with defaults",
+			configYAML: `
+agent:
+  id: "test-agent"
+server:
+  address: "localhost:8443"
+logging:
+  level: "WARN"
+services: []
+`,
+			wantErr: false,
+			validate: func(t *testing.T, config *AgentConfig) {
+				if config.Logging.Level != "WARN" {
+					t.Errorf("Expected logging level WARN, got %s", config.Logging.Level)
+				}
+				// These should get defaults applied
+				if config.Logging.Format != "console" {
+					t.Errorf("Expected default logging format console, got %s", config.Logging.Format)
+				}
+				if config.Logging.Output != "stdout" {
+					t.Errorf("Expected default logging output stdout, got %s", config.Logging.Output)
+				}
+				// Note: Component field removed - each module now sets its own component via WithComponent()
+			},
+		},
+		{
+			name: "legacy log_level with new logging config",
+			configYAML: `
+agent:
+  id: "test-agent"
+server:
+  address: "localhost:8443"
+log_level: "ERROR"
+logging:
+  level: "DEBUG"
+  format: "json"
+services: []
+`,
+			wantErr: false,
+			validate: func(t *testing.T, config *AgentConfig) {
+				// New logging.level should take precedence over legacy log_level
+				if config.Logging.Level != "DEBUG" {
+					t.Errorf("Expected logging level DEBUG (from new config), got %s", config.Logging.Level)
+				}
+				if config.LogLevel != "ERROR" {
+					t.Errorf("Expected legacy log_level ERROR to be preserved, got %s", config.LogLevel)
+				}
+			},
+		},
+		{
+			name: "legacy log_level only",
+			configYAML: `
+agent:
+  id: "test-agent"
+server:
+  address: "localhost:8443"
+log_level: "ERROR"
+services: []
+`,
+			wantErr: false,
+			validate: func(t *testing.T, config *AgentConfig) {
+				// logging.level should inherit from legacy log_level
+				if config.Logging.Level != "ERROR" {
+					t.Errorf("Expected logging level ERROR (from legacy config), got %s", config.Logging.Level)
+				}
+				if config.LogLevel != "ERROR" {
+					t.Errorf("Expected legacy log_level ERROR, got %s", config.LogLevel)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "agent.yaml")
+
+			if err := os.WriteFile(configPath, []byte(tt.configYAML), 0644); err != nil {
+				t.Fatalf("Failed to create test config: %v", err)
+			}
+
+			config, err := LoadConfig(configPath)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("LoadConfig() expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("LoadConfig() unexpected error: %v", err)
+				return
+			}
+
+			if config == nil {
+				t.Fatal("LoadConfig() returned nil config")
+			}
+
+			if tt.validate != nil {
+				tt.validate(t, config)
+			}
+		})
+	}
+}
+
+func TestLoggingConfigRoundTrip(t *testing.T) {
+	// Test that we can save and load a config with logging configuration
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "agent.yaml")
+
+	originalConfig := &AgentConfig{
+		Agent: AgentSettings{
+			ID:   "test-agent",
+			Name: "Test Agent",
+		},
+		Server: ServerConfig{
+			Address: "localhost:8443",
+			CACert:  "/test/ca.crt",
+			Cert:    "/test/agent.crt",
+			Key:     "/test/agent.key",
+		},
+		Logging: LoggingConfig{
+			Level:  "DEBUG",
+			Format: "json",
+			Output: "/var/log/agent.log",
+		},
+		LogLevel: "INFO", // Legacy field
+		Services: []ServiceConfig{},
+	}
+
+	// Save the config
+	err := SaveConfig(configPath, originalConfig)
+	if err != nil {
+		t.Fatalf("SaveConfig() failed: %v", err)
+	}
+
+	// Load it back
+	loadedConfig, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() failed: %v", err)
+	}
+
+	// Verify logging configuration was preserved
+	if loadedConfig.Logging.Level != originalConfig.Logging.Level {
+		t.Errorf("Logging level mismatch: expected %s, got %s", originalConfig.Logging.Level, loadedConfig.Logging.Level)
+	}
+	if loadedConfig.Logging.Format != originalConfig.Logging.Format {
+		t.Errorf("Logging format mismatch: expected %s, got %s", originalConfig.Logging.Format, loadedConfig.Logging.Format)
+	}
+	if loadedConfig.Logging.Output != originalConfig.Logging.Output {
+		t.Errorf("Logging output mismatch: expected %s, got %s", originalConfig.Logging.Output, loadedConfig.Logging.Output)
+	}
+	// Note: Component field removed - each module now sets its own component via WithComponent()
 }
 
 func BenchmarkLoadConfig(b *testing.B) {
