@@ -475,12 +475,19 @@ func TestWithComponent(t *testing.T) {
 		t.Errorf("Expected caddy logger component 'caddy.manager', got %s", caddyLogger.component)
 	}
 
-	// Test that they inherit the default logger settings
-	if serverLogger.level != INFO {
-		t.Errorf("Expected server logger level INFO, got %v", serverLogger.level)
+	// Test that they inherit the default logger settings dynamically
+	// Component loggers should have the isComponentLogger flag set
+	if !serverLogger.isComponentLogger {
+		t.Error("Expected server logger to be marked as component logger")
 	}
-	if serverLogger.format != JSONFormat {
-		t.Errorf("Expected server logger format JSONFormat, got %v", serverLogger.format)
+
+	// Test effective configuration behavior by checking what they would actually use
+	level, format, _, _ := serverLogger.getEffectiveConfig()
+	if level != INFO {
+		t.Errorf("Expected server logger effective level INFO, got %v", level)
+	}
+	if format != JSONFormat {
+		t.Errorf("Expected server logger effective format JSONFormat, got %v", format)
 	}
 
 	// Test actual logging with different components

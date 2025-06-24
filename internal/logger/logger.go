@@ -117,7 +117,7 @@ func SetLogLevel(level string) {
 	case "FATAL":
 		defaultLogger.level = FATAL
 	default:
-		Error("Invalid log level: %s, using INFO", level)
+		// Invalid log levels default to INFO for safety
 		defaultLogger.level = INFO
 	}
 }
@@ -132,7 +132,7 @@ func SetFormat(format string) {
 	case "console":
 		defaultLogger.format = ConsoleFormat
 	default:
-		Error("Invalid log format: %s, using console", format)
+		// Invalid log formats default to console for safety
 		defaultLogger.format = ConsoleFormat
 	}
 }
