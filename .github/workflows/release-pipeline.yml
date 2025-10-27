@@ -34,7 +34,7 @@ jobs:
           ./scripts/build.sh
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: build-artifacts
           path: bin/
