@@ -57,7 +57,7 @@ jobs:
         run: echo "REPO_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Download Build Artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: build-artifacts
           path: bin/
@@ -121,7 +121,7 @@ jobs:
     needs: [build, create-manifests]
     steps:
       - name: Download Artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: build-artifacts
           path: bin/
