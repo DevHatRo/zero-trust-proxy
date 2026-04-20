@@ -24,6 +24,10 @@ go.work
 /certs/*.key
 /certs/*.csr
 /certs/*.srl
+/config/certs/*.crt
+/config/certs/*.key
+/config/certs/*.csr
+/config/certs/*.srl
 
 # IDE and editor files
 .idea/

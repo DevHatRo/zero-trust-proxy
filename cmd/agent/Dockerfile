@@ -1,32 +1,37 @@
-FROM ubuntu:24.04
+# syntax=docker/dockerfile:1.6
+#
+# Runtime image for the zero-trust-proxy agent.
+#
+# The agent shells out to `caddy validate` (see internal/caddy/validation.go)
+# before accepting service configs. We copy the same custom Caddy binary the
+# server image uses — that binary is a superset of upstream Caddy, so it can
+# validate standard Caddy configs just fine.
+#
+# Build prerequisites: run `./scripts/build.sh` so that both
+# `bin/zero-trust-proxy-agent-linux-${TARGETARCH}` and
+# `bin/zero-trust-proxy-server-linux-${TARGETARCH}` exist.
+
+FROM debian:12-slim
 
 ARG TARGETARCH
 
-# Install curl and ca-certificates for downloading Caddy
-RUN apt-get update && \
-    apt-get install -y curl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# Download and install Caddy binary for configuration validation
-RUN CADDY_VERSION="2.8.4" && \
-    case ${TARGETARCH} in \
-        amd64) CADDY_ARCH="amd64" ;; \
-        arm64) CADDY_ARCH="arm64" ;; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
-    esac && \
-    curl -L "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_${CADDY_ARCH}.tar.gz" | \
-    tar -xz -C /tmp && \
-    mv /tmp/caddy /usr/local/bin/caddy && \
-    chmod +x /usr/local/bin/caddy && \
-    rm -rf /tmp/*
+# Caddy binary (custom build) — used only by the validator.
+COPY bin/zero-trust-proxy-server-linux-${TARGETARCH} /usr/local/bin/caddy
+RUN chmod +x /usr/local/bin/caddy \
+    && /usr/local/bin/caddy version
 
-# Verify Caddy installation
-RUN caddy version
+# Agent binary.
+COPY bin/zero-trust-proxy-agent-linux-${TARGETARCH} /usr/local/bin/zero-trust-proxy-agent
+RUN chmod +x /usr/local/bin/zero-trust-proxy-agent
 
-# Copy the zero-trust-proxy agent binary
-COPY bin/zero-trust-proxy-agent-linux-${TARGETARCH} /bin/zero-trust-proxy-agent
-RUN chmod +x /bin/zero-trust-proxy-agent
-
+# /config holds agent.yaml and the TLS material it references
+# (client cert/key + CA). Mount this volume at runtime.
 VOLUME ["/config"]
+WORKDIR /config
 
-ENTRYPOINT ["/bin/zero-trust-proxy-agent"]
+ENTRYPOINT ["/usr/local/bin/zero-trust-proxy-agent"]
+CMD ["--config", "/config/agent.yaml"]

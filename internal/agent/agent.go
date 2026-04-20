@@ -16,11 +16,21 @@ import (
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
+	"github.com/devhatro/zero-trust-proxy/internal/streaming"
 	"github.com/devhatro/zero-trust-proxy/internal/types"
 )
 
 // Component-specific logger for agent
 var log = logger.WithComponent("agent")
+
+// agentMessageSender implements streaming.MessageSender interface for agent
+type agentMessageSender struct {
+	agent *Agent
+}
+
+func (ams *agentMessageSender) SendMessage(msg *common.Message) error {
+	return ams.agent.SendMessage(msg)
+}
 
 // Message types
 const (
@@ -469,6 +479,12 @@ func (a *Agent) handleMessages() {
 		case "websocket_disconnect":
 			// Handle notification that client disconnected from server
 			go a.handleWebSocketDisconnect(&msg)
+		case "http_upload_start":
+			// Handle upload streaming start - not typically used on agent side
+			log.Debug("📤 Received upload start message (ID: %s)", msg.ID)
+		case "http_upload_chunk":
+			// Handle upload streaming chunk - not typically used on agent side
+			log.Debug("📤 Received upload chunk message (ID: %s)", msg.ID)
 		default:
 			log.Error("❓ Unknown message type: %s", msg.Type)
 		}
@@ -692,18 +708,16 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 		log.Debug("📈 Large response detected (%d bytes) - consider extending timeout for this URL pattern", contentLength)
 	}
 
-	// Stream if content is large (>1MB) - content type doesn't matter with robust timeout system
-	shouldStream := contentLength > 1024*1024
+	// Check if response should be streamed using the streaming library
+	shouldStream := streaming.ShouldStream(contentLength, contentType)
 
 	log.Debug("🎯 Streaming decision: shouldStream=%t, contentLength=%d, contentType=%s",
 		shouldStream, contentLength, contentType)
 
 	if shouldStream {
-		log.Debug("📡 Streaming response for large file, reported size: %d bytes", contentLength)
-
 		// Handle unknown content length
 		if contentLength <= 0 {
-			contentLength = -1 // Normalize unknown size
+			contentLength = -1 // Unknown size
 			log.Debug("❓ Content length unknown, will determine actual size during streaming")
 		}
 
@@ -713,145 +727,20 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 			log.Info("✅ WebSocket upgrade response detected (101) for streaming host: %s", host)
 		}
 
-		// Create timeout configuration for streaming operations
-		timeoutConfig := common.DefaultTimeouts()
+		// Use the streaming library for download streaming
+		streamingHandler := streaming.NewStreamingHandler()
+		defer streamingHandler.Close()
 
-		// Send initial response with streaming info
-		initialMsg := &common.Message{
-			Type: "http_response",
-			ID:   msg.ID,
-			HTTP: &common.HTTPData{
-				StatusCode:    resp.StatusCode,
-				StatusMessage: resp.Status,
-				Headers:       resp.Header,
-				IsStream:      true,
-				IsWebSocket:   isWebSocketUpgrade, // Mark WebSocket upgrade responses
-				ChunkSize:     32768,              // 32KB chunks
-				TotalSize:     contentLength,      // Will be updated if actual size differs
-				ChunkIndex:    0,
-				IsLastChunk:   false,
-			},
-		}
+		// Create a message sender adapter for the agent
+		messageSender := &agentMessageSender{agent: a}
 
-		if err := a.SendMessage(initialMsg); err != nil {
-			log.Error("❌ Failed to send initial streaming response: %v", err)
+		// Handle the download streaming using the library
+		if err := streamingHandler.HandleDownloadStream(msg.ID, resp, msg.ID, messageSender); err != nil {
+			log.Error("❌ Failed to handle download stream: %v", err)
 			return
 		}
 
-		log.Info("🚀 Started streaming response for request ID: %s", msg.ID)
-
-		// Stream the response body in chunks with dynamic timeouts
-		buffer := make([]byte, 32768) // 32KB buffer
-		chunkIndex := 0
-		totalSent := int64(0)
-
-		actualTotalSize := contentLength // Track actual size, may differ from Content-Length header
-		lastProgressLog := time.Now()
-		lastActivityTime := time.Now() // Track last activity for timeout detection
-		startTime := time.Now()
-
-		for {
-			// Get dynamic timeout based on current transfer performance
-			dynamicTimeout := common.CalculateStreamingTimeout(contentLength, totalSent, timeoutConfig)
-
-			// Don't set read deadline during active streaming
-			// Instead, detect activity timeout after the read attempt
-			// This prevents "context deadline exceeded" errors during active transfers
-
-			n, err := resp.Body.Read(buffer)
-			currentTime := time.Now()
-
-			if n > 0 {
-				// Activity detected - reset activity timer
-				lastActivityTime = currentTime
-				chunkIndex++
-				totalSent += int64(n)
-
-				// Activity detected - used in timeout calculation
-
-				// EOF is the primary indicator of completion, not byte count
-				isLastChunk := (err == io.EOF)
-
-				// Update actual total size if we've read more than expected
-				if totalSent > actualTotalSize {
-					actualTotalSize = totalSent
-				}
-
-				chunkMsg := &common.Message{
-					Type: "http_response",
-					ID:   msg.ID,
-					HTTP: &common.HTTPData{
-						Body:        buffer[:n],
-						IsStream:    true,
-						ChunkSize:   n,
-						TotalSize:   actualTotalSize,
-						ChunkIndex:  chunkIndex,
-						IsLastChunk: isLastChunk,
-					},
-				}
-
-				if err := a.SendMessage(chunkMsg); err != nil {
-					log.Error("❌ Failed to send chunk %d: %v", chunkIndex, err)
-					return
-				}
-
-				// Progress logging with transfer rate and ETA
-				if time.Since(lastProgressLog) > 5*time.Second || isLastChunk {
-					elapsed := time.Since(startTime)
-					var progress float64
-					if contentLength > 0 {
-						progress = float64(totalSent) / float64(contentLength) * 100
-					}
-					log.Info("📊 Transfer progress: %.1f%% (%d/%d bytes), elapsed: %v, timeout: %v",
-						progress, totalSent, actualTotalSize, elapsed.Round(time.Second),
-						dynamicTimeout.Round(time.Second))
-					lastProgressLog = time.Now()
-				}
-
-				if isLastChunk {
-					// Log if actual size differs from reported size
-					if totalSent != contentLength {
-						log.Info("📏 Streaming complete - actual size (%d bytes) differs from reported size (%d bytes)", totalSent, contentLength)
-					}
-					log.Info("✅ Streaming complete for request ID: %s, total chunks: %d, actual size: %d bytes, transfer time: %v",
-						msg.ID, chunkIndex, totalSent, time.Since(startTime).Round(time.Second))
-					break
-				}
-			}
-
-			if err == io.EOF {
-				// Handle EOF without data read in this iteration
-				if n == 0 {
-					log.Debug("🔚 Reached EOF, streaming complete for request ID: %s", msg.ID)
-					break
-				}
-			} else if err != nil {
-				// Check for timeout based on activity, not read deadline
-
-				timeSinceActivity := currentTime.Sub(lastActivityTime)
-				if timeSinceActivity > dynamicTimeout {
-					log.Error("⏰ Activity timeout exceeded (%.1fs since last data) during streaming: %v",
-						timeSinceActivity.Seconds(), err)
-				} else {
-					log.Error("❌ Error reading response body: %v", err)
-				}
-				return
-			}
-
-			// Activity-based timeout detection
-			// Only timeout if no activity for longer than dynamic timeout
-			timeSinceActivity := currentTime.Sub(lastActivityTime)
-			if timeSinceActivity > dynamicTimeout {
-				log.Error("💀 No activity for %.1fs (timeout: %.1fs) - connection appears dead",
-					timeSinceActivity.Seconds(), dynamicTimeout.Seconds())
-				return
-			}
-		}
-
-		// Final completion log with statistics
-		elapsed := time.Since(startTime)
-		avgSpeed := float64(totalSent) / elapsed.Seconds() / (1024 * 1024) // MB/s
-		log.Info("🏁 Stream completed: %d bytes in %v (%.2f MB/s avg)", totalSent, elapsed.Round(time.Second), avgSpeed)
+		log.Info("✅ Download streaming completed successfully for request ID: %s", msg.ID)
 	} else {
 		// For small files, read everything into memory (original behavior)
 		body, err := io.ReadAll(resp.Body)
@@ -887,6 +776,9 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 
 		log.Debug("✅ HTTP response sent successfully for request ID: %s", msg.ID)
 	}
+
+	// All response handling is now done in the first streaming check above
+	// This section was causing duplicate responses and has been removed
 }
 
 // handleWebSocketConnection handles WebSocket connections using raw TCP relay
@@ -2952,4 +2844,32 @@ func (a *Agent) IsHotReloadEnabled() bool {
 // GetComponentName implements the ConfigReloader interface
 func (a *Agent) GetComponentName() string {
 	return "agent"
+}
+
+// BufferedReader combines buffered data with an underlying reader for adaptive streaming
+type BufferedReader struct {
+	buffer   []byte
+	reader   io.Reader
+	position int
+}
+
+// Read implements io.Reader interface
+func (br *BufferedReader) Read(p []byte) (n int, err error) {
+	// First, read from buffer
+	if br.position < len(br.buffer) {
+		n = copy(p, br.buffer[br.position:])
+		br.position += n
+		return n, nil
+	}
+
+	// Then read from underlying reader
+	return br.reader.Read(p)
+}
+
+// Close implements io.Closer interface
+func (br *BufferedReader) Close() error {
+	if closer, ok := br.reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
 }
