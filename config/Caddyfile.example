@@ -1,0 +1,24 @@
+{
+	admin localhost:2019
+	auto_https off
+
+	# Zero-trust agent control plane: listens for mTLS agent connections.
+	zerotrust_agents {
+		listen :8443
+		cert_file config/certs/server.crt
+		key_file config/certs/server.key
+		ca_file config/certs/ca.crt
+	}
+}
+
+# Ingress: every request hits the zerotrust_router, which looks up the
+# destination agent by Host header at request time. No per-service routes
+# are required — services register dynamically via the mTLS channel.
+:18080 {
+	# Catch-all route — the handler dispatches on Host internally.
+	route {
+		zerotrust_router {
+			request_timeout 2m
+		}
+	}
+}

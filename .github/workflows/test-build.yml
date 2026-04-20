@@ -5,18 +5,18 @@ on:
     branches:
       - main
     paths-ignore:
-      - 'docs/**'
-      - 'examples/**'
-      - 'README.md'
-      - 'README'
+      - "docs/**"
+      - "examples/**"
+      - "README.md"
+      - "README"
   pull_request:
     branches:
       - main
     paths-ignore:
-      - 'docs/**'
-      - 'examples/**'
-      - 'README.md'
-      - 'README'
+      - "docs/**"
+      - "examples/**"
+      - "README.md"
+      - "README"
 
 jobs:
   build:
@@ -30,7 +30,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.23"
+          go-version: "1.25"
           cache: true
 
       - name: Install Caddy Binary
@@ -47,7 +47,7 @@ jobs:
       - name: Update Go dependencies
         run: |
           go mod tidy
-      
+
       - name: Run Tests
         run: |
           go test ./... -v
@@ -61,4 +61,19 @@ jobs:
         with:
           name: test-build-artifacts
           path: bin/
-          retention-days: 7 
+          retention-days: 7
+
+  security:
+    name: gosec Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Run gosec (HIGH severity, excluding intentional G402)
+        run: make sec

@@ -1,0 +1,29 @@
+{
+  "admin": {
+    "listen": "localhost:2019"
+  },
+  "apps": {
+    "zerotrust.agents": {
+      "listen_addr": ":18443",
+      "cert_file": "config/certs/server.crt",
+      "key_file": "config/certs/server.key",
+      "ca_file": "config/certs/ca.crt"
+    },
+    "http": {
+      "servers": {
+        "ingress": {
+          "listen": [":18080"],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "zerotrust_router"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
