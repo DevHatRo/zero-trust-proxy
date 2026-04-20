@@ -1,21 +1,35 @@
 {
 	admin localhost:2019
-	auto_https off
 
-	# Zero-trust agent control plane: listens for mTLS agent connections.
+	# on_demand_tls asks this endpoint before issuing a LE cert for any domain.
+	# The ztagents module registers this route — it returns 200 only if the
+	# domain has an active service registered via the mTLS channel.
+	on_demand_tls {
+		ask http://localhost:2019/zero-trust/check-domain
+	}
+
+	# Zero-trust agent control plane: mTLS listener using private CA certs.
+	# Separate from public HTTPS — agents connect here, not clients.
 	zerotrust_agents {
 		listen :8443
-		cert_file config/certs/server.crt
-		key_file config/certs/server.key
-		ca_file config/certs/ca.crt
+		cert_file /config/certs/server.crt
+		key_file  /config/certs/server.key
+		ca_file   /config/certs/ca.crt
 	}
 }
 
-# Ingress: every request hits the zerotrust_router, which looks up the
-# destination agent by Host header at request time. No per-service routes
-# are required — services register dynamically via the mTLS channel.
-:18080 {
-	# Catch-all route — the handler dispatches on Host internally.
+# Redirect HTTP → HTTPS (Caddy also handles ACME HTTP-01 challenges here).
+:80 {
+	redir https://{host}{uri} 308
+}
+
+# On-demand TLS: Caddy obtains a Let's Encrypt cert on first connection for
+# each domain. No domains need to be listed — the zerotrust_router dispatches
+# by Host header to whichever agent registered that service.
+:443 {
+	tls {
+		on_demand
+	}
 	route {
 		zerotrust_router {
 			request_timeout 2m
