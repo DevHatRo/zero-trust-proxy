@@ -160,8 +160,8 @@ func TestHandler_UploadStreaming(t *testing.T) {
 
 	var firstID string
 	var received bytes.Buffer
-	var gotStart bool
-	for received.Len() < totalSize {
+	var gotStart, gotLast bool
+	for !gotLast {
 		var msg common.Message
 		if err := dec.Decode(&msg); err != nil {
 			t.Fatalf("decode upload message: %v", err)
@@ -190,6 +190,9 @@ func TestHandler_UploadStreaming(t *testing.T) {
 				t.Fatalf("chunk missing HTTP data")
 			}
 			received.Write(msg.HTTP.Body)
+			if msg.HTTP.IsLastChunk {
+				gotLast = true
+			}
 		default:
 			t.Fatalf("unexpected message type during upload: %s", msg.Type)
 		}

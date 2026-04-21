@@ -169,6 +169,11 @@ type Agent struct {
 	hotReloadManager *common.HotReloadManager
 	// Caddy configuration validation
 	caddyValidator types.ServiceValidator
+	// Streamed upload channels, keyed by msgID. Populated on http_upload_start,
+	// drained by the upload goroutine (via streaming.StreamToRequest), and
+	// removed when the goroutine exits.
+	uploadChans map[string]chan *common.Message
+	uploadMu    sync.RWMutex
 }
 
 // Config holds the agent configuration
@@ -194,6 +199,7 @@ func NewAgent(id, serverAddress string, tlsConfig *tls.Config, validator types.S
 		reconnectMu:         sync.Mutex{},
 		hotReloadManager:    common.NewHotReloadManager(),
 		caddyValidator:      validator,
+		uploadChans:         make(map[string]chan *common.Message),
 	}
 }
 
@@ -222,6 +228,7 @@ func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config, validator ty
 		reconnectMu:         sync.Mutex{},
 		hotReloadManager:    common.NewHotReloadManager(),
 		caddyValidator:      validator,
+		uploadChans:         make(map[string]chan *common.Message),
 	}
 
 	// Apply logging configuration from config
@@ -480,11 +487,31 @@ func (a *Agent) handleMessages() {
 			// Handle notification that client disconnected from server
 			go a.handleWebSocketDisconnect(&msg)
 		case "http_upload_start":
-			// Handle upload streaming start - not typically used on agent side
-			log.Debug("📤 Received upload start message (ID: %s)", msg.ID)
+			// Server is streaming a large upload to us. Register a chunk
+			// channel before spawning the handler so that chunks that arrive
+			// immediately after this message are not dropped. The handler
+			// owns the channel lifetime.
+			ch := make(chan *common.Message, 64)
+			a.uploadMu.Lock()
+			a.uploadChans[msg.ID] = ch
+			a.uploadMu.Unlock()
+			go a.handleUploadStart(&msg, ch)
 		case "http_upload_chunk":
-			// Handle upload streaming chunk - not typically used on agent side
-			log.Debug("📤 Received upload chunk message (ID: %s)", msg.ID)
+			a.uploadMu.RLock()
+			ch, ok := a.uploadChans[msg.ID]
+			a.uploadMu.RUnlock()
+			if !ok {
+				log.Warn("📤 upload chunk for unknown stream id=%s (handler gone)", msg.ID)
+				continue
+			}
+			// Capture the iteration-local msg by value; &msg is reused next
+			// iteration, so we must not send its pointer across goroutines.
+			chunk := msg
+			select {
+			case ch <- &chunk:
+			case <-time.After(60 * time.Second):
+				log.Error("📤 upload chunk %s dropped: channel full", msg.ID)
+			}
 		default:
 			log.Error("❓ Unknown message type: %s", msg.Type)
 		}
@@ -779,6 +806,162 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 
 	// All response handling is now done in the first streaming check above
 	// This section was causing duplicate responses and has been removed
+}
+
+// handleUploadStart handles a server-streamed upload (http_upload_start +
+// N*http_upload_chunk). It builds the backend request, wires the chunk
+// channel into the request body via the streaming library, executes the
+// request, and sends the response back.
+func (a *Agent) handleUploadStart(msg *common.Message, uploadCh chan *common.Message) {
+	// Ensure we always remove the channel from the map so stray chunks don't
+	// leak. The dispatcher treats an absent entry as a dropped stream.
+	defer func() {
+		a.uploadMu.Lock()
+		delete(a.uploadChans, msg.ID)
+		a.uploadMu.Unlock()
+	}()
+
+	if msg.HTTP == nil {
+		log.Error("❌ upload_start without HTTP data id=%s", msg.ID)
+		return
+	}
+	if a.conn == nil {
+		log.Warn("⚠️  upload_start id=%s but no server connection", msg.ID)
+		return
+	}
+
+	hostHeaders, ok := msg.HTTP.Headers["Host"]
+	if !ok || len(hostHeaders) == 0 {
+		log.Error("❌ upload_start id=%s missing Host header", msg.ID)
+		return
+	}
+	host := hostHeaders[0]
+
+	a.mu.RLock()
+	service, ok := a.services[host]
+	a.mu.RUnlock()
+	if !ok {
+		log.Error("❌ upload_start id=%s: no service for host %s", msg.ID, host)
+		return
+	}
+
+	// Build the backend URL using the same scheme rules as handleHTTPRequest.
+	backend := service.Backend
+	hasProtocol := strings.HasPrefix(backend, "http://") ||
+		strings.HasPrefix(backend, "https://") ||
+		strings.HasPrefix(backend, "ws://") ||
+		strings.HasPrefix(backend, "wss://")
+	var backendURL string
+	if hasProtocol {
+		backendURL = fmt.Sprintf("%s%s", backend, msg.HTTP.URL)
+	} else {
+		protocol := "http"
+		if service.Protocol == "https" {
+			protocol = "https"
+		}
+		backendURL = fmt.Sprintf("%s://%s%s", protocol, backend, msg.HTTP.URL)
+	}
+
+	// Create the request without a body; the streaming library will attach a
+	// pipe reader whose writer is fed from uploadCh.
+	req, err := http.NewRequest(msg.HTTP.Method, backendURL, nil)
+	if err != nil {
+		log.Error("❌ upload_start id=%s: create request: %v", msg.ID, err)
+		return
+	}
+
+	for key, values := range msg.HTTP.Headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	// Preserve the original Host; Go overwrites it from the URL otherwise.
+	req.Host = host
+	req.Header.Set("X-Forwarded-Host", host)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		clientIP := strings.TrimSpace(parts[0])
+		req.Header.Set("X-Real-IP", clientIP)
+		req.Header.Set("X-Forwarded-For", clientIP)
+	}
+	req.Header.Set("X-Forwarded-Server", fmt.Sprintf("zero-trust-agent-%s", a.id))
+
+	// Wire the upload channel into the request body.
+	streamingHandler := streaming.NewStreamingHandler()
+	defer streamingHandler.Close()
+	messageSender := &agentMessageSender{agent: a}
+	if err := streamingHandler.HandleUploadToRequest(msg.ID, uploadCh, req, messageSender); err != nil {
+		log.Error("❌ upload_start id=%s: wire pipe: %v", msg.ID, err)
+		return
+	}
+
+	transport := &http.Transport{}
+	if strings.HasPrefix(backendURL, "https://") {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	client := &http.Client{Timeout: 0, Transport: transport}
+
+	log.Info("📤 Forwarding streamed upload id=%s host=%s url=%s size=%d",
+		msg.ID, host, backendURL, msg.HTTP.TotalSize)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Error("❌ upload_start id=%s: do request: %v", msg.ID, err)
+		a.sendErrorResponse(msg.ID, fmt.Sprintf("upload failed: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	a.sendBackendResponse(msg.ID, resp)
+}
+
+// sendBackendResponse forwards an HTTP response from the backend to the
+// server, streaming it chunked if ShouldStream says so and otherwise
+// sending it as a single http_response message.
+func (a *Agent) sendBackendResponse(msgID string, resp *http.Response) {
+	contentLength := resp.ContentLength
+	contentType := resp.Header.Get("Content-Type")
+
+	if streaming.ShouldStream(contentLength, contentType) {
+		if contentLength <= 0 {
+			contentLength = -1
+		}
+		sh := streaming.NewStreamingHandler()
+		defer sh.Close()
+		if err := sh.HandleDownloadStream(msgID, resp, msgID, &agentMessageSender{agent: a}); err != nil {
+			log.Error("❌ stream response id=%s: %v", msgID, err)
+		}
+		return
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Error("❌ read response body id=%s: %v", msgID, err)
+		a.sendErrorResponse(msgID, fmt.Sprintf("read response: %v", err))
+		return
+	}
+	responseMsg := &common.Message{
+		Type: "http_response",
+		ID:   msgID,
+		HTTP: &common.HTTPData{
+			StatusCode:    resp.StatusCode,
+			StatusMessage: resp.Status,
+			Headers:       resp.Header,
+			Body:          body,
+		},
+	}
+	if err := a.SendMessage(responseMsg); err != nil {
+		log.Error("❌ send response id=%s: %v", msgID, err)
+	}
+}
+
+func (a *Agent) sendErrorResponse(msgID, errMsg string) {
+	_ = a.SendMessage(&common.Message{
+		Type:  "http_response",
+		ID:    msgID,
+		Error: errMsg,
+	})
 }
 
 // handleWebSocketConnection handles WebSocket connections using raw TCP relay
