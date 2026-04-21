@@ -124,8 +124,14 @@ func (us *UploadStreamer) StreamFromConnection(conn net.Conn, msgID string, expe
 		}
 
 		if err == io.EOF {
-			// Handle EOF without data read in this iteration
+			// Handle EOF without data read in this iteration. The body ended
+			// cleanly on a prior Read and this one returns (0, EOF). Send a
+			// final IsLastChunk=true marker so the receiver closes its pipe
+			// instead of waiting forever for the next chunk.
 			if n == 0 {
+				if sendErr := us.sendFinalUploadMarker(msgID); sendErr != nil {
+					return fmt.Errorf("failed to send final upload marker: %v", sendErr)
+				}
 				log.Debug("🔚 Reached EOF, upload stream complete: ID=%s", us.stream.ID)
 				return nil
 			}
@@ -317,8 +323,12 @@ func (us *UploadStreamer) StreamFromReader(reader io.Reader, msgID string) error
 		}
 
 		if err == io.EOF {
-			// Handle EOF without data read in this iteration
+			// Handle EOF without data read in this iteration. Send a final
+			// IsLastChunk=true marker so the receiver closes its pipe.
 			if n == 0 {
+				if sendErr := us.sendFinalUploadMarker(msgID); sendErr != nil {
+					return fmt.Errorf("failed to send final upload marker: %v", sendErr)
+				}
 				log.Debug("🔚 Reached EOF, upload stream complete: ID=%s", us.stream.ID)
 				return nil
 			}
@@ -411,8 +421,14 @@ func (us *UploadStreamer) StreamFromReaderWithContext(reader io.Reader, msgID st
 		}
 
 		if err == io.EOF {
-			// Handle EOF without data read in this iteration
+			// Handle EOF without data read in this iteration. Send a final
+			// IsLastChunk=true marker so the agent's pipe writer closes and
+			// the upstream POST completes; otherwise the agent hangs waiting
+			// for the next chunk and the client times out.
 			if n == 0 {
+				if sendErr := us.sendFinalUploadMarker(msgID); sendErr != nil {
+					return fmt.Errorf("failed to send final upload marker: %v", sendErr)
+				}
 				log.Debug("🔚 Reached EOF, upload stream complete: ID=%s", us.stream.ID)
 				return nil
 			}
@@ -420,6 +436,24 @@ func (us *UploadStreamer) StreamFromReaderWithContext(reader io.Reader, msgID st
 			return fmt.Errorf("error reading upload data: %v", err)
 		}
 	}
+}
+
+// sendFinalUploadMarker sends an empty http_upload_chunk with IsLastChunk=true
+// so the receiver knows the upload is complete. Required when the source
+// reader returns (0, io.EOF) without coalescing EOF with the final data read.
+func (us *UploadStreamer) sendFinalUploadMarker(msgID string) error {
+	us.stream.ChunkIndex++
+	return us.sender.SendMessage(&common.Message{
+		Type: "http_upload_chunk",
+		ID:   msgID,
+		HTTP: &common.HTTPData{
+			IsStream:    true,
+			ChunkSize:   0,
+			TotalSize:   us.stream.TotalSize,
+			ChunkIndex:  us.stream.ChunkIndex,
+			IsLastChunk: true,
+		},
+	})
 }
 
 // ShouldStreamUpload determines if an upload should be streamed based on content length
