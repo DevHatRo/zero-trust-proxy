@@ -1,6 +1,11 @@
 {
 	admin localhost:2019
 
+	# Persist ACME account, issued certs, and OCSP staples on the mounted
+	# /config volume so container recreates don't trigger re-issuance (and
+	# don't burn Let's Encrypt rate limits).
+	storage file_system /config/caddy-storage
+
 	# on_demand_tls asks this endpoint before issuing a LE cert for any domain.
 	# The ztagents module registers this route — it returns 200 only if the
 	# domain has an active service registered via the mTLS channel.
