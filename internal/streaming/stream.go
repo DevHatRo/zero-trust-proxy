@@ -212,20 +212,14 @@ func (sh *StreamingHandler) HandleUploadStream(streamID string, conn net.Conn, m
 
 // HandleUploadToRequest handles streaming upload data to an HTTP request
 func (sh *StreamingHandler) HandleUploadToRequest(streamID string, uploadChan <-chan *common.Message, req *http.Request, sender MessageSender) error {
-	// Determine total size if available
-	var totalSize int64 = -1 // Unknown size initially
+	var totalSize int64 = -1
 
-	// Create upload streamer
 	streamer := sh.manager.CreateUploadStream(streamID, totalSize, sender)
-	defer func() {
-		// Recover from any panic during cleanup
-		if r := recover(); r != nil {
-			log.Error("❌ Panic during stream cleanup: %v", r)
-		}
-		sh.manager.RemoveStream(streamID)
-	}()
-
-	// Stream to request
+	// Do NOT defer RemoveStream here. StreamToRequest returns immediately after
+	// launching its goroutine; a defer here would fire before the goroutine
+	// finishes, cancelling the stream context and aborting the in-flight upload.
+	// The caller (handleUploadStart) defers StreamingHandler.Close() which
+	// removes the stream after client.Do returns.
 	return streamer.StreamToRequest(uploadChan, req)
 }
 
