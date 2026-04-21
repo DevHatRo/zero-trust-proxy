@@ -122,8 +122,27 @@ func (ds *DownloadStreamer) StreamResponse(resp *http.Response, msgID string) er
 		}
 
 		if err == io.EOF {
-			// Handle EOF without data read in this iteration
+			// Handle EOF without data read in this iteration. The body ended
+			// cleanly on a prior Read (n>0, err=nil) and this Read returns
+			// (0, EOF). We must still emit a final IsLastChunk=true marker
+			// so the router knows the stream is complete — otherwise it
+			// waits for the next chunk and eventually times out.
 			if n == 0 {
+				ds.stream.ChunkIndex++
+				finalMsg := &common.Message{
+					Type: "http_response",
+					ID:   msgID,
+					HTTP: &common.HTTPData{
+						IsStream:    true,
+						ChunkSize:   0,
+						TotalSize:   ds.stream.TotalSize,
+						ChunkIndex:  ds.stream.ChunkIndex,
+						IsLastChunk: true,
+					},
+				}
+				if sendErr := ds.sender.SendMessage(finalMsg); sendErr != nil {
+					return fmt.Errorf("failed to send final chunk marker: %v", sendErr)
+				}
 				log.Debug("🔚 Reached EOF, download stream complete: ID=%s", ds.stream.ID)
 				return nil
 			}
