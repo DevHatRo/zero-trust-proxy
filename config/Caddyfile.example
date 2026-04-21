@@ -18,9 +18,12 @@
 	}
 }
 
-# Redirect HTTP → HTTPS (Caddy also handles ACME HTTP-01 challenges here).
+# Redirect HTTP → HTTPS. ACME challenge paths are excluded so Let's Encrypt
+# can complete HTTP-01 challenges without being sent to a HTTPS URL that
+# doesn't have a cert yet.
 :80 {
-	redir https://{host}{uri} 308
+	@notacme not path /.well-known/acme-challenge/*
+	redir @notacme https://{host}{uri} 308
 }
 
 # On-demand TLS: Caddy obtains a Let's Encrypt cert on first connection for

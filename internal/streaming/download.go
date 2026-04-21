@@ -270,15 +270,17 @@ func (ds *DownloadStreamer) StreamToConnection(conn net.Conn, responseChan <-cha
 	}
 }
 
-// ShouldStream determines if a response should be streamed based on size
+// ShouldStream determines if a response should be streamed based on size.
+// Chunked transfers (contentLength < 0) are always streamed so unbounded
+// responses don't get fully buffered in memory. The chunking overhead for
+// small chunked JSON responses is negligible compared to the memory risk.
 func ShouldStream(contentLength int64, contentType string) bool {
-	// Always stream if content is large (>1MB) and size is known
 	if contentLength > 1024*1024 {
 		return true
 	}
-
-	// For unknown content length (-1), we'll use adaptive detection
-	// This will be handled by the adaptive buffer in the agent
+	if contentLength < 0 {
+		return true
+	}
 	return false
 }
 
