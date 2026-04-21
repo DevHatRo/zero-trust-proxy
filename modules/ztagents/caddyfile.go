@@ -53,6 +53,10 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if !d.Args(&a.CAFile) {
 					return d.ArgErr()
 				}
+			case "check_addr":
+				if !d.Args(&a.CheckAddr) {
+					return d.ArgErr()
+				}
 			default:
 				return d.Errf("unknown zerotrust_agents option %q", d.Val())
 			}

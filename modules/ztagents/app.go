@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -27,18 +28,20 @@ type App struct {
 	CertFile   string `json:"cert_file,omitempty"`
 	KeyFile    string `json:"key_file,omitempty"`
 	CAFile     string `json:"ca_file,omitempty"`
+	CheckAddr  string `json:"check_addr,omitempty"`
 
 	rt *runtime
 }
 
 type runtime struct {
-	tlsConfig *tls.Config
-	listener  net.Listener
-	registry  *registry
-	wsManager *common.WebSocketManager
-	ctx       context.Context
-	cancelCtx context.CancelFunc
-	wg        sync.WaitGroup
+	tlsConfig   *tls.Config
+	listener    net.Listener
+	registry    *registry
+	wsManager   *common.WebSocketManager
+	checkServer *http.Server
+	ctx         context.Context
+	cancelCtx   context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 func (App) CaddyModule() caddy.ModuleInfo {
@@ -90,6 +93,10 @@ func (a *App) Start() error {
 
 	log.Info("ztagents: listening on %s", a.ListenAddr)
 
+	if err := a.startCheckServer(); err != nil {
+		return fmt.Errorf("ztagents: start check server: %w", err)
+	}
+
 	a.rt.wg.Add(1)
 	go a.acceptLoop()
 	return nil
@@ -98,6 +105,7 @@ func (a *App) Start() error {
 func (a *App) Stop() error {
 	log.Info("ztagents: stopping")
 	a.rt.cancelCtx()
+	a.stopCheckServer()
 	if a.rt.listener != nil {
 		_ = a.rt.listener.Close()
 	}

@@ -1,37 +1,68 @@
 package ztagents
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"net/http"
-
-	"github.com/caddyserver/caddy/v2"
+	"time"
 )
 
-// Routes implements caddy.AdminRouter. It registers a domain-check endpoint
-// used by Caddy's on_demand_tls to validate a domain before requesting a
-// Let's Encrypt certificate. Returns 200 if the domain has a registered
-// service, 403 otherwise.
-func (a *App) Routes() []caddy.AdminRoute {
-	return []caddy.AdminRoute{
-		{
-			Pattern: "/zero-trust/check-domain",
-			Handler: caddy.AdminHandlerFunc(a.serveCheckDomain),
-		},
-	}
-}
+const defaultCheckAddr = "127.0.0.1:2020"
 
-func (a *App) serveCheckDomain(w http.ResponseWriter, r *http.Request) error {
-	domain := r.URL.Query().Get("domain")
-	if domain == "" || a.rt == nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return nil
+// startCheckServer runs a localhost HTTP listener that answers Caddy's
+// on_demand_tls `ask` queries. Returns 200 if the requested domain has an
+// active agent-registered service, 403 otherwise. We don't use Caddy's admin
+// API here because module-provided admin routes are unreliable across Caddy
+// versions; this internal listener is deterministic and testable.
+func (a *App) startCheckServer() error {
+	addr := a.CheckAddr
+	if addr == "" {
+		addr = defaultCheckAddr
 	}
-	_, ok := a.rt.registry.lookupByHost(domain)
-	if !ok {
-		w.WriteHeader(http.StatusForbidden)
-		return nil
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("check server listen %s: %w", addr, err)
 	}
-	w.WriteHeader(http.StatusOK)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zero-trust/check-domain", a.serveCheckDomain)
+
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	a.rt.checkServer = srv
+
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Error("ztagents: check server: %v", err)
+		}
+	}()
+
+	log.Info("ztagents: check server listening on %s", addr)
 	return nil
 }
 
-var _ caddy.AdminRouter = (*App)(nil)
+func (a *App) stopCheckServer() {
+	if a.rt == nil || a.rt.checkServer == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = a.rt.checkServer.Shutdown(ctx)
+}
+
+func (a *App) serveCheckDomain(w http.ResponseWriter, r *http.Request) {
+	domain := r.URL.Query().Get("domain")
+	if domain == "" || a.rt == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if _, ok := a.rt.registry.lookupByHost(domain); !ok {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
