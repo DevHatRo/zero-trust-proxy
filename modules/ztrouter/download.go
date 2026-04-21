@@ -3,6 +3,7 @@ package ztrouter
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
@@ -21,6 +22,7 @@ import (
 // http.Flusher to push each chunk instead.
 func (h *Handler) handleDownloadStream(
 	w http.ResponseWriter,
+	r *http.Request,
 	agent *ztagents.Agent,
 	msgID string,
 	initial *common.Message,
@@ -30,7 +32,7 @@ func (h *Handler) handleDownloadStream(
 		return h.streamDownloadHijack(w, hijacker, agent, msgID, initial, respCh)
 	}
 	if flusher, ok := w.(http.Flusher); ok {
-		return h.streamDownloadFlush(w, flusher, agent, msgID, initial, respCh)
+		return h.streamDownloadFlush(w, r, flusher, agent, msgID, initial, respCh)
 	}
 	http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 	return nil
@@ -65,6 +67,7 @@ func (h *Handler) streamDownloadHijack(
 
 func (h *Handler) streamDownloadFlush(
 	w http.ResponseWriter,
+	r *http.Request,
 	flusher http.Flusher,
 	agent *ztagents.Agent,
 	msgID string,
@@ -85,14 +88,33 @@ func (h *Handler) streamDownloadFlush(
 	w.WriteHeader(status)
 	flusher.Flush()
 
-	log.Info("ztrouter: download stream (h2) id=%s size=%d agent=%s",
-		msgID, initial.HTTP.TotalSize, agent.ID)
+	// SSE connections send infrequent events; the default 60s inter-chunk
+	// timeout kills them prematurely. Detect by Content-Type and use a
+	// long sentinel timeout instead — the client disconnect (ctx.Done) or
+	// a write error will terminate the loop in the normal case.
+	isSSE := false
+	if ct := initial.HTTP.Headers["Content-Type"]; len(ct) > 0 {
+		isSSE = strings.Contains(strings.ToLower(ct[0]), "text/event-stream")
+	}
+
+	streamKind := "h2"
+	if isSSE {
+		streamKind = "h2/sse"
+	}
+	log.Info("ztrouter: download stream (%s) id=%s size=%d agent=%s",
+		streamKind, msgID, initial.HTTP.TotalSize, agent.ID)
 
 	timeoutCfg := common.DefaultTimeouts()
 	var transferred int64
 	var chunkIdx int
 	for {
-		dyn := common.CalculateStreamingTimeout(initial.HTTP.TotalSize, transferred, timeoutCfg)
+		var dyn time.Duration
+		if isSSE {
+			// Rely on ctx.Done (client disconnect) and write errors to terminate.
+			dyn = 24 * time.Hour
+		} else {
+			dyn = common.CalculateStreamingTimeout(initial.HTTP.TotalSize, transferred, timeoutCfg)
+		}
 		select {
 		case chunk, ok := <-respCh:
 			if !ok {
@@ -110,13 +132,17 @@ func (h *Handler) streamDownloadFlush(
 				chunkIdx++
 			}
 			if chunk.HTTP.IsLastChunk {
-				log.Info("ztrouter: download stream (h2) done id=%s chunks=%d bytes=%d",
-					msgID, chunkIdx, transferred)
+				log.Info("ztrouter: download stream (%s) done id=%s chunks=%d bytes=%d",
+					streamKind, msgID, chunkIdx, transferred)
 				return nil
 			}
 		case <-time.After(dyn):
 			return fmt.Errorf("timeout waiting for chunk %d after %v (received %d bytes)",
 				chunkIdx+1, dyn, transferred)
+		case <-r.Context().Done():
+			log.Debug("ztrouter: download stream (%s) cancelled by client id=%s chunks=%d bytes=%d",
+				streamKind, msgID, chunkIdx, transferred)
+			return nil
 		}
 	}
 }

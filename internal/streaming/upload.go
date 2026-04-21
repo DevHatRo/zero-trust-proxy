@@ -157,8 +157,6 @@ func (us *UploadStreamer) StreamFromConnection(conn net.Conn, msgID string, expe
 
 // StreamToRequest streams upload chunks to an HTTP request body (agent-side)
 func (us *UploadStreamer) StreamToRequest(uploadChan <-chan *common.Message, req *http.Request) error {
-	defer us.stream.Close()
-
 	log.Info("📤 Starting upload stream to request: ID=%s", us.stream.ID)
 
 	// Create a pipe for streaming the request body
@@ -167,6 +165,11 @@ func (us *UploadStreamer) StreamToRequest(uploadChan <-chan *common.Message, req
 
 	// Start a goroutine to write chunks to the pipe
 	go func() {
+		// Close the stream (and its context) only when the goroutine exits, not
+		// when StreamToRequest returns. Moving the close here prevents a race
+		// where the context was cancelled immediately on function return, causing
+		// ctx.Done() to fire in the select below when uploadChan was briefly empty.
+		defer us.stream.Close()
 		defer pipeWriter.Close()
 
 		lastProgressTime := time.Now()
