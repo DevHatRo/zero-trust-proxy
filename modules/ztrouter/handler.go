@@ -144,7 +144,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 			return h.handleWebSocketUpgrade(w, agent, msgID, resp)
 		}
 		if resp.HTTP != nil && resp.HTTP.IsStream {
-			return h.handleDownloadStream(w, agent, msgID, resp, respCh)
+			return h.handleDownloadStream(w, r, agent, msgID, resp, respCh)
 		}
 		return writeAgentResponse(w, resp)
 	case <-r.Context().Done():
