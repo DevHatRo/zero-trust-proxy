@@ -1107,3 +1107,25 @@ func BenchmarkValidateAndApplyDefaults(b *testing.B) {
 		}
 	}
 }
+
+// --- AgentConfig.Validate ---
+
+func TestAgentConfig_Validate(t *testing.T) {
+	config := &AgentConfig{
+		Agent: AgentSettings{ID: "test-agent"},
+		Server: ServerConfig{Address: "localhost:8443"},
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestAgentConfig_Validate_Empty(t *testing.T) {
+	config := &AgentConfig{}
+	// validateAndApplyDefaults requires agent.id before other defaults apply.
+	if err := config.Validate(); err == nil {
+		t.Fatal("expected error for empty config (agent.id is required)")
+	} else if err.Error() != "agent.id is required" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

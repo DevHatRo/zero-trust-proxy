@@ -23,6 +23,24 @@ import (
 // Component-specific logger for agent
 var log = logger.WithComponent("agent")
 
+// agentLocalIP caches the local IP used to reach backends, determined once on
+// first use. Opening a real TCP connection per request just to read LocalAddr
+// adds unnecessary latency and socket churn.
+var (
+	agentLocalIPOnce sync.Once
+	agentLocalIP     string
+)
+
+func resolveLocalIP(backend string) string {
+	agentLocalIPOnce.Do(func() {
+		if conn, err := net.Dial("tcp", backend); err == nil {
+			agentLocalIP = conn.LocalAddr().(*net.TCPAddr).IP.String()
+			conn.Close()
+		}
+	})
+	return agentLocalIP
+}
+
 // agentMessageSender implements streaming.MessageSender interface for agent
 type agentMessageSender struct {
 	agent *Agent
@@ -124,12 +142,6 @@ func getHealthCheckScheme(service *ServiceConfig, upstreamAddr string) string {
 	return "http"
 }
 
-// Message represents a message between agent and server
-type Message struct {
-	Type    string `json:"type"`
-	AgentID string `json:"agent_id"`
-}
-
 // Agent represents an agent instance
 type Agent struct {
 	id          string
@@ -150,7 +162,6 @@ type Agent struct {
 	tlsConfig   *tls.Config
 	// Message channels
 	registerCh    chan *common.Message
-	httpRespCh    chan *common.Message
 	pongCh        chan *common.Message
 	serviceRespCh chan *common.Message
 	// Channel pressure tracking
@@ -174,16 +185,6 @@ type Agent struct {
 	// removed when the goroutine exits.
 	uploadChans map[string]chan *common.Message
 	uploadMu    sync.RWMutex
-}
-
-// Config holds the agent configuration
-type Config struct {
-	ServerAddr  string
-	CertFile    string
-	KeyFile     string
-	CAFile      string
-	ID          string
-	ServiceAddr string
 }
 
 // NewAgent creates a new agent instance
@@ -216,7 +217,6 @@ func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config, validator ty
 		services:            make(map[string]*common.ServiceConfig),
 		lastPong:            time.Now(),
 		registerCh:          make(chan *common.Message, 10),
-		httpRespCh:          make(chan *common.Message, 1000),
 		pongCh:              make(chan *common.Message, 500),
 		serviceRespCh:       make(chan *common.Message, 500),
 		channelPressure:     make(map[string]int),
@@ -233,9 +233,6 @@ func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config, validator ty
 
 	// Apply logging configuration from config
 	applyLoggingConfig(config.Logging)
-
-	// Store config path in config object for hot reload
-	config.ConfigPath = config.ConfigPath
 
 	return agent
 }
@@ -692,10 +689,14 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 		log.Debug("🔒 HTTPS request detected - configured to skip certificate verification for internal service")
 	}
 
-	// Always use unlimited timeout and let the actual response characteristics decide streaming
+	// Always use unlimited timeout and let the actual response characteristics decide streaming.
+	// Do not follow backend redirects: the client must see 3xx and Location, not the resolved page.
 	client = &http.Client{
 		Timeout:   0, // No timeout - handled dynamically by activity detection
 		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
 	if mightBeStream {
@@ -711,14 +712,8 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 		return
 	}
 
-	// Log the agent's IP for trusted proxy configuration
 	if req.URL.Host != "" {
-		// Get the local IP that would be used to connect to this backend
-		if conn, err := net.Dial("tcp", req.URL.Host); err == nil {
-			agentIP := conn.LocalAddr().(*net.TCPAddr).IP.String()
-			conn.Close()
-			log.Info("🔧 AGENT IP: %s (connecting to %s) ", agentIP, req.URL.Host)
-		}
+		log.Info("🔧 AGENT IP: %s (connecting to %s)", resolveLocalIP(req.URL.Host), req.URL.Host)
 	}
 	defer resp.Body.Close()
 
@@ -900,7 +895,13 @@ func (a *Agent) handleUploadStart(msg *common.Message, uploadCh chan *common.Mes
 	if strings.HasPrefix(backendURL, "https://") {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
-	client := &http.Client{Timeout: 0, Transport: transport}
+	client := &http.Client{
+		Timeout:   0,
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 
 	log.Info("📤 Forwarding streamed upload id=%s host=%s url=%s size=%d",
 		msg.ID, host, backendURL, msg.HTTP.TotalSize)
@@ -1726,6 +1727,11 @@ func (a *Agent) checkUpstreamHealth(service *ServiceConfig, upstream UpstreamCon
 
 	client := &http.Client{
 		Timeout: timeout,
+		// Do not follow redirects: 3xx on a health URL should fail the check, not
+		// fetch an unrelated 2xx from the redirect target.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
 	// Create request
@@ -2211,14 +2217,13 @@ func (a *Agent) monitorChannelHealth() {
 		case <-ticker.C:
 			// Log channel usage statistics
 			registerUsage := float64(len(a.registerCh)) / float64(cap(a.registerCh)) * 100
-			httpRespUsage := float64(len(a.httpRespCh)) / float64(cap(a.httpRespCh)) * 100
 			pongUsage := float64(len(a.pongCh)) / float64(cap(a.pongCh)) * 100
 			serviceRespUsage := float64(len(a.serviceRespCh)) / float64(cap(a.serviceRespCh)) * 100
 
 			// Only log if any channel is significantly used
-			if registerUsage > 10 || httpRespUsage > 10 || pongUsage > 10 || serviceRespUsage > 10 {
-				log.Info("📊 Channel usage - Register: %.1f%%, HTTP: %.1f%%, Pong: %.1f%%, Service: %.1f%%",
-					registerUsage, httpRespUsage, pongUsage, serviceRespUsage)
+			if registerUsage > 10 || pongUsage > 10 || serviceRespUsage > 10 {
+				log.Info("📊 Channel usage - Register: %.1f%%, Pong: %.1f%%, Service: %.1f%%",
+					registerUsage, pongUsage, serviceRespUsage)
 			}
 
 			// Log pressure statistics
