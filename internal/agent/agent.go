@@ -2,11 +2,12 @@ package agent
 
 import (
 	"bytes"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand/v2"
+	"math/big"
 	"net"
 	"net/http"
 	"strconv"
@@ -1620,7 +1621,10 @@ func (a *Agent) selectWeightedUpstream(upstreams []UpstreamConfig) string {
 	if total == 0 {
 		return upstreams[0].Address
 	}
-	r := rand.IntN(total)
+	r := 0
+	if n, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(total))); err == nil {
+		r = int(n.Int64())
+	}
 	for _, u := range upstreams {
 		if u.Weight <= 0 {
 			continue
