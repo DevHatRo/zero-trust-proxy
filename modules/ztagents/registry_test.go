@@ -1,6 +1,8 @@
 package ztagents
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
@@ -72,5 +74,110 @@ func TestAppLookupAgentDelegatesToRegistry(t *testing.T) {
 	}
 	if _, ok := app.LookupAgent("bar.example.com"); ok {
 		t.Fatal("LookupAgent should miss bar.example.com")
+	}
+}
+
+func TestRegistrySnapshot(t *testing.T) {
+	r := newRegistry()
+	r.add(newTestAgent("a1", "svc1.example.com"))
+	r.add(newTestAgent("a2", "svc2.example.com"))
+
+	snap := r.snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("snapshot len=%d, want 2", len(snap))
+	}
+	ids := map[string]bool{}
+	for _, a := range snap {
+		ids[a.ID] = true
+	}
+	if !ids["a1"] || !ids["a2"] {
+		t.Fatalf("snapshot missing agents: %v", ids)
+	}
+}
+
+func TestAgent_TakeResponseHandler(t *testing.T) {
+	a := NewAgent("take-test", nil)
+	called := false
+	a.SetResponseHandler("r1", func(*common.Message) { called = true })
+
+	h, ok := a.TakeResponseHandler("r1")
+	if !ok || h == nil {
+		t.Fatal("TakeResponseHandler should return handler")
+	}
+	h(nil)
+	if !called {
+		t.Fatal("handler should be callable after Take")
+	}
+
+	// Second take should return ok=false (handler removed).
+	_, ok = a.TakeResponseHandler("r1")
+	if ok {
+		t.Fatal("handler should be removed after TakeResponseHandler")
+	}
+}
+
+func TestNewTestApp_And_Helpers(t *testing.T) {
+	app := NewTestApp()
+	if app == nil {
+		t.Fatal("NewTestApp returned nil")
+	}
+
+	agent := newTestAgent("ta1", "helper.example.com")
+	app.AddAgent(agent)
+
+	found, ok := app.LookupAgent("helper.example.com")
+	if !ok || found != agent {
+		t.Fatalf("LookupAgent after AddAgent: ok=%v", ok)
+	}
+
+	// DispatchAgentMessageForTest — use a known-good message type
+	err := app.DispatchAgentMessageForTest(agent, &common.Message{Type: "unknown_op", ID: "x"})
+	if err != nil {
+		t.Fatalf("DispatchAgentMessageForTest: %v", err)
+	}
+}
+
+func TestServeCheckDomain_OK(t *testing.T) {
+	app := &App{rt: &runtime{registry: newRegistry(), wsManager: nil}}
+	app.rt.registry.add(newTestAgent("a1", "ok.example.com"))
+
+	req := httptest.NewRequest(http.MethodGet, "/zero-trust/check-domain?domain=ok.example.com", nil)
+	rr := httptest.NewRecorder()
+	app.serveCheckDomain(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rr.Code)
+	}
+}
+
+func TestServeCheckDomain_NotFound(t *testing.T) {
+	app := &App{rt: &runtime{registry: newRegistry(), wsManager: nil}}
+
+	req := httptest.NewRequest(http.MethodGet, "/zero-trust/check-domain?domain=missing.example.com", nil)
+	rr := httptest.NewRecorder()
+	app.serveCheckDomain(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403", rr.Code)
+	}
+}
+
+func TestServeCheckDomain_MissingDomain(t *testing.T) {
+	app := &App{rt: &runtime{registry: newRegistry(), wsManager: nil}}
+
+	req := httptest.NewRequest(http.MethodGet, "/zero-trust/check-domain", nil)
+	rr := httptest.NewRecorder()
+	app.serveCheckDomain(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rr.Code)
+	}
+}
+
+func TestServeCheckDomain_NilRuntime(t *testing.T) {
+	app := &App{}
+
+	req := httptest.NewRequest(http.MethodGet, "/zero-trust/check-domain?domain=any.example.com", nil)
+	rr := httptest.NewRecorder()
+	app.serveCheckDomain(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rr.Code)
 	}
 }

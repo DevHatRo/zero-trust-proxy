@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -574,5 +575,139 @@ func TestUploadStreamingDetection(t *testing.T) {
 					tt.contentLength, result, tt.shouldStream, tt.description)
 			}
 		})
+	}
+}
+
+func TestStreamWriter_Write(t *testing.T) {
+	config := DefaultConfig()
+	stream := NewStream("sw-test", 100, config)
+	defer stream.Close()
+
+	var buf bytes.Buffer
+	sw := NewStreamWriter(&buf, stream)
+	n, err := sw.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("n=%d, want 5", n)
+	}
+	if buf.String() != "hello" {
+		t.Fatalf("buf=%q, want hello", buf.String())
+	}
+	if stream.Transferred != 5 {
+		t.Fatalf("transferred=%d, want 5", stream.Transferred)
+	}
+}
+
+func TestStream_IsComplete_UnknownSize(t *testing.T) {
+	config := DefaultConfig()
+	stream := NewStream("unk-size", 0, config)
+	defer stream.Close()
+	if stream.IsComplete() {
+		t.Fatal("stream with 0 total size should not be complete")
+	}
+}
+
+func TestAdaptDownloadStreaming_Success(t *testing.T) {
+	adapter := NewStreamAdapter()
+	sender := &MockMessageSender{}
+
+	data := bytes.Repeat([]byte("x"), 2*1024*1024) // 2 MB — above streaming threshold
+	resp := &http.Response{
+		StatusCode:    200,
+		Status:        "200 OK",
+		Header:        make(http.Header),
+		Body:          io.NopCloser(bytes.NewReader(data)),
+		ContentLength: int64(len(data)),
+	}
+	resp.Header.Set("Content-Type", "application/octet-stream")
+
+	if err := adapter.AdaptDownloadStreaming("adapt-dl", resp, "msg-dl", sender); err != nil {
+		t.Fatalf("AdaptDownloadStreaming: %v", err)
+	}
+	if len(sender.GetMessages()) == 0 {
+		t.Fatal("expected messages to be sent")
+	}
+}
+
+func TestStreamReader_Read(t *testing.T) {
+	config := DefaultConfig()
+	stream := NewStream("sr-test", 100, config)
+	defer stream.Close()
+
+	src := bytes.NewBufferString("hello world")
+	sr := NewStreamReader(src, stream)
+	buf := make([]byte, 5)
+	n, err := sr.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("n=%d, want 5", n)
+	}
+	if string(buf[:n]) != "hello" {
+		t.Fatalf("data=%q, want hello", buf[:n])
+	}
+	if stream.Transferred != 5 {
+		t.Fatalf("transferred=%d, want 5", stream.Transferred)
+	}
+}
+
+func TestAdaptUploadStreaming_Success(t *testing.T) {
+	adapter := NewStreamAdapter()
+	sender := &MockMessageSender{}
+
+	data := bytes.Repeat([]byte("y"), 2*1024*1024) // 2 MB — above upload threshold
+	conn := NewMockConnection(data)
+
+	if err := adapter.AdaptUploadStreaming("adapt-up", conn, "msg-up", int64(len(data)), sender); err != nil {
+		t.Fatalf("AdaptUploadStreaming: %v", err)
+	}
+	if len(sender.GetMessages()) == 0 {
+		t.Fatal("expected messages to be sent")
+	}
+}
+
+// TestHandleUploadToRequest exercises HandleUploadToRequest by providing a
+// channel of upload messages and an HTTP request to write to.
+func TestHandleUploadToRequest_Success(t *testing.T) {
+	handler := NewStreamingHandler()
+	defer handler.Close()
+
+	sender := &MockMessageSender{}
+
+	// Set up an HTTP test server to receive the upload.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/upload", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	uploadChan := make(chan *common.Message, 4)
+	uploadChan <- &common.Message{
+		HTTP: &common.HTTPData{Body: []byte("chunk1"), IsStream: true},
+	}
+	uploadChan <- &common.Message{
+		HTTP: &common.HTTPData{Body: []byte("chunk2"), IsStream: true, IsLastChunk: true},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.HandleUploadToRequest("ul-1", uploadChan, req, sender)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("HandleUploadToRequest: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("HandleUploadToRequest timed out")
 	}
 }

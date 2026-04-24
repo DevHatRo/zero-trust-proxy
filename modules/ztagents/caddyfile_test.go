@@ -39,6 +39,14 @@ func TestApp_UnmarshalCaddyfile(t *testing.T) {
 			input:   "zerotrust_agents {\n\tlisten\n}\n",
 			wantErr: `wrong argument count`,
 		},
+		{
+			name: "check_addr option",
+			input: "zerotrust_agents {\n" +
+				"\tlisten :18443\n" +
+				"\tcheck_addr 127.0.0.1:2021\n" +
+				"}\n",
+			want: App{ListenAddr: ":18443", CheckAddr: "127.0.0.1:2021"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -61,9 +69,32 @@ func TestApp_UnmarshalCaddyfile(t *testing.T) {
 			if a.ListenAddr != tc.want.ListenAddr ||
 				a.CertFile != tc.want.CertFile ||
 				a.KeyFile != tc.want.KeyFile ||
-				a.CAFile != tc.want.CAFile {
+				a.CAFile != tc.want.CAFile ||
+				a.CheckAddr != tc.want.CheckAddr {
 				t.Fatalf("got %+v want %+v", a, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseGlobalOption exercises parseGlobalOption directly.
+func TestParseGlobalOption_Valid(t *testing.T) {
+	input := "zerotrust_agents {\n\tlisten :18443\n\tcert_file /c.crt\n\tkey_file /k.key\n\tca_file /ca.crt\n}\n"
+	d := caddyfile.NewTestDispenser(input)
+	result, err := parseGlobalOption(d, nil)
+	if err != nil {
+		t.Fatalf("parseGlobalOption: %v", err)
+	}
+	if result == nil {
+		t.Fatal("parseGlobalOption returned nil result")
+	}
+}
+
+func TestParseGlobalOption_Error(t *testing.T) {
+	input := "zerotrust_agents {\n\tunknown_opt val\n}\n"
+	d := caddyfile.NewTestDispenser(input)
+	_, err := parseGlobalOption(d, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown option")
 	}
 }

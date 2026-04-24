@@ -2,6 +2,7 @@ package ztrouter
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -243,3 +244,153 @@ func TestHandler_MissingHost(t *testing.T) {
 		t.Fatalf("body=%q, want message about Host", rr.Body.String())
 	}
 }
+
+func TestHandler_ContextCancelled(t *testing.T) {
+	h := newHarness(t, "ctx.example.com")
+	h.handler.RequestTimeout = caddy.Duration(5 * time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "http://ctx.example.com/", nil).WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	done := make(chan error, 1)
+	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+
+	_ = h.readForwardedRequest()
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeHTTP: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP did not return after context cancel")
+	}
+}
+
+func TestWriteAgentResponse_ErrorField(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeAgentResponse(rr, &common.Message{Error: "backend unavailable"})
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want 502", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "backend unavailable") {
+		t.Fatalf("body=%q, want error message", rr.Body.String())
+	}
+}
+
+func TestWriteAgentResponse_NilHTTP(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeAgentResponse(rr, &common.Message{})
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want 502", rr.Code)
+	}
+}
+
+func TestWriteAgentResponse_ZeroStatusDefaultsTo200(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeAgentResponse(rr, &common.Message{
+		HTTP: &common.HTTPData{
+			StatusCode: 0,
+			Headers:    map[string][]string{"X-Test": {"yes"}},
+			Body:       []byte("ok"),
+		},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rr.Code)
+	}
+	if rr.Header().Get("X-Test") != "yes" {
+		t.Fatalf("X-Test=%q, want yes", rr.Header().Get("X-Test"))
+	}
+	if body, _ := io.ReadAll(rr.Body); string(body) != "ok" {
+		t.Fatalf("body=%q, want ok", body)
+	}
+}
+
+func TestHandler_AgentErrorResponse(t *testing.T) {
+	h := newHarness(t, "err.example.com")
+
+	req := httptest.NewRequest(http.MethodGet, "http://err.example.com/", nil)
+	rr := httptest.NewRecorder()
+
+	done := make(chan error, 1)
+	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+
+	fwd := h.readForwardedRequest()
+	cb, ok := h.agent.TakeResponseHandler(fwd.ID)
+	if !ok {
+		t.Fatalf("no response handler registered")
+	}
+	cb(&common.Message{ID: fwd.ID, Error: "upstream down"})
+
+	if err := <-done; err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want 502", rr.Code)
+	}
+}
+
+// TestHandler_Timeout verifies the timeout path in ServeHTTP.
+func TestHandler_Timeout(t *testing.T) {
+	const host = "timeout.example.com"
+	h := newHarness(t, host)
+	h.handler.RequestTimeout = caddy.Duration(50 * time.Millisecond)
+
+	req := httptest.NewRequest(http.MethodGet, "http://"+host+"/slow", nil)
+	rr := httptest.NewRecorder()
+
+	// Run ServeHTTP — agent never replies, so timeout fires.
+	done := make(chan error, 1)
+	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+
+	// Drain the forwarded request but don't send a response.
+	_ = h.readForwardedRequest()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeHTTP: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP did not return after timeout")
+	}
+
+	if rr.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d, want 504", rr.Code)
+	}
+}
+
+// TestHandler_BodyReadError exercises the body-read error path.
+func TestHandler_BodyReadError(t *testing.T) {
+	const host = "bodyerr.example.com"
+	h := newHarness(t, host)
+
+	// errReader always returns an error.
+	errReader := &alwaysErrReader{}
+	req := httptest.NewRequest(http.MethodPost, "http://"+host+"/upload", errReader)
+	req.ContentLength = 10 // non-zero so we don't take the stream-upload path
+	rr := httptest.NewRecorder()
+
+	done := make(chan error, 1)
+	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeHTTP: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP did not return")
+	}
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rr.Code)
+	}
+}
+
+type alwaysErrReader struct{}
+
+func (r *alwaysErrReader) Read(p []byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+var _ = (*ztagents.App)(nil) // keep import

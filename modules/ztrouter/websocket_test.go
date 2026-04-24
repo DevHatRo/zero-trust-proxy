@@ -227,5 +227,48 @@ func drainForMessageType(t *testing.T, c net.Conn, msgType string) *common.Messa
 	}
 }
 
+// TestHandleWebSocketUpgrade_NoHijacker verifies the 500 path when the
+// ResponseWriter doesn't implement http.Hijacker.
+func TestHandleWebSocketUpgrade_NoHijacker(t *testing.T) {
+	const host = "ws-nohijack.example.com"
+	app := ztagents.NewTestApp()
+	_, agentConn := net.Pipe()
+	defer agentConn.Close()
+	agent := ztagents.NewAgent("nh1", agentConn)
+	agent.Services[host] = &common.ServiceConfig{
+		ServiceConfig: types.ServiceConfig{Hostname: host},
+	}
+	app.AddAgent(agent)
+
+	h := &Handler{app: app}
+
+	rr := httptest.NewRecorder() // does NOT implement http.Hijacker
+	resp := &common.Message{
+		HTTP: &common.HTTPData{
+			StatusCode:    http.StatusSwitchingProtocols,
+			StatusMessage: "Switching Protocols",
+			Headers:       map[string][]string{},
+			IsWebSocket:   true,
+		},
+	}
+
+	if err := h.handleWebSocketUpgrade(rr, agent, "msg-nh", resp); err != nil {
+		t.Fatalf("handleWebSocketUpgrade returned error: %v", err)
+	}
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500", rr.Code)
+	}
+}
+
+// TestIsWebSocketUpgrade covers the false-path where Connection header is absent.
+func TestIsWebSocketUpgrade_MissingConnectionHeader(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	// No Connection: Upgrade header → should return false.
+	if isWebSocketUpgrade(req) {
+		t.Fatal("expected isWebSocketUpgrade to return false without Connection header")
+	}
+}
+
 // Test helper we need — expose one more hook. See testhelper.go update below.
 var _ = caddy.Duration(0) // keep import used

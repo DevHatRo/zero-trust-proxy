@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 )
 
 func TestHandler_UnmarshalCaddyfile(t *testing.T) {
@@ -58,5 +59,32 @@ func TestHandler_UnmarshalCaddyfile(t *testing.T) {
 				t.Fatalf("RequestTimeout=%v want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseHandlerCaddyfile exercises parseHandlerCaddyfile via Helper.
+func TestParseHandlerCaddyfile(t *testing.T) {
+	input := "zerotrust_router {\n\trequest_timeout 1m\n}\n"
+	d := caddyfile.NewTestDispenser(input)
+	h := httpcaddyfile.Helper{Dispenser: d}
+	handler, err := parseHandlerCaddyfile(h)
+	if err != nil {
+		t.Fatalf("parseHandlerCaddyfile: %v", err)
+	}
+	if handler == nil {
+		t.Fatal("parseHandlerCaddyfile returned nil handler")
+	}
+}
+
+func TestParseHandlerCaddyfile_Error(t *testing.T) {
+	input := "zerotrust_router {\n\tbadopt 1m\n}\n"
+	d := caddyfile.NewTestDispenser(input)
+	h := httpcaddyfile.Helper{Dispenser: d}
+	_, err := parseHandlerCaddyfile(h)
+	if err == nil {
+		t.Fatal("expected error for unknown option")
+	}
+	if !strings.Contains(err.Error(), "badopt") {
+		t.Fatalf("err=%q, expected to mention badopt", err.Error())
 	}
 }

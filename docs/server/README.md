@@ -1,80 +1,97 @@
-# 🖥️ Zero Trust Server Documentation
+# Server (Custom Caddy Binary)
 
-The Zero Trust Server is the central component that manages agent connections and provides the secure tunnel endpoint.
+The server-side component is a **custom Caddy binary** (`cmd/caddy`) that embeds two first-party modules. There is no separate server process — Caddy hosts both modules directly.
 
-## 🔗 **Quick Reference**
+## Modules
 
-### Command Line Options
+| Module | Caddy ID | Role |
+|--------|----------|------|
+| `modules/ztagents` | `zerotrust.agents` | mTLS listener, agent registry, WebSocket session tracking |
+| `modules/ztrouter` | `http.handlers.zerotrust_router` | Per-request agent lookup and mTLS multiplexing |
+
+## Build
+
 ```bash
-./bin/server [options]
-
-Options:
-  --listen string       Server listening address (default ":8443")
-  --api string         API server address (default ":9443")  
-  --cert string        Server certificate file (default "certs/server.crt")
-  --key string         Server private key file (default "certs/server.key")
-  --ca string          CA certificate file (default "certs/ca.crt")
-  --log-level string   Log level: DEBUG|INFO|WARN|ERROR|FATAL (default "INFO")
+go build -o bin/caddy ./cmd/caddy
 ```
 
-### Environment Variables
+## Run
+
 ```bash
-LOG_LEVEL=DEBUG         # Override log level
-CADDY_ADMIN_API=...     # Caddy admin API URL (default "http://localhost:2019")
+# Caddyfile (preferred)
+./bin/caddy run --config config/Caddyfile.example --adapter caddyfile
+
+# JSON config
+./bin/caddy run --config config/caddy.smoke.json
+
+# Hot reload config without dropping connections
+./bin/caddy reload --config config/Caddyfile.example --adapter caddyfile
 ```
 
-### Basic Configuration Template
-```yaml
-# Basic server configuration
-server:
-  listen_addr: ":8443"
-  cert_file: "certs/server.crt"
-  key_file: "certs/server.key"
-  ca_file: "certs/ca.crt"
+## Caddyfile Reference
 
-api:
-  listen_addr: ":9443"
+```caddyfile
+{
+    # zerotrust_agents configures the mTLS listener and agent registry.
+    zerotrust_agents {
+        listen    :8443
+        cert_file config/certs/server.crt
+        key_file  config/certs/server.key
+        ca_file   config/certs/ca.crt
+    }
+}
 
-caddy:
-  admin_api: "http://localhost:2019"
-  
-log_level: "INFO"
-hot_reload:
-  enabled: true
+# All inbound HTTP/HTTPS traffic is handled by zerotrust_router.
+:443 {
+    route {
+        zerotrust_router {
+            request_timeout 2m   # optional; default 2m
+        }
+    }
+}
 ```
 
-### Default Ports
-- **8443**: Main server port (agent connections)
-- **9443**: Internal API port (Caddy integration)
-- **2019**: Caddy admin API port
+## Ports
 
-## 🔄 **Server Lifecycle**
+| Port | Purpose |
+|------|---------|
+| `:8443` | mTLS agent connections |
+| `:80` / `:443` | Inbound client traffic (Caddy HTTP stack) |
+| `:2019` | Caddy admin API (local only) |
 
-### Startup Process
-1. **Configuration Loading** - Load and validate configuration
-2. **Certificate Loading** - Load TLS certificates
-3. **Server Initialization** - Initialize server components
-4. **Agent Listener** - Start listening for agent connections
-5. **API Server** - Start internal API server
-6. **Caddy Integration** - Configure Caddy reverse proxy
-7. **Health Checks** - Enable health monitoring
+## Environment Variables
 
-### Shutdown Process
-1. **Graceful Shutdown** - Stop accepting new connections
-2. **Agent Cleanup** - Disconnect agents gracefully
-3. **Configuration Cleanup** - Remove Caddy configuration
-4. **Resource Cleanup** - Clean up system resources
+```bash
+LOG_LEVEL=DEBUG    # Override log level (DEBUG|INFO|WARN|ERROR)
+```
 
-## 🌐 **Network Architecture**
+## Lifecycle
+
+**Startup**
+1. Caddy loads the Caddyfile/JSON config.
+2. `zerotrust.agents` app starts: loads TLS certs, opens mTLS listener on `:8443`.
+3. Caddy HTTP stack starts: `zerotrust_router` handler provisions itself by resolving the `zerotrust.agents` app.
+4. Agents can now connect and register services.
+
+**Hot reload**
+```bash
+./bin/caddy reload --config config/Caddyfile.example --adapter caddyfile
+```
+Live connections are preserved; the mTLS listener and agent registry continue without interruption.
+
+**Shutdown**
+Caddy drains active connections gracefully before exiting.
+
+## Architecture Diagram
 
 ```
 Internet
     ↓
-Caddy (Reverse Proxy)
-    ↓ (Internal API :9443)
-Zero Trust Server
-    ↓ (mTLS :8443)
-Zero Trust Agents
-    ↓ (Backend Connections)
-Private Services
+Caddy HTTP stack (:80/:443)
+    ↓  zerotrust_router handler
+Agent registry (in-process, zerotrust.agents app)
+    ↓  mTLS (:8443)
+Agent process (remote)
+    ↓
+Private backend services
 ```
