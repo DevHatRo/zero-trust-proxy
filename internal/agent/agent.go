@@ -1,18 +1,19 @@
 package agent
 
 import (
+	"bytes"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"bytes"
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
@@ -22,24 +23,6 @@ import (
 
 // Component-specific logger for agent
 var log = logger.WithComponent("agent")
-
-// agentLocalIP caches the local IP used to reach backends, determined once on
-// first use. Opening a real TCP connection per request just to read LocalAddr
-// adds unnecessary latency and socket churn.
-var (
-	agentLocalIPOnce sync.Once
-	agentLocalIP     string
-)
-
-func resolveLocalIP(backend string) string {
-	agentLocalIPOnce.Do(func() {
-		if conn, err := net.Dial("tcp", backend); err == nil {
-			agentLocalIP = conn.LocalAddr().(*net.TCPAddr).IP.String()
-			conn.Close()
-		}
-	})
-	return agentLocalIP
-}
 
 // agentMessageSender implements streaming.MessageSender interface for agent
 type agentMessageSender struct {
@@ -56,14 +39,6 @@ const (
 	MessageTypePong  = "pong"
 	MessageTypeProxy = "proxy"
 )
-
-// min returns the smaller of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
 
 // parseAddress parses an address and returns host, port, and protocol information
 func parseAddress(addr string) (host, port, protocol string) {
@@ -180,6 +155,8 @@ type Agent struct {
 	hotReloadManager *common.HotReloadManager
 	// Caddy configuration validation
 	caddyValidator types.ServiceValidator
+	// stopCh is closed when the agent shuts down; health check goroutines select on it.
+	stopCh chan struct{}
 	// Streamed upload channels, keyed by msgID. Populated on http_upload_start,
 	// drained by the upload goroutine (via streaming.StreamToRequest), and
 	// removed when the goroutine exits.
@@ -201,6 +178,7 @@ func NewAgent(id, serverAddress string, tlsConfig *tls.Config, validator types.S
 		hotReloadManager:    common.NewHotReloadManager(),
 		caddyValidator:      validator,
 		uploadChans:         make(map[string]chan *common.Message),
+		stopCh:              make(chan struct{}),
 	}
 }
 
@@ -229,6 +207,7 @@ func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config, validator ty
 		hotReloadManager:    common.NewHotReloadManager(),
 		caddyValidator:      validator,
 		uploadChans:         make(map[string]chan *common.Message),
+		stopCh:              make(chan struct{}),
 	}
 
 	// Apply logging configuration from config
@@ -506,7 +485,7 @@ func (a *Agent) handleMessages() {
 			chunk := msg
 			select {
 			case ch <- &chunk:
-			case <-time.After(60 * time.Second):
+			case <-time.After(5 * time.Second):
 				log.Error("📤 upload chunk %s dropped: channel full", msg.ID)
 			}
 		default:
@@ -530,7 +509,13 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 	}
 
 	// Extract host from headers
-	host := msg.HTTP.Headers["Host"][0]
+	hostHeaders, ok := msg.HTTP.Headers["Host"]
+	if !ok || len(hostHeaders) == 0 {
+		log.Error("❌ http_request id=%s missing Host header", msg.ID)
+		a.sendErrorResponse(msg.ID, "missing Host header")
+		return
+	}
+	host := hostHeaders[0]
 	log.Info("🌐 Handling HTTP request for host: [%s]", host)
 
 	// Find service configuration
@@ -540,6 +525,7 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 
 	if !ok {
 		log.Error("❌ No service configuration found for host: %s", host)
+		a.sendErrorResponse(msg.ID, "no service for host: "+host)
 		return
 	}
 
@@ -712,9 +698,6 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 		return
 	}
 
-	if req.URL.Host != "" {
-		log.Info("🔧 AGENT IP: %s (connecting to %s)", resolveLocalIP(req.URL.Host), req.URL.Host)
-	}
 	defer resp.Body.Close()
 
 	// Now check actual response characteristics for streaming decision
@@ -967,7 +950,7 @@ func (a *Agent) sendErrorResponse(msgID, errMsg string) {
 
 // handleWebSocketConnection handles WebSocket connections using raw TCP relay
 func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.ServiceConfig) {
-	host := msg.HTTP.Headers["Host"][0]
+	host := service.Hostname
 	log.Info("🔌 Starting WebSocket connection handler for %s", host)
 
 	// Cleanup stale connections before creating new ones
@@ -1309,7 +1292,7 @@ func (a *Agent) buildWebSocketUpgradeRequest(msg *common.Message) string {
 				log.Debug("🔧 Found Sec-WebSocket-Version header: %s", value)
 			case "authorization":
 				hasAuthorization = true
-				log.Info("🔑 Authorization header included in WebSocket upgrade: %s", value[:min(len(value), 30)]+"...")
+				log.Debug("🔑 Authorization header included in WebSocket upgrade: %s", value[:min(len(value), 30)]+"...")
 			case "cookie":
 				log.Debug("🍪 Cookie header found: %s", value[:min(len(value), 50)]+"...")
 			}
@@ -1352,9 +1335,7 @@ func (a *Agent) buildWebSocketUpgradeRequest(msg *common.Message) string {
 
 	// Generic WebSocket upgrade logging - works for all services
 	log.Info("🔌 WebSocket upgrade for %s - including Zero Trust headers for identity-aware proxy", originalHost)
-	if hasAuthorization {
-		log.Info("✅ WebSocket upgrade includes Authorization header")
-	} else {
+	if !hasAuthorization {
 		log.Debug("💡 WebSocket upgrade without Authorization header - this is normal for many services")
 	}
 
@@ -1629,21 +1610,31 @@ func (a *Agent) getPrimaryUpstream(service *ServiceConfig) string {
 	return service.Upstreams[0].Address
 }
 
-// selectWeightedUpstream selects an upstream based on weights (simplified implementation)
+// selectWeightedUpstream selects an upstream using weighted random selection.
 func (a *Agent) selectWeightedUpstream(upstreams []UpstreamConfig) string {
-	// Simplified: return highest weight upstream
-	// In production, this would implement proper weighted round-robin
-	maxWeight := 0
-	selectedAddress := ""
-
-	for _, upstream := range upstreams {
-		if upstream.Weight > maxWeight {
-			maxWeight = upstream.Weight
-			selectedAddress = upstream.Address
+	total := 0
+	for _, u := range upstreams {
+		if u.Weight > 0 {
+			total += u.Weight
 		}
 	}
-
-	return selectedAddress
+	if total == 0 {
+		return upstreams[0].Address
+	}
+	r := 0
+	if n, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(total))); err == nil {
+		r = int(n.Int64())
+	}
+	for _, u := range upstreams {
+		if u.Weight <= 0 {
+			continue
+		}
+		r -= u.Weight
+		if r < 0 {
+			return u.Address
+		}
+	}
+	return upstreams[len(upstreams)-1].Address
 }
 
 // selectLeastConnUpstream selects upstream with least connections (placeholder)
@@ -1692,6 +1683,8 @@ func (a *Agent) runHealthCheck(service *ServiceConfig, upstream UpstreamConfig) 
 
 	for {
 		select {
+		case <-a.stopCh:
+			return
 		case <-ticker.C:
 			healthy := a.checkUpstreamHealth(service, upstream)
 			if healthy {
@@ -1700,6 +1693,16 @@ func (a *Agent) runHealthCheck(service *ServiceConfig, upstream UpstreamConfig) 
 				log.Error("❌ Health check failed for %s upstream %s", service.ID, upstream.Address)
 			}
 		}
+	}
+}
+
+// Stop signals all background goroutines (e.g. health checks) to exit.
+func (a *Agent) Stop() {
+	select {
+	case <-a.stopCh:
+		// already closed
+	default:
+		close(a.stopCh)
 	}
 }
 

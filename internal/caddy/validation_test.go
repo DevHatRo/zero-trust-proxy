@@ -501,3 +501,82 @@ func TestValidator_BackendValidation(t *testing.T) {
 		})
 	}
 }
+
+
+func TestValidator_ExistingServiceTracking(t *testing.T) {
+	v := NewValidator()
+	v.SetSkipBinaryValidation(true)
+
+	cfg := &types.ServiceConfig{
+		Hostname: "tracked.example.com",
+		Backend:  "127.0.0.1:8080",
+		Protocol: "https",
+	}
+
+	// Initially empty.
+	if len(v.GetExistingServices()) != 0 {
+		t.Fatal("expected empty existing services")
+	}
+
+	v.AddExistingService("tracked.example.com", cfg)
+	services := v.GetExistingServices()
+	if _, ok := services["tracked.example.com"]; !ok {
+		t.Fatal("expected tracked.example.com to be present")
+	}
+
+	v.RemoveExistingService("tracked.example.com")
+	if len(v.GetExistingServices()) != 0 {
+		t.Fatal("expected empty existing services after removal")
+	}
+}
+
+func TestValidator_HostnameConflict(t *testing.T) {
+	v := NewValidator()
+	v.SetSkipBinaryValidation(true)
+
+	existing := &types.ServiceConfig{
+		Hostname: "conflict.example.com",
+		Backend:  "127.0.0.1:8080",
+		Protocol: "https",
+	}
+	v.AddExistingService("conflict.example.com", existing)
+
+	// Different backend — should be reported as a conflict.
+	newCfg := &types.ServiceConfig{
+		Hostname: "conflict.example.com",
+		Backend:  "127.0.0.1:9090",
+		Protocol: "https",
+	}
+	result := v.ValidateServiceConfig(newCfg)
+	if result.Valid {
+		t.Fatal("expected validation to fail on hostname conflict")
+	}
+	found := false
+	for _, e := range result.Errors {
+		if e.Code == "HOSTNAME_CONFLICT" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected HOSTNAME_CONFLICT error, got: %v", result.Errors)
+	}
+}
+
+func TestValidator_HostnameNoConflictSameConfig(t *testing.T) {
+	v := NewValidator()
+	v.SetSkipBinaryValidation(true)
+
+	cfg := &types.ServiceConfig{
+		Hostname: "same.example.com",
+		Backend:  "127.0.0.1:8080",
+		Protocol: "https",
+		ListenOn: "both",
+	}
+	v.AddExistingService("same.example.com", cfg)
+
+	// Same config — not a conflict, should pass.
+	result := v.ValidateServiceConfig(cfg)
+	if !result.Valid {
+		t.Fatalf("expected no conflict for identical config, got: %v", result.Errors)
+	}
+}

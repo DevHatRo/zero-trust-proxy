@@ -27,7 +27,8 @@ func init() {
 type Handler struct {
 	RequestTimeout caddy.Duration `json:"request_timeout,omitempty"`
 
-	app *ztagents.App
+	app        *ztagents.App
+	timeoutCfg *common.TimeoutConfig // nil → common.DefaultTimeouts(); set in tests
 }
 
 func (Handler) CaddyModule() caddy.ModuleInfo {

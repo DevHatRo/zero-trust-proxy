@@ -1,356 +1,204 @@
-# 🐳 Docker Deployment Guide
+# Docker Deployment
 
-This guide covers deploying the Zero Trust Proxy system using Docker and Docker Compose with real-world examples.
+This guide covers building and running the Zero Trust Proxy with Docker Compose.
 
-## 📦 Docker Images
+> **Note**: There are no pre-built Docker images. You build the custom Caddy binary and agent from source.
 
-The Zero Trust Proxy provides official Docker images:
+## Dockerfile — Server (custom Caddy)
 
-- **Server**: `ghcr.io/devhatro/zero-trust-proxy/server:latest`
-- **Agent**: `ghcr.io/devhatro/zero-trust-proxy/agent:latest`
+```dockerfile
+FROM golang:1.22 AS builder
+WORKDIR /src
+COPY . .
+RUN go build -o /bin/caddy ./cmd/caddy
 
-## 🚀 Quick Start with Docker Compose
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /bin/caddy /usr/local/bin/caddy
+EXPOSE 80 443 8443
+ENTRYPOINT ["caddy", "run", "--config", "/config/Caddyfile", "--adapter", "caddyfile"]
+```
 
-### Complete Docker Compose Setup
+## Dockerfile — Agent
 
-Create a `docker-compose.yml` file:
+```dockerfile
+FROM golang:1.22 AS builder
+WORKDIR /src
+COPY . .
+RUN go build -o /bin/agent ./cmd/agent
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /bin/agent /usr/local/bin/agent
+ENTRYPOINT ["agent"]
+```
+
+## Docker Compose
 
 ```yaml
----
-version: '3.8'
-
 services:
-  # Zero Trust Server
-  zero-trust-server:
-    image: ghcr.io/devhatro/zero-trust-proxy/server:latest
-    container_name: zero-trust-server
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    container_name: zero-trust-caddy
     restart: unless-stopped
     ports:
-      - "8443:8443"    # Agent connections
-      - "9443:9443"    # Internal API (if needed externally)
-      - "80:80"        # HTTP (Caddy integrated)
-      - "443:443"      # HTTPS (Caddy integrated)
+      - "80:80"
+      - "443:443"
+      - "8443:8443"
     volumes:
-      - ./config:/config
-      - ./config/certs:/certs:ro
-    environment:
-      - LOG_LEVEL=INFO
+      - ./config:/config:ro
     networks:
-      - zero-trust-network
+      - zero-trust
 
-  # Zero Trust Agent
-  zero-trust-agent:
-    image: ghcr.io/devhatro/zero-trust-proxy/agent:latest
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
     container_name: zero-trust-agent
     restart: unless-stopped
+    command:
+      - "--server=caddy:8443"
+      - "--cert=/config/certs/agent.crt"
+      - "--key=/config/certs/agent.key"
+      - "--ca=/config/certs/ca.crt"
+      - "--id=docker-agent"
+      - "--config=/config/agent.yaml"
     volumes:
-      - ./config:/config
-    environment:
-      - LOG_LEVEL=INFO
-      - ZERO_TRUST_SERVER=zero-trust-server:8443
+      - ./config:/config:ro
     networks:
-      - zero-trust-network
-      - backend-network  # Access to backend services
+      - zero-trust
+      - backend
     depends_on:
-      - zero-trust-server
+      - caddy
 
 networks:
-  zero-trust-network:
+  zero-trust:
     driver: bridge
-  backend-network:
+  backend:
     driver: bridge
 ```
 
-## ⚙️ Configuration Files
+## Config Files
 
-### Server Configuration
+### config/Caddyfile
 
-Create `config/server.yaml`:
+```caddyfile
+{
+    zerotrust_agents {
+        listen    :8443
+        cert_file /config/certs/server.crt
+        key_file  /config/certs/server.key
+        ca_file   /config/certs/ca.crt
+    }
+}
 
-```yaml
-# 0Trust Server Configuration
-
-# Log level configuration
-log_level: "INFO"
-
-# Hot reload configuration
-hot_reload:
-  enabled: true                  # Enable hot configuration reloading
-  watch_config: true            # Watch config file for changes
-  debounce_delay: "100ms"       # Delay before reloading after file change
-  graceful_timeout: "30s"       # Timeout for graceful reload operations
-  reload_signal: "SIGHUP"       # Optional: reload on signal
-
-# Core server settings
-server:
-  listen_addr: ":8443"
-  cert_file: "/config/certs/server.crt"
-  key_file: "/config/certs/server.key"
-  ca_file: "/config/certs/ca.crt"
-
-# API server settings (for HTTP proxy from Caddy)
-api:
-  listen_addr: "localhost:9443"
-
-# Caddy reverse proxy settings
-caddy:
-  admin_api: "http://localhost:2019"
-  config_dir: "/config/caddy"
-  storage_dir: "/config/caddy/storage"
+:443 {
+    route {
+        zerotrust_router { request_timeout 2m }
+    }
+}
 ```
 
-### Agent Configuration
-
-Create `config/agent.yaml`:
+### config/agent.yaml
 
 ```yaml
-# Zero Trust Agent Configuration
-
-# Hot reload configuration
-hot_reload:
-  enabled: true
-  watch_config: true
-
-# Log level
-log_level: "INFO"
-
-# Agent identity
 agent:
   id: "docker-agent"
-  name: "Docker Agent"
-  region: "local"
-  tags:
-    - "docker"
-    - "homelab"
 
-# Server connection
 server:
-  address: "zero-trust-server:8443"  # Use container name for internal communication
+  address: "caddy:8443"
+  cert:    "/config/certs/agent.crt"
+  key:     "/config/certs/agent.key"
   ca_cert: "/config/certs/ca.crt"
-  cert: "/config/certs/agent.crt"
-  key: "/config/certs/agent.key"
 
-# Service definitions
+log_level: "INFO"
+hot_reload:
+  enabled: true
+
 services:
   - id: "web-app"
-    name: "Web Application"
-    hosts:
-      - "app.example.com"
+    hostname: "app.example.com"
     protocol: "http"
     upstreams:
       - address: "web-app:3000"
-    routes:
-      - match:
-          path: "/*"
-        handle:
-          - type: "reverse_proxy"
 ```
 
-## 🏠 Real-World Homelab Example
+## Certificate Setup
 
-Based on a production Synology homelab setup:
+```bash
+# Build certgen
+go build -o bin/certgen ./cmd/certgen
 
-### Production Docker Compose
+mkdir -p config/certs
 
-```yaml
----
-version: '3.8'
+# CA
+./bin/certgen --out config/certs --name ca --type ca
 
-services:
-  # Zero Trust Server (Public-facing)
-  zero-trust-server:
-    image: ghcr.io/devhatro/zero-trust-proxy/server:latest
-    container_name: zero-trust-server
-    restart: unless-stopped
-    ports:
-      - "8443:8443"    # Agent connections
-      - "80:80"        # HTTP traffic
-      - "443:443"      # HTTPS traffic
-    volumes:
-      - /root/docker/config:/config
-      - /root/docker/config/certs:/certs:ro
-    environment:
-      - LOG_LEVEL=INFO
-    networks:
-      - zero-trust-network
+# Server cert
+./bin/certgen --ca config/certs/ca.crt --ca-key config/certs/ca.key \
+              --out config/certs --name server --type server
 
-  # Zero Trust Agent (On-premises)
-  zero-trust-agent:
-    image: ghcr.io/devhatro/zero-trust-proxy/agent:latest
-    container_name: zero-trust-agent
-    restart: unless-stopped
-    volumes:
-      - /volume1/docker/config:/config
-    environment:
-      - LOG_LEVEL=WARN
-    networks:
-      - zero-trust-network
-      - homelab-network
-    depends_on:
-      - zero-trust-server
+# Agent cert
+./bin/certgen --ca config/certs/ca.crt --ca-key config/certs/ca.key \
+              --out config/certs --name agent --type agent
 
-networks:
-  zero-trust-network:
-    driver: bridge
-  homelab-network:
-    external: true  # Connects to existing homelab network
+# Set permissions
+chmod 600 config/certs/*.key
+chmod 644 config/certs/*.crt
 ```
 
-### Production Agent Configuration
+## Deploy
 
-Real-world multi-service homelab setup:
+```bash
+# Build images and start
+docker compose up -d
+
+# Check status
+docker compose ps
+
+# View logs
+docker compose logs -f caddy
+docker compose logs -f agent
+```
+
+## Homelab Example (Multi-Service Agent)
 
 ```yaml
-# Production Homelab Agent Configuration
-
-hot_reload:
-  enabled: true
-  watch_config: true
-
-log_level: WARN
-
+# config/agent.yaml
 agent:
-  id: "synology"
-  name: "Synology Agent"
-  region: "local"
-  tags:
-    - "homelab"
-    - "synology"
+  id: "homelab"
 
 server:
-  address: "195.201.146.166:8443"  # Public server IP
+  address: "my-vps.example.com:8443"
+  cert:    "/config/certs/agent.crt"
+  key:     "/config/certs/agent.key"
   ca_cert: "/config/certs/ca.crt"
-  cert: "/config/certs/agent.crt"
-  key: "/config/certs/agent.key"
 
-# Multiple service definitions
+log_level: "WARN"
+hot_reload:
+  enabled: true
+
 services:
-  # Media Management Services via Traefik
-  - id: "traefik"
-    name: "Internal Proxy Traefik"
-    hosts:
-      - portal.local.example.com
-    protocol: http
-    upstreams:
-      - address: "traefik:80"
-    routes:
-      - match:
-          path: "/*"
-        handle:
-          - type: "reverse_proxy"
-
-  # Home Assistant with WebSocket Support
   - id: "homeassistant"
-    name: "Home Assistant"
-    hosts:
-      - assistant.local.example.com
+    hostname: "ha.example.com"
     websocket: true
     protocol: http
     upstreams:
-      - address: "172.30.10.120:8123"
-    routes:
-      - match:
-          path: "/*"
-        handle:
-          - type: "reverse_proxy"
+      - address: "192.168.1.10:8123"
 
-  # Pi-hole DNS Admin
-  - id: "pihole"
-    name: "Pi-hole DNS"
-    hosts:
-      - pihole.local.example.com
-    websocket: true
-    protocol: http
-    upstreams:
-      - address: "172.30.13.254:80"
-    routes:
-      - match:
-          path: "/*"
-        handle:
-          - type: "reverse_proxy"
-
-  # Synology NAS Services
-  - id: "synology"
-    name: "Synology NAS"
-    hosts:
-      - nas.example.com
-      - drive.example.com
-      - file.example.com
-      - photo.example.com
-      - download.example.com
-      - cam.example.com
+  - id: "nas"
+    hostname: "nas.example.com"
     websocket: true
     protocol: https
     upstreams:
-      - address: "172.23.0.1:443"
-    routes:
-      - match:
-          path: "/*"
-        handle:
-          - type: "reverse_proxy"
+      - address: "192.168.1.20:443"
 
-  # Plex Media Server
   - id: "plex"
-    name: "Plex Media Server"
-    hosts:
-      - plex.local.example.com
+    hostname: "plex.example.com"
     websocket: true
     protocol: http
     upstreams:
-      - address: "172.23.0.1:32400"
-    routes:
-      - match:
-          path: "/*"
-        handle:
-          - type: "reverse_proxy"
-```
-
-## 🔐 Certificate Setup for Docker
-
-### Generate Certificates for Docker Deployment
-
-```bash
-# Create certificate directory
-mkdir -p config/certs
-
-# Generate CA certificate
-docker run --rm -v $(pwd)/config/certs:/certs \
-  ghcr.io/devhatro/zero-trust-proxy/certgen:latest \
-  --ca /certs/ca.crt --ca-key /certs/ca.key \
-  --out /certs --name root --type ca
-
-# Generate server certificate
-docker run --rm -v $(pwd)/config/certs:/certs \
-  ghcr.io/devhatro/zero-trust-proxy/certgen:latest \
-  --ca /certs/ca.crt --ca-key /certs/ca.key \
-  --out /certs --name server --type server
-
-# Generate agent certificate
-docker run --rm -v $(pwd)/config/certs:/certs \
-  ghcr.io/devhatro/zero-trust-proxy/certgen:latest \
-  --ca /certs/ca.crt --ca-key /certs/ca.key \
-  --out /certs --name agent --type agent
-```
-
-### Certificate Permissions
-
-```bash
-# Set proper permissions
-chmod 600 config/certs/*.key
-chmod 644 config/certs/*.crt
-chown -R $(id -u):$(id -g) config/certs/
-```
-
-### 4. Deploy Services
-
-```bash
-# Start services
-docker-compose up -d
-
-# Check status
-docker-compose ps
-
-# View logs
-docker-compose logs -f zero-trust-server
-docker-compose logs -f zero-trust-agent
+      - address: "192.168.1.20:32400"
 ```

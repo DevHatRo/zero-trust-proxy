@@ -104,45 +104,66 @@ func (h *Handler) streamDownloadFlush(
 	log.Info("ztrouter: download stream (%s) id=%s size=%d agent=%s",
 		streamKind, msgID, initial.HTTP.TotalSize, agent.ID)
 
-	timeoutCfg := common.DefaultTimeouts()
+	timeoutCfg := h.timeoutCfg
+	if timeoutCfg == nil {
+		timeoutCfg = common.DefaultTimeouts()
+	}
 	var transferred int64
 	var chunkIdx int
-	for {
-		var dyn time.Duration
-		if isSSE {
-			// Rely on ctx.Done (client disconnect) and write errors to terminate.
-			dyn = 24 * time.Hour
-		} else {
-			dyn = common.CalculateStreamingTimeout(initial.HTTP.TotalSize, transferred, timeoutCfg)
+
+	writeChunk := func(chunk *common.Message) (bool, error) {
+		if chunk == nil || chunk.HTTP == nil {
+			return true, nil
 		}
-		select {
-		case chunk, ok := <-respCh:
-			if !ok {
-				return nil
+		if len(chunk.HTTP.Body) > 0 {
+			if _, err := w.Write(chunk.HTTP.Body); err != nil {
+				return false, fmt.Errorf("write chunk %d: %w", chunkIdx, err)
 			}
-			if chunk == nil || chunk.HTTP == nil {
-				return nil
-			}
-			if len(chunk.HTTP.Body) > 0 {
-				if _, err := w.Write(chunk.HTTP.Body); err != nil {
-					return fmt.Errorf("write chunk %d: %w", chunkIdx, err)
+			flusher.Flush()
+			transferred += int64(len(chunk.HTTP.Body))
+			chunkIdx++
+		}
+		if chunk.HTTP.IsLastChunk {
+			log.Info("ztrouter: download stream (%s) done id=%s chunks=%d bytes=%d",
+				streamKind, msgID, chunkIdx, transferred)
+			return true, nil
+		}
+		return false, nil
+	}
+
+	for {
+		if isSSE {
+			select {
+			case chunk, ok := <-respCh:
+				if !ok {
+					return nil
 				}
-				flusher.Flush()
-				transferred += int64(len(chunk.HTTP.Body))
-				chunkIdx++
-			}
-			if chunk.HTTP.IsLastChunk {
-				log.Info("ztrouter: download stream (%s) done id=%s chunks=%d bytes=%d",
+				if done, err := writeChunk(chunk); done || err != nil {
+					return err
+				}
+			case <-r.Context().Done():
+				log.Debug("ztrouter: download stream (%s) cancelled by client id=%s chunks=%d bytes=%d",
 					streamKind, msgID, chunkIdx, transferred)
 				return nil
 			}
-		case <-time.After(dyn):
-			return fmt.Errorf("timeout waiting for chunk %d after %v (received %d bytes)",
-				chunkIdx+1, dyn, transferred)
-		case <-r.Context().Done():
-			log.Debug("ztrouter: download stream (%s) cancelled by client id=%s chunks=%d bytes=%d",
-				streamKind, msgID, chunkIdx, transferred)
-			return nil
+		} else {
+			dyn := common.CalculateStreamingTimeout(initial.HTTP.TotalSize, transferred, timeoutCfg)
+			select {
+			case chunk, ok := <-respCh:
+				if !ok {
+					return nil
+				}
+				if done, err := writeChunk(chunk); done || err != nil {
+					return err
+				}
+			case <-time.After(dyn):
+				return fmt.Errorf("timeout waiting for chunk %d after %v (received %d bytes)",
+					chunkIdx+1, dyn, transferred)
+			case <-r.Context().Done():
+				log.Debug("ztrouter: download stream (%s) cancelled by client id=%s chunks=%d bytes=%d",
+					streamKind, msgID, chunkIdx, transferred)
+				return nil
+			}
 		}
 	}
 }

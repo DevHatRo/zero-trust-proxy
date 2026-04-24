@@ -1,6 +1,6 @@
 # Hot Reload System
 
-This document describes the shared hot reload system used by both the 0Trust agent and server components.
+This document describes the hot reload system used by the agent, and Caddy's built-in reload for the server-side config.
 
 ## Overview
 
@@ -31,14 +31,9 @@ hot_reload:
 
 ### Environment Variables
 
-For flexible port configuration (no hardcoded assumptions):
-
 ```bash
-# Server address configuration
-export ZERO_TRUST_SERVER="server.example.com:9443"
-# Or alternatively:
-export SERVER_ADDRESS="server.example.com:9443"  
-export SERVER_PORT="9443"  # Used with localhost if no full address
+export ZERO_TRUST_SERVER="server.example.com:8443"   # agent server address
+export LOG_LEVEL=DEBUG                                # override log level
 ```
 
 ## Component Integration
@@ -73,23 +68,17 @@ services:
         weight: 100                # Can adjust weight
 ```
 
-### Server Hot Reload
+### Server (Caddy) Hot Reload
 
-The server implements hot reload for:
+The server is a custom Caddy binary. Apply config changes without dropping connections:
 
-- **Log Level Changes**: Adjust server logging dynamically
-- **Caddy Configuration**: Update Caddy admin API settings
-- **Certificate Monitoring**: Detect certificate changes (requires restart)
-- **Port Changes**: Detect port changes (requires restart)
+```bash
+./bin/caddy reload --config config/Caddyfile.example --adapter caddyfile
+```
 
-**Supported Changes:**
-- Log level adjustments
-- Caddy admin API address updates
-
-**Restart Required For:**
-- TLS certificate changes
+**Restart required for:**
+- TLS certificate replacements (Caddy must re-read cert files)
 - Listen address changes
-- Major structural changes
 
 ## Implementation Details
 

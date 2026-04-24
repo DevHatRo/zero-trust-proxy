@@ -7,14 +7,13 @@ This guide helps you diagnose and resolve common issues with the Zero Trust Prox
 ### System Health Check
 ```bash
 # Check if components are running
-ps aux | grep -E "(server|agent)"
+ps aux | grep -E "(caddy|agent)"
 
 # Check listening ports
-sudo netstat -tlnp | grep -E ':(8443|9443|80|443|2019)'
+sudo netstat -tlnp | grep -E ':(8443|80|443|2019)'
 
-# Check recent logs
-tail -n 50 /var/log/zero-trust-server.log
-tail -n 50 /var/log/zero-trust-agent.log
+# Caddy: query live config
+curl -s http://localhost:2019/config/ | jq .
 ```
 
 ### Debug Mode
@@ -22,8 +21,10 @@ tail -n 50 /var/log/zero-trust-agent.log
 # Enable debug logging
 export LOG_LEVEL=DEBUG
 
-# Start components with debug output
-./bin/server --log-level DEBUG --config config/server.yaml
+# Start Caddy with debug output (log level is in the Caddyfile global block)
+./bin/caddy run --config config/Caddyfile.example --adapter caddyfile
+
+# Start agent with debug output
 ./bin/agent --log-level DEBUG --config config/agent.yaml
 ```
 
@@ -94,8 +95,8 @@ sudo ufw status | grep 8443
 #### Solutions
 ```bash
 # Open firewall ports
-sudo ufw allow 8443/tcp
-sudo ufw allow 9443/tcp
+sudo ufw allow 8443/tcp   # agent mTLS
+sudo ufw allow 443/tcp    # HTTPS
 
 # Check DNS resolution
 nslookup server.example.com
@@ -108,16 +109,16 @@ dig server.example.com
 ### Caddy Integration Issues
 
 #### Symptoms
-- HTTP 502 Bad Gateway errors
-- Services not accessible via Caddy
-- Caddy cannot connect to internal API
+- HTTP 502 Bad Gateway errors — agent for the requested `Host` is not registered
+- HTTP 503 — no agent connected for that hostname
 
 #### Diagnosis
 ```bash
+# Inspect live Caddy config
+curl -s http://localhost:2019/config/ | jq .
 
-# Check Caddy configuration
-curl http://localhost:2019/config/
-
+# Check zerotrust_router handler is loaded
+curl -s http://localhost:2019/config/apps/http/ | jq .
 ```
 
 ## 📊 Service Configuration Issues
@@ -273,7 +274,7 @@ time curl https://app.example.com/
 curl -w "@curl-format.txt" https://app.example.com/
 
 # Monitor connection statistics
-ss -tuln | grep -E ':(8443|9443)'
+ss -tuln | grep -E ':(8443|443|80)'
 ```
 
 #### Solutions
@@ -303,15 +304,15 @@ upstreams:
 #### Diagnosis
 ```bash
 # Check container logs
-docker logs zero-trust-server
+docker logs zero-trust-caddy
 docker logs zero-trust-agent
 
 # Inspect container configuration
-docker inspect zero-trust-server
+docker inspect zero-trust-caddy
 docker inspect zero-trust-agent
 
 # Test container networking
-docker exec zero-trust-agent ping zero-trust-server
+docker exec zero-trust-agent ping zero-trust-caddy
 ```
 
 #### Solutions
@@ -342,7 +343,7 @@ docker network inspect zero-trust-network
 ```bash
 # Monitor network traffic
 sudo tcpdump -i any port 8443
-sudo tcpdump -i any port 9443
+sudo tcpdump -i any port 443
 
 # Trace network calls
 strace -e network ./bin/agent --config config/agent.yaml

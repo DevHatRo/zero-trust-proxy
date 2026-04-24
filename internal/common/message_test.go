@@ -613,6 +613,18 @@ func TestMessageTypes(t *testing.T) {
 	}
 }
 
+func TestNewServiceConfig_And_ToTypes(t *testing.T) {
+	tc := &types.ServiceConfig{Hostname: "h.example.com", Backend: "b:8080", Protocol: "https"}
+	sc := NewServiceConfig(tc)
+	if sc.Hostname != tc.Hostname || sc.Backend != tc.Backend {
+		t.Fatalf("NewServiceConfig mismatch: %+v", sc)
+	}
+	back := sc.ToTypes()
+	if back.Hostname != tc.Hostname {
+		t.Fatalf("ToTypes mismatch: %+v", back)
+	}
+}
+
 // BenchmarkMessageSerialization benchmarks message serialization
 func BenchmarkMessageSerialization(b *testing.B) {
 	msg := &Message{

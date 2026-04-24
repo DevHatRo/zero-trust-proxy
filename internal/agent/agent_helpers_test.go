@@ -105,9 +105,10 @@ func TestSelectUpstreams(t *testing.T) {
 		{Address: "c:8080", Weight: 2},
 	}
 
-	// Weighted — should pick highest weight.
-	if got := a.selectWeightedUpstream(upstreams); got != "b:8080" {
-		t.Fatalf("selectWeightedUpstream=%s, want b:8080", got)
+	// Weighted — probabilistic; verify only that a valid upstream is returned.
+	valid := map[string]bool{"a:8080": true, "b:8080": true, "c:8080": true}
+	if got := a.selectWeightedUpstream(upstreams); !valid[got] {
+		t.Fatalf("selectWeightedUpstream=%s, want one of a/b/c:8080", got)
 	}
 
 	// Least-conn — returns first upstream (simplified).
@@ -137,13 +138,20 @@ func TestGetPrimaryUpstream(t *testing.T) {
 		t.Fatalf("getPrimaryUpstream=%s, want x:9000", got)
 	}
 
-	// Weighted policy.
+	// Weighted policy — probabilistic; hi:8080 has 10x higher weight so it
+	// should dominate over 100 trials.
 	svc2 := &ServiceConfig{
 		Upstreams:     []UpstreamConfig{{Address: "lo:8080", Weight: 1}, {Address: "hi:8080", Weight: 10}},
 		LoadBalancing: &LoadBalancingConfig{Policy: "weighted_round_robin"},
 	}
-	if got := a.getPrimaryUpstream(svc2); got != "hi:8080" {
-		t.Fatalf("weighted=%s, want hi:8080", got)
+	hiCount := 0
+	for i := 0; i < 100; i++ {
+		if a.getPrimaryUpstream(svc2) == "hi:8080" {
+			hiCount++
+		}
+	}
+	if hiCount < 60 {
+		t.Fatalf("weighted: hi:8080 selected %d/100 times, want ≥60", hiCount)
 	}
 
 	// Least-conn policy.

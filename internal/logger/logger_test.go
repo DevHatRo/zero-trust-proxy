@@ -537,3 +537,55 @@ func TestWithComponent(t *testing.T) {
 		t.Errorf("Expected caddy message 'Caddy manager message', got %v", caddyEntry["msg"])
 	}
 }
+
+// TestLogLevels exercises the package-level and instance-level log functions.
+// Fatal is excluded (it calls os.Exit).
+func TestLogLevelFunctions(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, DEBUG, ConsoleFormat, "lvl-test", false)
+
+	// Instance methods — all should write something.
+	for _, fn := range []func(){
+		func() { l.Debug("debug msg") },
+		func() { l.Info("info msg") },
+		func() { l.Warn("warn msg") },
+		func() { l.Error("error msg") },
+	} {
+		buf.Reset()
+		fn()
+		if buf.Len() == 0 {
+			t.Fatal("expected log output, got nothing")
+		}
+	}
+}
+
+func TestLogLevelWithFieldsMethods(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, DEBUG, JSONFormat, "fields-test", false)
+	fields := map[string]interface{}{"key": "value"}
+
+	for _, fn := range []func(){
+		func() { l.DebugWithFields(fields, "msg") },
+		func() { l.InfoWithFields(fields, "msg") },
+		func() { l.WarnWithFields(fields, "msg") },
+		func() { l.ErrorWithFields(fields, "msg") },
+	} {
+		buf.Reset()
+		fn()
+		if buf.Len() == 0 {
+			t.Fatal("expected log output, got nothing")
+		}
+	}
+}
+
+func TestPackageLevelLogFunctions(t *testing.T) {
+	// These use the defaultLogger — just check they don't panic.
+	Debug("debug %s", "test")
+	Info("info %s", "test")
+	Warn("warn %s", "test")
+	Error("error %s", "test")
+	InfoWithFields(map[string]interface{}{"k": "v"}, "msg")
+	WarnWithFields(map[string]interface{}{"k": "v"}, "msg")
+	ErrorWithFields(map[string]interface{}{"k": "v"}, "msg")
+	DebugWithFields(map[string]interface{}{"k": "v"}, "msg")
+}
