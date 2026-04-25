@@ -1,12 +1,85 @@
 package ztagents
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
+	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
 )
+
+// generateTestCerts creates a self-signed CA and a server cert signed by it,
+// writes them to a temp dir, and returns the file paths.
+func generateTestCerts(t *testing.T) (certFile, keyFile, caFile string) {
+	t.Helper()
+	dir := t.TempDir()
+
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA cert: %v", err)
+	}
+	caCert, _ := x509.ParseCertificate(caDER)
+
+	caFile = filepath.Join(dir, "ca.crt")
+	f, _ := os.Create(caFile)
+	_ = pem.Encode(f, &pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	f.Close()
+
+	srvKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate server key: %v", err)
+	}
+	srvTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "test-server"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	srvDER, err := x509.CreateCertificate(rand.Reader, srvTemplate, caCert, &srvKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create server cert: %v", err)
+	}
+
+	certFile = filepath.Join(dir, "server.crt")
+	f, _ = os.Create(certFile)
+	_ = pem.Encode(f, &pem.Block{Type: "CERTIFICATE", Bytes: srvDER})
+	f.Close()
+
+	keyFile = filepath.Join(dir, "server.key")
+	srvKeyDER, _ := x509.MarshalECPrivateKey(srvKey)
+	f, _ = os.Create(keyFile)
+	_ = pem.Encode(f, &pem.Block{Type: "EC PRIVATE KEY", Bytes: srvKeyDER})
+	f.Close()
+
+	return certFile, keyFile, caFile
+}
 
 // --- App.Validate ---
 
@@ -110,5 +183,59 @@ func TestStartCheckServer_DefaultAddr(t *testing.T) {
 	err := app.startCheckServer()
 	if err == nil {
 		app.stopCheckServer()
+	}
+}
+
+// --- loadTLSConfig success path ---
+
+func TestLoadTLSConfig_Success(t *testing.T) {
+	certFile, keyFile, caFile := generateTestCerts(t)
+	cfg, err := loadTLSConfig(certFile, keyFile, caFile)
+	if err != nil {
+		t.Fatalf("loadTLSConfig: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil TLS config")
+	}
+	if cfg.ClientAuth != tls.RequireAndVerifyClientCert {
+		t.Fatalf("ClientAuth=%v, want RequireAndVerifyClientCert", cfg.ClientAuth)
+	}
+	if cfg.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("MinVersion=%v, want TLS 1.2", cfg.MinVersion)
+	}
+	if len(cfg.Certificates) != 1 {
+		t.Fatalf("Certificates len=%d, want 1", len(cfg.Certificates))
+	}
+	if cfg.ClientCAs == nil {
+		t.Fatal("ClientCAs pool should not be nil")
+	}
+}
+
+func TestLoadTLSConfig_EmptyCAPEM(t *testing.T) {
+	dir := t.TempDir()
+	// Write an empty CA file — AppendCertsFromPEM returns false.
+	caFile := filepath.Join(dir, "empty_ca.crt")
+	_ = os.WriteFile(caFile, []byte("not-a-cert"), 0o600)
+
+	certFile, keyFile, _ := generateTestCerts(t)
+	_, err := loadTLSConfig(certFile, keyFile, caFile)
+	if err == nil {
+		t.Fatal("expected error for invalid CA PEM")
+	}
+}
+
+func TestApp_Provision_WithCerts(t *testing.T) {
+	certFile, keyFile, caFile := generateTestCerts(t)
+	app := &App{
+		ListenAddr: ":0",
+		CertFile:   certFile,
+		KeyFile:    keyFile,
+		CAFile:     caFile,
+	}
+	if err := app.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision with valid certs: %v", err)
+	}
+	if app.rt == nil || app.rt.tlsConfig == nil {
+		t.Fatal("runtime.tlsConfig should be set after Provision with valid certs")
 	}
 }
