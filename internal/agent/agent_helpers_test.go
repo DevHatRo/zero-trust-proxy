@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -651,4 +652,278 @@ func TestSendBackendResponse_StreamingResponse(t *testing.T) {
 	}
 
 	<-done
+}
+
+// --- handleHTTPRequest additional branches ---
+
+func TestHandleHTTPRequest_NilConn(t *testing.T) {
+	a := newTestAgent()
+	a.reconnectInProgress = true // prevent real dial attempt
+	// conn is nil → agent calls attemptReconnection then returns; no panic.
+	a.handleHTTPRequest(&common.Message{
+		ID: "req-nil-conn",
+		HTTP: &common.HTTPData{
+			Method:  "GET",
+			URL:     "/",
+			Headers: map[string][]string{"Host": {"example.com"}},
+		},
+	})
+}
+
+func TestHandleHTTPRequest_MissingHost(t *testing.T) {
+	a, client := newConnectedAgent(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.handleHTTPRequest(&common.Message{
+			ID:   "req-no-host",
+			HTTP: &common.HTTPData{Method: "GET", URL: "/"},
+		})
+	}()
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var resp common.Message
+	if err := json.NewDecoder(client).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	<-done
+	if resp.Error == "" {
+		t.Fatal("expected error response for missing Host header")
+	}
+	if resp.ID != "req-no-host" {
+		t.Fatalf("id=%s, want req-no-host", resp.ID)
+	}
+}
+
+func TestHandleHTTPRequest_NoServiceForHost(t *testing.T) {
+	a, client := newConnectedAgent(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.handleHTTPRequest(&common.Message{
+			ID: "req-no-svc",
+			HTTP: &common.HTTPData{
+				Method:  "GET",
+				URL:     "/",
+				Headers: map[string][]string{"Host": {"unknown.example.com"}},
+			},
+		})
+	}()
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var resp common.Message
+	if err := json.NewDecoder(client).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	<-done
+	if resp.Error == "" {
+		t.Fatal("expected error response when no service registered")
+	}
+}
+
+// TestHandleHTTPRequest_BackendWithProtocol tests the path where the service
+// Backend already includes an "http://" prefix (hasProtocol == true branch).
+func TestHandleHTTPRequest_BackendWithProtocol(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("with-protocol"))
+	}))
+	defer backend.Close()
+
+	host := "proto.example.com"
+	a, clientConn := newConnectedAgent(t)
+	a.mu.Lock()
+	a.services[host] = &common.ServiceConfig{
+		ServiceConfig: types.ServiceConfig{
+			Hostname: host,
+			Backend:  backend.URL, // already has "http://" prefix
+			Protocol: "http",
+		},
+	}
+	a.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.handleHTTPRequest(&common.Message{
+			ID: "req-proto",
+			HTTP: &common.HTTPData{
+				Method:  "GET",
+				URL:     "/",
+				Headers: map[string][]string{"Host": {host}},
+			},
+		})
+	}()
+
+	_ = clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var resp common.Message
+	if err := json.NewDecoder(clientConn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	<-done
+	if resp.HTTP == nil || resp.HTTP.StatusCode != 200 {
+		t.Fatalf("expected 200, got %+v", resp.HTTP)
+	}
+	if string(resp.HTTP.Body) != "with-protocol" {
+		t.Fatalf("body=%q, want with-protocol", resp.HTTP.Body)
+	}
+}
+
+// TestHandleHTTPRequest_HTTPSBackend tests service.Protocol=="https", which
+// triggers the https URL-building branch and InsecureSkipVerify TLS transport.
+func TestHandleHTTPRequest_HTTPSBackend(t *testing.T) {
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("https-ok"))
+	}))
+	defer backend.Close()
+
+	host := "https-svc.example.com"
+	a, clientConn := newConnectedAgent(t)
+	a.mu.Lock()
+	a.services[host] = &common.ServiceConfig{
+		ServiceConfig: types.ServiceConfig{
+			Hostname: host,
+			Backend:  backend.Listener.Addr().String(), // no protocol prefix
+			Protocol: "https",                          // triggers protocol = "https" branch
+		},
+	}
+	a.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.handleHTTPRequest(&common.Message{
+			ID: "req-https",
+			HTTP: &common.HTTPData{
+				Method:  "GET",
+				URL:     "/",
+				Headers: map[string][]string{"Host": {host}},
+			},
+		})
+	}()
+
+	_ = clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var resp common.Message
+	if err := json.NewDecoder(clientConn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	<-done
+	if resp.HTTP == nil || resp.HTTP.StatusCode != 200 {
+		t.Fatalf("expected 200, got %+v", resp.HTTP)
+	}
+}
+
+// TestHandleHTTPRequest_WithXForwardedFor exercises the clientIP extraction
+// branch when X-Forwarded-For is present in the request.
+func TestHandleHTTPRequest_WithXForwardedFor(t *testing.T) {
+	var gotXRealIP string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotXRealIP = r.Header.Get("X-Real-IP")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("xff-ok"))
+	}))
+	defer backend.Close()
+
+	host := "xff.example.com"
+	a, clientConn := newConnectedAgent(t)
+	a.mu.Lock()
+	a.services[host] = &common.ServiceConfig{
+		ServiceConfig: types.ServiceConfig{
+			Hostname: host,
+			Backend:  backend.Listener.Addr().String(),
+			Protocol: "http",
+		},
+	}
+	a.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.handleHTTPRequest(&common.Message{
+			ID: "req-xff",
+			HTTP: &common.HTTPData{
+				Method: "GET",
+				URL:    "/",
+				Headers: map[string][]string{
+					"Host":            {host},
+					"X-Forwarded-For": {"10.0.0.1, 10.0.0.2"},
+				},
+			},
+		})
+	}()
+
+	_ = clientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var resp common.Message
+	if err := json.NewDecoder(clientConn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	<-done
+	if resp.HTTP == nil || resp.HTTP.StatusCode != 200 {
+		t.Fatalf("expected 200, got %+v", resp.HTTP)
+	}
+	if gotXRealIP != "10.0.0.1" {
+		t.Fatalf("X-Real-IP=%q, want 10.0.0.1", gotXRealIP)
+	}
+}
+
+// TestHandleHTTPRequest_StreamingResponse tests the streaming download path
+// inside handleHTTPRequest (content large enough to trigger ShouldStream).
+func TestHandleHTTPRequest_StreamingResponse(t *testing.T) {
+	const size = 2 * 1024 * 1024
+	body := bytes.Repeat([]byte("s"), size)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer backend.Close()
+
+	host := "big.example.com"
+	a, clientConn := newConnectedAgent(t)
+	a.mu.Lock()
+	a.services[host] = &common.ServiceConfig{
+		ServiceConfig: types.ServiceConfig{
+			Hostname: host,
+			Backend:  backend.Listener.Addr().String(),
+			Protocol: "http",
+		},
+	}
+	a.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.handleHTTPRequest(&common.Message{
+			ID: "req-stream",
+			HTTP: &common.HTTPData{
+				Method:  "GET",
+				URL:     "/",
+				Headers: map[string][]string{"Host": {host}},
+			},
+		})
+	}()
+
+	_ = clientConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	dec := json.NewDecoder(clientConn)
+	var gotLast bool
+	for !gotLast {
+		var msg common.Message
+		if err := dec.Decode(&msg); err != nil {
+			break
+		}
+		if msg.HTTP != nil && msg.HTTP.IsLastChunk {
+			gotLast = true
+		}
+		if msg.Type == "http_response" && msg.HTTP != nil && !msg.HTTP.IsStream {
+			gotLast = true
+		}
+	}
+	<-done
+	if !gotLast {
+		t.Fatal("expected streaming response to complete with IsLastChunk or http_response")
+	}
 }

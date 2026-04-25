@@ -3,6 +3,9 @@ package agent
 import (
 	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -703,3 +706,223 @@ func TestUpdateServicesFromConfig_UpdateService(t *testing.T) {
 	// exercise the comparison code path.
 	_ = a.updateServicesFromConfig(newConfig)
 }
+
+// --- Stop ---
+
+func TestStop_Basic(t *testing.T) {
+	a := newTestAgent()
+	a.Stop()
+	select {
+	case <-a.stopCh:
+		// closed as expected
+	default:
+		t.Fatal("stopCh should be closed after Stop()")
+	}
+}
+
+func TestStop_Idempotent(t *testing.T) {
+	a := newTestAgent()
+	a.Stop()
+	// Second call must not panic (select on already-closed channel).
+	a.Stop()
+}
+
+// --- runHealthCheck ---
+
+func TestRunHealthCheck_NilHealthCheck(t *testing.T) {
+	a := newTestAgent()
+	svc := &ServiceConfig{ID: "test"}
+	up := UpstreamConfig{Address: "127.0.0.1:9999"} // nil HealthCheck
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.runHealthCheck(svc, up)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runHealthCheck with nil HealthCheck should return immediately")
+	}
+}
+
+func TestRunHealthCheck_StopsOnSignal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse URL: %v", err)
+	}
+
+	a := newTestAgent()
+	svc := &ServiceConfig{ID: "svc-hc", Protocol: "http"}
+	up := UpstreamConfig{
+		Address: u.Host,
+		HealthCheck: &HealthCheckConfig{
+			Path:     "/",
+			Interval: 20 * time.Millisecond,
+			Timeout:  500 * time.Millisecond,
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.runHealthCheck(svc, up)
+	}()
+
+	time.Sleep(30 * time.Millisecond) // allow at least one tick
+	a.Stop()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runHealthCheck did not exit after Stop()")
+	}
+}
+
+// --- handleUploadStart early exit paths ---
+
+func TestHandleUploadStart_NilHTTP(t *testing.T) {
+	a := newTestAgent()
+	ch := make(chan *common.Message, 1)
+	// nil HTTP data → return early, cleanup channel map.
+	a.handleUploadStart(&common.Message{ID: "up-nil"}, ch)
+	a.uploadMu.Lock()
+	_, ok := a.uploadChans["up-nil"]
+	a.uploadMu.Unlock()
+	if ok {
+		t.Fatal("uploadChans entry should be removed after handleUploadStart")
+	}
+}
+
+func TestHandleUploadStart_NilConn(t *testing.T) {
+	a := newTestAgent()
+	ch := make(chan *common.Message, 1)
+	// nil conn → return early after warning log.
+	a.handleUploadStart(&common.Message{
+		ID:   "up-no-conn",
+		HTTP: &common.HTTPData{Headers: map[string][]string{"Host": {"example.com"}}},
+	}, ch)
+}
+
+func TestHandleUploadStart_MissingHost(t *testing.T) {
+	a, _ := newConnectedAgent(t)
+	ch := make(chan *common.Message, 1)
+	// Empty headers — missing Host → return early.
+	a.handleUploadStart(&common.Message{
+		ID:   "up-no-host",
+		HTTP: &common.HTTPData{Method: "POST", URL: "/up", Headers: map[string][]string{}},
+	}, ch)
+}
+
+func TestHandleUploadStart_NoServiceForHost(t *testing.T) {
+	a, _ := newConnectedAgent(t)
+	ch := make(chan *common.Message, 1)
+	// Host present but no service registered for it → return early.
+	a.handleUploadStart(&common.Message{
+		ID: "up-no-svc",
+		HTTP: &common.HTTPData{
+			Method:  "POST",
+			URL:     "/up",
+			Headers: map[string][]string{"Host": {"unknown.upload.example.com"}},
+		},
+	}, ch)
+}
+
+// --- convertToCommonEnhancedServiceConfig (full optional fields) ---
+
+func TestConvertToCommonEnhancedServiceConfig_FullConfig(t *testing.T) {
+	a := newTestAgent()
+	svc := &ServiceConfig{
+		ID: "full-svc",
+		TLS: &TLSConfig{
+			CertFile:   "/cert.crt",
+			KeyFile:    "/key.key",
+			CAFile:     "/ca.crt",
+			MinVersion: "1.3",
+			ClientAuth: "require",
+		},
+		Security: &SecurityConfig{
+			CORS: &CORSConfig{
+				Origins: []string{"https://example.com"},
+				Methods: []string{"GET", "POST"},
+				Headers: []string{"Authorization"},
+			},
+			Auth: &AuthConfig{
+				Type:   "bearer",
+				Config: map[string]interface{}{"key": "value"},
+			},
+		},
+		Monitoring: &MonitoringConfig{
+			MetricsEnabled: true,
+			LoggingFormat:  "json",
+			LoggingFields:  []string{"request_id"},
+		},
+		TrafficShaping: &TrafficShapingConfig{
+			UploadLimit:   "100mbps",
+			DownloadLimit: "200mbps",
+			PerIPLimit:    "10mbps",
+		},
+	}
+	result := a.convertToCommonEnhancedServiceConfig(svc, "full.example.com")
+
+	if result.TLS == nil || result.TLS.CertFile != "/cert.crt" {
+		t.Fatalf("TLS not populated: %+v", result.TLS)
+	}
+	if result.Security == nil || result.Security.CORS == nil {
+		t.Fatal("Security.CORS should be present")
+	}
+	if len(result.Security.CORS.Origins) != 1 || result.Security.CORS.Origins[0] != "https://example.com" {
+		t.Fatalf("CORS.Origins=%v", result.Security.CORS.Origins)
+	}
+	if result.Security.Auth == nil || result.Security.Auth.Type != "bearer" {
+		t.Fatalf("Security.Auth=%+v", result.Security.Auth)
+	}
+	if result.Monitoring == nil || !result.Monitoring.MetricsEnabled {
+		t.Fatal("Monitoring.MetricsEnabled should be true")
+	}
+	if result.Monitoring.Logging == nil || result.Monitoring.Logging.Format != "json" {
+		t.Fatalf("Monitoring.Logging=%+v", result.Monitoring.Logging)
+	}
+	if result.TrafficShaping == nil || result.TrafficShaping.UploadLimit != "100mbps" {
+		t.Fatalf("TrafficShaping=%+v", result.TrafficShaping)
+	}
+}
+
+// TestConvertToCommonEnhancedServiceConfig_SecurityAuthOnly covers Security
+// with Auth but no CORS (both Security != nil and CORS == nil paths).
+func TestConvertToCommonEnhancedServiceConfig_SecurityAuthOnly(t *testing.T) {
+	a := newTestAgent()
+	svc := &ServiceConfig{
+		Security: &SecurityConfig{
+			Auth: &AuthConfig{Type: "api_key"},
+		},
+	}
+	result := a.convertToCommonEnhancedServiceConfig(svc, "auth.example.com")
+	if result.Security == nil || result.Security.Auth == nil {
+		t.Fatal("Security.Auth should be present")
+	}
+	if result.Security.CORS != nil {
+		t.Fatal("Security.CORS should be nil when not configured")
+	}
+}
+
+// TestConvertToCommonEnhancedServiceConfig_MonitoringNoLogging covers the
+// Monitoring branch when LoggingFormat and LoggingFields are empty.
+func TestConvertToCommonEnhancedServiceConfig_MonitoringNoLogging(t *testing.T) {
+	a := newTestAgent()
+	svc := &ServiceConfig{
+		Monitoring: &MonitoringConfig{MetricsEnabled: true}, // no LoggingFormat
+	}
+	result := a.convertToCommonEnhancedServiceConfig(svc, "metrics.example.com")
+	if result.Monitoring == nil {
+		t.Fatal("Monitoring should be present")
+	}
+	if result.Monitoring.Logging != nil {
+		t.Fatal("Monitoring.Logging should be nil when format/fields are empty")
+	}
+}
+
