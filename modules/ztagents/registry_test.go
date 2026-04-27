@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/types"
@@ -62,6 +63,42 @@ func TestRegistryLookupByHost(t *testing.T) {
 		if ok && got.ID != tc.wantID {
 			t.Errorf("lookupByHost(%q): id=%s, want %s", tc.host, got.ID, tc.wantID)
 		}
+	}
+}
+
+func TestRegistry_LookupServiceByHost_ReturnsCopyWithTimeout(t *testing.T) {
+	r := newRegistry()
+	a := NewAgent("a1", nil)
+	a.Services["svc.example"] = &common.ServiceConfig{
+		ServiceConfig: types.ServiceConfig{
+			Hostname: "svc.example",
+			Backend:  "127.0.0.1:9000",
+			Timeout:  500 * time.Millisecond,
+		},
+	}
+	r.add(a)
+
+	gotAgent, gotSvc, ok := r.lookupServiceByHost("svc.example")
+	if !ok {
+		t.Fatal("lookupServiceByHost: not found")
+	}
+	if gotAgent.ID != "a1" {
+		t.Fatalf("agent ID = %q, want a1", gotAgent.ID)
+	}
+	if gotSvc.Timeout != 500*time.Millisecond {
+		t.Fatalf("timeout = %v, want 500ms", gotSvc.Timeout)
+	}
+
+	// Mutating the returned copy must not affect the registry's stored
+	// service config — guards against callers stomping shared state.
+	gotSvc.Timeout = 9 * time.Second
+	_, again, _ := r.lookupServiceByHost("svc.example")
+	if again.Timeout != 500*time.Millisecond {
+		t.Fatalf("registry mutated through returned copy: %v", again.Timeout)
+	}
+
+	if _, _, ok := r.lookupServiceByHost("missing.example"); ok {
+		t.Fatal("expected miss for unknown host")
 	}
 }
 

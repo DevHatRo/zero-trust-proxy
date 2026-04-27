@@ -11,17 +11,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/caddyserver/caddy/v2"
-
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
+	"github.com/devhatro/zero-trust-proxy/internal/serverconfig"
 )
 
 var log = logger.WithComponent("ztagents")
-
-func init() {
-	caddy.RegisterModule(App{})
-}
 
 type App struct {
 	ListenAddr string `json:"listen_addr,omitempty"`
@@ -44,14 +39,23 @@ type runtime struct {
 	wg          sync.WaitGroup
 }
 
-func (App) CaddyModule() caddy.ModuleInfo {
-	return caddy.ModuleInfo{
-		ID:  "zerotrust.agents",
-		New: func() caddy.Module { return new(App) },
+// New builds an App from the YAML config and provisions it.
+// Returned App is ready to Start().
+func New(cfg serverconfig.AgentsConfig) (*App, error) {
+	a := &App{
+		ListenAddr: cfg.Listen,
+		CertFile:   cfg.CertFile,
+		KeyFile:    cfg.KeyFile,
+		CAFile:     cfg.CAFile,
+		CheckAddr:  cfg.CheckAddr,
 	}
+	if err := a.provision(); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
-func (a *App) Provision(ctx caddy.Context) error {
+func (a *App) provision() error {
 	if a.ListenAddr == "" {
 		a.ListenAddr = ":8443"
 	}
@@ -120,6 +124,17 @@ func (a *App) Stop() error {
 
 func (a *App) LookupAgent(host string) (*Agent, bool) {
 	return a.rt.registry.lookupByHost(host)
+}
+
+// LookupService returns the agent serving host along with a copy of the
+// service's on-wire config (e.g. for per-service timeout overrides).
+func (a *App) LookupService(host string) (*Agent, *common.ServiceConfig, bool) {
+	return a.rt.registry.lookupServiceByHost(host)
+}
+
+// AgentCount returns the number of registered agents.
+func (a *App) AgentCount() int {
+	return len(a.rt.registry.snapshot())
 }
 
 // RegisterWebSocket tracks a hijacked client connection for a WebSocket session.
@@ -191,8 +206,3 @@ func categorizeAcceptError(err error) {
 	}
 }
 
-var (
-	_ caddy.App         = (*App)(nil)
-	_ caddy.Provisioner = (*App)(nil)
-	_ caddy.Validator   = (*App)(nil)
-)

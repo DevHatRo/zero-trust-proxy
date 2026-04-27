@@ -30,8 +30,11 @@ func TestHandler_DownloadStreaming(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "http://"+host+"/file.bin", nil)
 
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- h.handler.ServeHTTP(rr, req, nil) }()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		h.handler.ServeHTTP(rr, req)
+	}()
 
 	// Consume the http_request forwarded to the agent.
 	fwd := h.readForwardedRequest()
@@ -107,10 +110,7 @@ func TestHandler_DownloadStreaming(t *testing.T) {
 	})
 
 	select {
-	case err := <-serveDone:
-		if err != nil {
-			t.Fatalf("ServeHTTP: %v", err)
-		}
+	case <-serveDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("ServeHTTP did not return after last chunk")
 	}

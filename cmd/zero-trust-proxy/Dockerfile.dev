@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1.6
+#
+# Self-contained multi-stage build for the zero-trust-proxy server.
+# Useful for ad-hoc `docker build .` without first running
+# scripts/build.sh.
+#
+# For the production image (smaller, expects a prebuilt static binary)
+# use cmd/zero-trust-proxy/Dockerfile instead.
+
+FROM golang:1.25 AS builder
+WORKDIR /src
+
+# Layer cache: copy go.mod/go.sum first so dependency downloads are
+# cached across source changes.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+ARG VERSION=dev
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-w -s -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME}" \
+    -o /out/zero-trust-proxy \
+    ./cmd/zero-trust-proxy
+
+FROM debian:12-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/zero-trust-proxy /usr/local/bin/zero-trust-proxy
+RUN /usr/local/bin/zero-trust-proxy version
+
+VOLUME ["/config"]
+WORKDIR /config
+
+# :80, :443 — public ingress.
+# :8443     — mTLS listener for agent connections.
+# :2020     — optional check-domain endpoint.
+EXPOSE 80 443 8443 2020
+
+ENTRYPOINT ["/usr/local/bin/zero-trust-proxy"]
+CMD ["run", "--config", "/config/server.yaml"]

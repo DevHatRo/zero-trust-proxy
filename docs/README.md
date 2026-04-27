@@ -4,9 +4,11 @@
 
 | Document | Description |
 |----------|-------------|
+| [Server Migration Plan](server/replace-caddy-plan.md) | Historical record of replacing Caddy with the custom `zero-trust-proxy` server |
+| [Server Reference](server/README.md) | Server build, run, configuration |
 | [Agent Reference](agent/README.md) | Agent CLI options, config format, service definitions |
 | [Deployment: Docker](deployment/docker.md) | Building and running with Docker / Docker Compose |
-| [Hot Reload](hot-reload.md) | Agent config hot reload and Caddy config reload |
+| [Hot Reload](hot-reload.md) | Agent config hot reload and server reload |
 | [WebSocket Configuration](websocket-configuration.md) | WebSocket proxying setup |
 | [HTTP Redirect Features](http-redirect-features.md) | HTTP→HTTPS and redirect handling |
 | [Troubleshooting](troubleshooting.md) | Common issues and diagnostics |
@@ -14,11 +16,11 @@
 ## Architecture Overview
 
 ```
-Client → Caddy (:80/:443)
+Client → zero-trust-proxy (:80/:443)
            ├─ zerotrust_router handler   (modules/ztrouter)
            │    looks up agent by Host
            │    multiplexes request over mTLS
-           └─ zerotrust_agents app       (modules/ztagents)
+           └─ zerotrust_agents server    (modules/ztagents)
                 mTLS listener :8443
                 agent registry
                 WebSocket session tracking
@@ -28,7 +30,6 @@ Client → Caddy (:80/:443)
                Backend services
 ```
 
-The "server" is a **custom Caddy binary** (`cmd/caddy`). There is no separate server process — Caddy hosts both modules directly.
 
 ## Quick Navigation
 

@@ -1,6 +1,6 @@
 # Agent Reference
 
-The agent (`cmd/agent`) runs on-premises. It connects outbound to the Caddy server over mTLS and proxies requests to local backend services.
+The agent (`cmd/agent`) runs on-premises. It connects outbound to the `zero-trust-proxy` server over mTLS and proxies requests to local backend services.
 
 ## Command Line Options
 

@@ -191,32 +191,6 @@ func TestHandleMessageServiceUpdateMissingConfig(t *testing.T) {
 	}
 }
 
-func TestHandleMessageServiceAddEnhanced(t *testing.T) {
-	app, agent, client := newAppWithPipe(t)
-
-	go func() {
-		_ = app.handleAgentMessage(agent, &common.Message{
-			Type: "service_add",
-			ID:   "e1",
-			EnhancedService: &common.EnhancedServiceConfig{
-				Hostname: "enhanced.example.com",
-				Protocol: "https",
-			},
-		})
-	}()
-
-	resp := readMessage(t, client)
-	if resp.Type != "service_add_response" {
-		t.Fatalf("got %s, want service_add_response", resp.Type)
-	}
-	agent.mu.RLock()
-	_, exists := agent.Services["enhanced.example.com"]
-	agent.mu.RUnlock()
-	if !exists {
-		t.Fatal("enhanced service not registered in agent.Services")
-	}
-}
-
 func TestHandleMessageWebSocketFrame(t *testing.T) {
 	app, agent, _ := newAppWithWS(t)
 

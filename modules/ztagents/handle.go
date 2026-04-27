@@ -6,7 +6,6 @@ import (
 	"net"
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
-	"github.com/devhatro/zero-trust-proxy/internal/types"
 )
 
 func (a *App) handleAgentConnection(conn net.Conn) {
@@ -80,29 +79,13 @@ func (a *App) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		return agent.SendMessage(&common.Message{Type: "register_response", ID: msg.ID})
 
 	case "service_add":
-		if msg.Service == nil && msg.EnhancedService == nil {
+		if msg.Service == nil {
 			return fmt.Errorf("service config missing")
 		}
-		hostname := ""
-		if msg.Service != nil {
-			hostname = msg.Service.Hostname
-			agent.mu.Lock()
-			agent.Services[hostname] = msg.Service
-			agent.mu.Unlock()
-		} else {
-			hostname = msg.EnhancedService.Hostname
-			simple := &common.ServiceConfig{
-				ServiceConfig: types.ServiceConfig{
-					Hostname:  hostname,
-					Backend:   "127.0.0.1:9443",
-					Protocol:  msg.EnhancedService.Protocol,
-					WebSocket: msg.EnhancedService.WebSocket,
-				},
-			}
-			agent.mu.Lock()
-			agent.Services[hostname] = simple
-			agent.mu.Unlock()
-		}
+		hostname := msg.Service.Hostname
+		agent.mu.Lock()
+		agent.Services[hostname] = msg.Service
+		agent.mu.Unlock()
 		log.Info("ztagents: service_add host=%s agent=%s", hostname, agent.ID)
 		return agent.SendMessage(&common.Message{Type: "service_add_response", ID: msg.ID})
 

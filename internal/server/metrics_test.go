@@ -1,0 +1,75 @@
+package server
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestMetrics_TextFormat(t *testing.T) {
+	m := newMetrics()
+	m.observeRequest(http.MethodGet, http.StatusOK, 12*time.Millisecond)
+	m.observeRequest(http.MethodGet, http.StatusInternalServerError, 800*time.Millisecond)
+	m.observeRequest(http.MethodPost, http.StatusCreated, 50*time.Millisecond)
+	m.setAgentsRegistered(3)
+	m.setWebSocketSessions(2)
+
+	rec := httptest.NewRecorder()
+	m.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`ztp_requests_total{method="GET",status="2xx"} 1`,
+		`ztp_requests_total{method="GET",status="5xx"} 1`,
+		`ztp_requests_total{method="POST",status="2xx"} 1`,
+		`ztp_request_duration_seconds_bucket{le="0.05"} 2`,
+		`ztp_request_duration_seconds_bucket{le="+Inf"} 3`,
+		`ztp_request_duration_seconds_count 3`,
+		`ztp_agents_registered 3`,
+		`ztp_websocket_sessions 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("output missing %q\n--- body ---\n%s", want, body)
+		}
+	}
+}
+
+func TestMetricsMiddleware_RecordsStatus(t *testing.T) {
+	m := newMetrics()
+	h := metricsMiddleware(m, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	rec2 := httptest.NewRecorder()
+	m.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec2.Body.String()
+
+	if !strings.Contains(body, `ztp_requests_total{method="GET",status="4xx"} 1`) {
+		t.Fatalf("expected 4xx counter incremented:\n%s", body)
+	}
+}
+
+func TestStatusClass(t *testing.T) {
+	cases := map[int]string{
+		200: "2xx",
+		201: "2xx",
+		301: "3xx",
+		418: "4xx",
+		500: "5xx",
+		0:   "other",
+		999: "other",
+	}
+	for code, want := range cases {
+		if got := statusClass(code); got != want {
+			t.Errorf("statusClass(%d) = %q, want %q", code, got, want)
+		}
+	}
+}

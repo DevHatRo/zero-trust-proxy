@@ -1,286 +1,135 @@
-# HTTP Redirect and Protocol Binding Features
+# HTTP Redirect and Protocol Binding
 
-The 0Trust system now supports advanced HTTP to HTTPS redirect functionality and flexible protocol binding options for services.
+The server (`zero-trust-proxy`) and the agent service-config schema
+both contribute to how HTTP and HTTPS traffic is handled.
 
-## Features Overview
+## Server-side redirect
 
-### 1. HTTP to HTTPS Redirect
+The new server has a global HTTP→HTTPS redirector configured in
+`config/server.yaml`:
 
-Automatically redirect HTTP requests to HTTPS to ensure secure connections.
-
-**Configuration:**
 ```yaml
-services:
-  - id: "my-app"
-    hosts: ["app.example.com"]
-    protocol: "https"
-    http_redirect: true  # Enable HTTP to HTTPS redirect
-    upstreams:
-      - address: "localhost:3000"
+listen:
+  http: ":80"
+  https: ":443"
+  http_redirect: true
 ```
 
-**Behavior:**
-- HTTP requests to `http://app.example.com/path` → `https://app.example.com/path` (301 redirect)
-- HTTPS requests work normally
-- WebSocket upgrades are also redirected to secure connections
+Behavior:
 
-### 2. Protocol Binding
+- Any request hitting `:80` is answered with a 308 Permanent Redirect
+  to `https://{host}{uri}`.
+- `GET /.well-known/acme-challenge/*` is exempted and forwarded to the
+  ACME HTTP-01 handler when `tls.mode == acme` — see
+  `internal/server/redirect.go:newRedirectHandler`.
+- If you do not want a redirect, set `http_redirect: false`. The
+  `:80` listener then either serves the ACME challenge handler (acme
+  mode) or returns 400 ("HTTPS only").
 
-Control which protocols (HTTP/HTTPS) your services listen on.
+## Service-level fields (agent config)
 
-**Configuration Options:**
-```yaml
-listen_on: "both"   # Listen on both HTTP (80) and HTTPS (443) - DEFAULT
-listen_on: "https"  # Only listen on HTTPS (443)
-listen_on: "http"   # Only listen on HTTP (80)
-```
+The agent's per-service config still carries `http_redirect` and
+`listen_on` for backwards compatibility with older tooling. The
+authoritative redirect now lives at the server's listener; these
+service-level flags primarily inform the agent about how the upstream
+should be reached.
 
-## Configuration Examples
-
-### Example 1: Web Application with Redirect
 ```yaml
 services:
   - id: "web-app"
-    name: "Web Application"
-    hosts: ["app.example.com"]
+    hostname: "app.example.com"
     protocol: "https"
-    http_redirect: true    # Redirect HTTP → HTTPS
-    listen_on: "both"      # Accept both HTTP and HTTPS
+    websocket: true
     upstreams:
       - address: "localhost:3000"
         weight: 100
 ```
 
-**Result:**
-- HTTP requests redirected to HTTPS
-- HTTPS requests proxied to backend
-- Caddy listens on both ports 80 and 443
+| Field | Purpose |
+|-------|---------|
+| `protocol` | `http` / `https` / `ws` / `wss` — informs the agent's TLS-to-backend decision |
+| `websocket` | enables WebSocket upgrade handling for this service |
+| `http_redirect` | (legacy) used by previous Caddy adapter — no effect on the new server, which redirects globally |
+| `listen_on` | (legacy) used by previous Caddy adapter; the new server listens on whatever you configure under `listen:` |
 
-### Example 2: HTTPS-Only Secure API
+## Common patterns
+
+### HTTPS-only public app
+
 ```yaml
+# server: redirect everything HTTP → HTTPS
+listen:
+  http: ":80"
+  https: ":443"
+  http_redirect: true
+
+# agent: register the service
 services:
-  - id: "secure-api"
-    name: "Secure API"
-    hosts: ["api.example.com"]
+  - id: "web-app"
+    hostname: "app.example.com"
     protocol: "https"
-    listen_on: "https"     # HTTPS only - no HTTP listener
     upstreams:
-      - address: "localhost:8080"
+      - address: "localhost:3000"
 ```
 
-**Result:**
-- Only HTTPS connections accepted
-- HTTP requests get connection refused
-- Enhanced security for sensitive APIs
+### HTTPS-only — no HTTP listener at all
 
-### Example 3: HTTP-Only Internal Service
 ```yaml
-services:
-  - id: "internal-service"
-    name: "Internal Debug Service"
-    hosts: ["debug.internal.com"]
-    protocol: "http"
-    listen_on: "http"      # HTTP only
-    upstreams:
-      - address: "localhost:9090"
+listen:
+  http: ""
+  https: ":443"
+  http_redirect: false
 ```
 
-**Result:**
-- Only HTTP connections accepted
-- Useful for internal/debugging services
-- No TLS overhead for internal communication
+Drops port 80 entirely. Clients on HTTP get connection-refused.
 
-### Example 4: WebSocket with Redirect
+### HTTP-only internal service
+
 ```yaml
-services:
-  - id: "websocket-app"
-    name: "WebSocket Application"
-    hosts: ["ws.example.com"]
-    protocol: "https"
-    websocket: true
-    http_redirect: true    # Redirect to secure WebSocket
-    listen_on: "both"
-    upstreams:
-      - address: "localhost:4000"
+listen:
+  http: ":80"
+  https: ""
+  http_redirect: false
+tls:
+  mode: none
 ```
 
-**Result:**
-- HTTP WebSocket connections redirected to HTTPS
-- Secure WebSocket (WSS) connections work normally
-- Maintains WebSocket compatibility
+Useful for local dev or air-gapped clusters where TLS is terminated
+elsewhere. Pair with `tls.mode: none` so no certificates are required.
 
-## Default Behavior
+## Implementation reference
 
-If not specified:
-- `http_redirect`: `true` for services with `listen_on: "both"` (security-first default)
-- `http_redirect`: `false` for services with `listen_on: "http"` or `listen_on: "https"`
-- `listen_on`: `"both"` (listen on both HTTP and HTTPS)
-
-## Use Cases
-
-### Security Enhancement
-- **Force HTTPS**: Use `http_redirect: true` to ensure all traffic is encrypted
-- **API Security**: Use `listen_on: "https"` for sensitive APIs that should never accept HTTP
-
-### Performance Optimization
-- **Internal Services**: Use `listen_on: "http"` for internal services to reduce TLS overhead
-- **Development**: Use HTTP-only for local development environments
-
-### Compliance
-- **Regulatory Requirements**: Some industries require HTTPS-only access
-- **Security Policies**: Corporate policies may mandate encrypted connections
-
-### Mixed Environments
-- **Public Services**: Use redirect for public-facing applications
-- **Admin Interfaces**: Use HTTPS-only for administrative interfaces
-- **Health Checks**: Use HTTP-only for simple health check endpoints
-
-## Technical Implementation
-
-### Caddy Configuration
-The system automatically configures Caddy with:
-
-1. **Listen Ports**: Dynamic based on service `listen_on` settings
-2. **Redirect Routes**: Automatic HTTP → HTTPS redirects (301 status)
-3. **Protocol Routing**: Separate route handling for HTTP and HTTPS
-4. **WebSocket Support**: Maintains compatibility with secure WebSocket upgrades
-
-### Example Generated Caddy Config
-```json
-{
-  "apps": {
-    "http": {
-      "servers": {
-        "srv0": {
-          "listen": [":80", ":443"],
-          "routes": [
-            {
-              "match": [{"host": ["app.example.com"], "scheme": ["http"]}],
-              "handle": [{
-                "handler": "static_response",
-                "status": 301,
-                "location": ["https://{http.request.host}{http.request.uri}"]
-              }]
-            },
-            {
-              "match": [{"host": ["app.example.com"]}],
-              "handle": [{"handler": "reverse_proxy", "upstreams": [...]}]
-            }
-          ]
-        }
-      }
-    }
-  }
-}
-```
-
-### Security Considerations
-
-1. **Certificate Management**: Ensure valid TLS certificates for HTTPS-enabled services
-2. **Mixed Content**: Avoid HTTP resources on HTTPS pages
-3. **HSTS Headers**: Consider adding HTTP Strict Transport Security headers
-4. **Redirect Loops**: Don't use `http_redirect: true` with `listen_on: "http"`
-
-### Monitoring and Logging
-
-The system provides detailed logging for:
-- Service configuration: HTTP redirect and protocol binding settings
-- Caddy configuration: Listen ports and route generation
-- Redirect activity: HTTP → HTTPS redirections
-- Connection attempts: Failed connections to disabled protocols
-
-### Hot Reload Support
-
-Both `http_redirect` and `listen_on` settings support hot reload:
-- Configuration changes applied without service restart
-- Caddy automatically reconfigured
-- Active connections maintained during updates
+- `internal/server/redirect.go` — the redirect handler.
+- `internal/server/server.go:Start` — wires `:80` and `:443` listeners
+  to the right handler based on `http_redirect` and ACME mode.
+- `internal/server/tls.go:buildTLSConfig` — produces the optional
+  `acmeHandler` that the redirector forwards challenges to.
+- `modules/ztrouter/handler.go` — the `:443` handler that does the
+  Host → agent lookup and proxies the request.
 
 ## Troubleshooting
 
-### Common Issues
+- **Certificate errors** on `:443` — verify the cert paths in
+  `tls.manual` / `tls.sni`, or that the ACME `HostPolicy` accepts the
+  hostname (a host with no registered agent is rejected — see
+  `internal/server/tls.go`).
+- **Port conflicts** — `:80` / `:443` need either root or
+  `CAP_NET_BIND_SERVICE`. Use `--http :8080 --https :8443` for local
+  dev.
+- **Redirect loops** — do not put a layer-4 proxy in front of `:80`
+  that already strips TLS and forwards as HTTPS.
+- **WebSocket upgrade fails** — confirm the service has `websocket:
+  true`. The hijack path requires HTTP/1.1 (Go's stdlib HTTP/2 server
+  does not expose `Hijacker`); browsers downgrade automatically for
+  the `Upgrade` request.
 
-1. **Certificate Errors**: Ensure valid TLS certificates when using HTTPS
-2. **Port Conflicts**: Check that ports 80/443 are available
-3. **Firewall Rules**: Ensure firewall allows configured ports
-4. **DNS Configuration**: Verify DNS points to correct server
+## Migration from the legacy Caddy server
 
-### Debug Commands
+| Legacy Caddyfile | New `config/server.yaml` |
+|------------------|--------------------------|
+| `:80 { redir https://{host}{uri} 308 }` | `listen.http: ":80"` + `listen.http_redirect: true` |
+| `tls { on_demand }` | `tls.mode: acme` + `tls.acme.storage_dir` |
+| `tls /etc/cert.pem /etc/key.pem` | `tls.mode: manual` + `tls.manual` block |
+| `zerotrust_router { request_timeout 2m }` | `router.request_timeout: 2m` |
 
-```bash
-# Check Caddy configuration
-curl -X GET http://localhost:2019/config/
-
-# Test HTTP redirect
-curl -I http://app.example.com/
-
-# Test HTTPS access
-curl -I https://app.example.com/
-
-# Check listening ports
-netstat -tlnp | grep -E ':(80|443)'
-```
-
-### Log Analysis
-
-Look for these log entries:
-```
-✅ Enhanced service app.example.com added to Caddy successfully with 1 upstreams, HTTP redirect: enabled, Listen on: both
-🔧 Caddy listen configuration: [:80 :443] (HTTP: true, HTTPS: true)
-🔀 Added HTTP to HTTPS redirect for: app.example.com
-```
-
-## Migration Guide
-
-### From Simple Configuration
-```yaml
-# Before
-services:
-  - id: "my-app"
-    hosts: ["app.example.com"]
-    protocol: "https"
-    upstreams:
-      - address: "localhost:3000"
-
-# After (with new features - automatic defaults applied)
-services:
-  - id: "my-app"
-    hosts: ["app.example.com"]
-    protocol: "https"
-    # http_redirect: true    # Automatically applied by default
-    # listen_on: "both"      # Automatically applied by default
-    upstreams:
-      - address: "localhost:3000"
-```
-
-### Important Default Change
-**⚠️ SECURITY ENHANCEMENT**: Starting with this version, `http_redirect` defaults to `true` for services that listen on both HTTP and HTTPS (`listen_on: "both"`).
-
-This means existing configurations will now automatically redirect HTTP to HTTPS for enhanced security.
-
-### Disable HTTP Redirect (if needed)
-If you need to disable the redirect for a specific service:
-```yaml
-services:
-  - id: "my-app"
-    hosts: ["app.example.com"]
-    protocol: "https"
-    http_redirect: false   # Explicitly disable redirect
-    listen_on: "both"
-    upstreams:
-      - address: "localhost:3000"
-```
-
-### HTTP-Only Services (no change)
-Services that only listen on HTTP are unaffected:
-```yaml
-services:
-  - id: "internal-service"
-    hosts: ["debug.internal.com"]
-    protocol: "http"
-    listen_on: "http"      # http_redirect automatically stays false
-    upstreams:
-      - address: "localhost:9090"
-```
-
-The new fields are backward compatible, but the security-first defaults may change behavior for existing configurations that rely on HTTP access without redirect. 
+See `docs/server/replace-caddy-plan.md` for the full migration plan.

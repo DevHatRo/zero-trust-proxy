@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/caddyserver/caddy/v2"
-
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/types"
 	"github.com/devhatro/zero-trust-proxy/modules/ztagents"
@@ -81,8 +79,11 @@ func TestHandler_WebSocketUpgradeAndFrames(t *testing.T) {
 	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
 	req.Header.Set("Sec-WebSocket-Version", "13")
 
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- h.handler.ServeHTTP(rr, req, nil) }()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		h.handler.ServeHTTP(rr, req)
+	}()
 
 	// Read http_request from the agent side — confirm IsWebSocket=true.
 	fwd := h.readForwardedRequest()
@@ -146,10 +147,7 @@ func TestHandler_WebSocketUpgradeAndFrames(t *testing.T) {
 	}
 
 	select {
-	case err := <-serveDone:
-		if err != nil {
-			t.Fatalf("ServeHTTP: %v", err)
-		}
+	case <-serveDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeHTTP did not return after client close")
 	}
@@ -270,5 +268,3 @@ func TestIsWebSocketUpgrade_MissingConnectionHeader(t *testing.T) {
 	}
 }
 
-// Test helper we need — expose one more hook. See testhelper.go update below.
-var _ = caddy.Duration(0) // keep import used

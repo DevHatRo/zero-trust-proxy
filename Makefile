@@ -5,15 +5,18 @@ GOSEC_FLAGS = -quiet -exclude-dir=config -exclude-dir=logs
 # certs. The agent is the TLS termination point for the external edge.
 GOSEC_CI_FLAGS = $(GOSEC_FLAGS) -severity=high -exclude=G402
 
-.PHONY: build-caddy build-agent build test sec sec-full
+.PHONY: build-server build-agent build-certgen build test sec sec-full
 
-build-caddy:
-	go build -o bin/caddy ./cmd/caddy
+build-server:
+	go build -o bin/zero-trust-proxy ./cmd/zero-trust-proxy
 
 build-agent:
 	go build -o bin/agent ./cmd/agent
 
-build: build-caddy build-agent
+build-certgen:
+	go build -o bin/certgen ./cmd/certgen
+
+build: build-server build-agent build-certgen
 
 test:
 	go test ./...

@@ -9,136 +9,35 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/types"
 )
 
-// ServiceConfig represents a service configuration (kept for backward compatibility)
-// Note: This now embeds types.ServiceConfig for consistency
+// ServiceConfig represents a service configuration over the wire.
+// Wraps types.ServiceConfig so the protocol struct lives next to the
+// other JSON-encoded message types.
 type ServiceConfig struct {
 	types.ServiceConfig
 }
 
-// NewServiceConfig creates a new ServiceConfig from types.ServiceConfig
+// NewServiceConfig wraps a types.ServiceConfig.
 func NewServiceConfig(typesConfig *types.ServiceConfig) *ServiceConfig {
-	return &ServiceConfig{
-		ServiceConfig: *typesConfig,
-	}
+	return &ServiceConfig{ServiceConfig: *typesConfig}
 }
 
-// ToTypes converts common.ServiceConfig to types.ServiceConfig
+// ToTypes returns the underlying types.ServiceConfig.
 func (sc *ServiceConfig) ToTypes() *types.ServiceConfig {
 	return &sc.ServiceConfig
 }
 
-// EnhancedServiceConfig represents an enhanced service configuration
-// This is a forward declaration to avoid circular imports
-type EnhancedServiceConfig struct {
-	ID             string                `json:"id"`
-	Name           string                `json:"name,omitempty"`
-	Hostname       string                `json:"hostname"`
-	Protocol       string                `json:"protocol"`
-	WebSocket      bool                  `json:"websocket,omitempty"`     // Enable WebSocket support
-	HTTPRedirect   bool                  `json:"http_redirect,omitempty"` // Enable HTTP to HTTPS redirect
-	ListenOn       string                `json:"listen_on,omitempty"`     // Protocol binding: "http", "https", "both"
-	Upstreams      []UpstreamConfig      `json:"upstreams"`
-	LoadBalancing  *LoadBalancingConfig  `json:"load_balancing,omitempty"`
-	Routes         []RouteConfig         `json:"routes,omitempty"`
-	TLS            *TLSConfig            `json:"tls,omitempty"`
-	Security       *SecurityConfig       `json:"security,omitempty"`
-	Monitoring     *MonitoringConfig     `json:"monitoring,omitempty"`
-	TrafficShaping *TrafficShapingConfig `json:"traffic_shaping,omitempty"`
-}
-
-// Supporting structs for enhanced configuration
-type UpstreamConfig struct {
-	Address     string             `json:"address"`
-	Weight      int                `json:"weight,omitempty"`
-	HealthCheck *HealthCheckConfig `json:"health_check,omitempty"`
-}
-
-type HealthCheckConfig struct {
-	Path     string            `json:"path,omitempty"`
-	Interval string            `json:"interval,omitempty"`
-	Timeout  string            `json:"timeout,omitempty"`
-	Method   string            `json:"method,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty"`
-}
-
-type LoadBalancingConfig struct {
-	Policy              string `json:"policy"`
-	HealthCheckRequired bool   `json:"health_check_required,omitempty"`
-	SessionAffinity     bool   `json:"session_affinity,omitempty"`
-	AffinityDuration    string `json:"affinity_duration,omitempty"`
-}
-
-type RouteConfig struct {
-	Match  MatchConfig        `json:"match"`
-	Handle []MiddlewareConfig `json:"handle"`
-}
-
-type MatchConfig struct {
-	Path    string              `json:"path,omitempty"`
-	Method  string              `json:"method,omitempty"`
-	Headers map[string][]string `json:"headers,omitempty"`
-	Query   map[string]string   `json:"query,omitempty"`
-}
-
-type MiddlewareConfig struct {
-	Type   string                 `json:"type"`
-	Config map[string]interface{} `json:"config,omitempty"`
-}
-
-type TLSConfig struct {
-	CertFile     string   `json:"cert_file,omitempty"`
-	KeyFile      string   `json:"key_file,omitempty"`
-	CAFile       string   `json:"ca_file,omitempty"`
-	MinVersion   string   `json:"min_version,omitempty"`
-	Ciphers      []string `json:"ciphers,omitempty"`
-	ClientAuth   string   `json:"client_auth,omitempty"`
-	ClientCAFile string   `json:"client_ca_file,omitempty"`
-}
-
-type SecurityConfig struct {
-	CORS *CORSConfig `json:"cors,omitempty"`
-	Auth *AuthConfig `json:"auth,omitempty"`
-}
-
-type CORSConfig struct {
-	Origins []string `json:"origins,omitempty"`
-	Methods []string `json:"methods,omitempty"`
-	Headers []string `json:"headers,omitempty"`
-}
-
-type AuthConfig struct {
-	Type   string                 `json:"type"`
-	Config map[string]interface{} `json:"config,omitempty"`
-}
-
-type MonitoringConfig struct {
-	MetricsEnabled bool           `json:"metrics_enabled,omitempty"`
-	Logging        *LoggingConfig `json:"logging,omitempty"`
-}
-
-type LoggingConfig struct {
-	Level  string   `json:"level,omitempty"`
-	Format string   `json:"format,omitempty"`
-	Fields []string `json:"fields,omitempty"`
-}
-
-type TrafficShapingConfig struct {
-	UploadLimit   string `json:"upload_limit,omitempty"`
-	DownloadLimit string `json:"download_limit,omitempty"`
-	PerIPLimit    string `json:"per_ip_limit,omitempty"`
-}
-
-// Message represents a message sent between agent and server
+// Message is the on-wire envelope for every agent ⟷ server message.
+// Each message carries a UUID `id` that multiplexes concurrent
+// requests over the single agent connection.
 type Message struct {
-	Type            string                 `json:"type"`
-	ID              string                 `json:"id,omitempty"`
-	Service         *ServiceConfig         `json:"service,omitempty"`          // Simple service config (backward compatibility)
-	EnhancedService *EnhancedServiceConfig `json:"enhanced_service,omitempty"` // Enhanced service config
-	Error           string                 `json:"error,omitempty"`
-	HTTP            *HTTPData              `json:"http,omitempty"`
+	Type    string         `json:"type"`
+	ID      string         `json:"id,omitempty"`
+	Service *ServiceConfig `json:"service,omitempty"`
+	Error   string         `json:"error,omitempty"`
+	HTTP    *HTTPData      `json:"http,omitempty"`
 }
 
-// HTTPData represents HTTP request/response data
+// HTTPData represents HTTP request/response data.
 type HTTPData struct {
 	Method        string              `json:"method"`
 	URL           string              `json:"url"`
@@ -154,7 +53,7 @@ type HTTPData struct {
 	IsLastChunk   bool                `json:"is_last_chunk,omitempty"`
 }
 
-// StreamConfig represents configuration for streaming data
+// StreamConfig represents configuration for streaming data.
 type StreamConfig struct {
 	ChunkSize   int   `json:"chunk_size"`
 	TotalSize   int64 `json:"total_size"`
@@ -162,7 +61,7 @@ type StreamConfig struct {
 	IsLastChunk bool  `json:"is_last_chunk"`
 }
 
-// ReadMessage reads a message from a connection
+// ReadMessage reads a message from a connection.
 func ReadMessage(conn net.Conn, msg *Message) error {
 	decoder := json.NewDecoder(conn)
 	if err := decoder.Decode(msg); err != nil {
@@ -174,7 +73,7 @@ func ReadMessage(conn net.Conn, msg *Message) error {
 	return nil
 }
 
-// WriteMessage writes a message to a connection
+// WriteMessage writes a message to a connection.
 func WriteMessage(conn net.Conn, msg *Message) error {
 	encoder := json.NewEncoder(conn)
 	if err := encoder.Encode(msg); err != nil {

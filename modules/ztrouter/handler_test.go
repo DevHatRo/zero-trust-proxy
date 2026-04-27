@@ -12,8 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/caddyserver/caddy/v2"
-
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/types"
 	"github.com/devhatro/zero-trust-proxy/modules/ztagents"
@@ -43,7 +41,7 @@ func newHarness(t *testing.T, host string) *testHarness {
 	}
 	app.AddAgent(agent)
 
-	h := &Handler{RequestTimeout: caddy.Duration(2 * time.Second)}
+	h := &Handler{RequestTimeout: 2 * time.Second}
 	h.SetApp(app)
 
 	return &testHarness{t: t, app: app, agent: agent, client: client, handler: h}
@@ -60,14 +58,24 @@ func (h *testHarness) readForwardedRequest() *common.Message {
 	return &msg
 }
 
+// runServeHTTP runs ServeHTTP on a goroutine, returning a channel that
+// closes when it returns.
+func runServeHTTP(handler *Handler, w http.ResponseWriter, r *http.Request) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.ServeHTTP(w, r)
+	}()
+	return done
+}
+
 func TestHandler_HappyPath(t *testing.T) {
 	h := newHarness(t, "app.example.com")
 
 	req := httptest.NewRequest(http.MethodGet, "http://app.example.com/hello?x=1", nil)
 	rr := httptest.NewRecorder()
 
-	done := make(chan error, 1)
-	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+	done := runServeHTTP(h.handler, rr, req)
 
 	fwd := h.readForwardedRequest()
 	if fwd.Type != "http_request" {
@@ -77,7 +85,6 @@ func TestHandler_HappyPath(t *testing.T) {
 		t.Fatalf("got URL %+v, want /hello?x=1", fwd.HTTP)
 	}
 
-	// Dispatch synthetic agent response via the registered handler.
 	cb, ok := h.agent.TakeResponseHandler(fwd.ID)
 	if !ok {
 		t.Fatalf("no response handler registered for id %s", fwd.ID)
@@ -92,9 +99,7 @@ func TestHandler_HappyPath(t *testing.T) {
 		},
 	})
 
-	if err := <-done; err != nil {
-		t.Fatalf("ServeHTTP: %v", err)
-	}
+	<-done
 	if rr.Code != 201 {
 		t.Fatalf("status=%d, want 201", rr.Code)
 	}
@@ -112,9 +117,7 @@ func TestHandler_NoAgentReturns503(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://unknown.example.com/", nil)
 	rr := httptest.NewRecorder()
 
-	if err := h.handler.ServeHTTP(rr, req, nil); err != nil {
-		t.Fatalf("ServeHTTP: %v", err)
-	}
+	h.handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d, want 503", rr.Code)
 	}
@@ -122,20 +125,60 @@ func TestHandler_NoAgentReturns503(t *testing.T) {
 
 func TestHandler_TimeoutReturns504(t *testing.T) {
 	h := newHarness(t, "slow.example.com")
-	h.handler.RequestTimeout = caddy.Duration(100 * time.Millisecond)
+	h.handler.RequestTimeout = 100 * time.Millisecond
 
 	req := httptest.NewRequest(http.MethodGet, "http://slow.example.com/", nil)
 	rr := httptest.NewRecorder()
 
-	done := make(chan error, 1)
-	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+	done := runServeHTTP(h.handler, rr, req)
 
-	// Drain the forwarded request so the write to the pipe doesn't block forever.
 	_ = h.readForwardedRequest()
 
-	if err := <-done; err != nil {
-		t.Fatalf("ServeHTTP: %v", err)
+	<-done
+	if rr.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d, want 504", rr.Code)
 	}
+}
+
+// TestHandler_PerServiceTimeout_Overrides verifies that a non-zero
+// services[].timeout shortens the per-request deadline below the
+// global router default.
+func TestHandler_PerServiceTimeout_Overrides(t *testing.T) {
+	h := newHarness(t, "fast.example.com")
+	h.handler.RequestTimeout = 10 * time.Second
+	h.agent.Services["fast.example.com"].Timeout = 80 * time.Millisecond
+
+	req := httptest.NewRequest(http.MethodGet, "http://fast.example.com/", nil)
+	rr := httptest.NewRecorder()
+
+	start := time.Now()
+	done := runServeHTTP(h.handler, rr, req)
+	_ = h.readForwardedRequest()
+	<-done
+	elapsed := time.Since(start)
+
+	if rr.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d, want 504", rr.Code)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("elapsed=%v exceeds per-service timeout — fell back to router default", elapsed)
+	}
+}
+
+// TestHandler_PerServiceTimeout_ZeroFallsBack verifies that an unset
+// (zero) per-service timeout uses the router default.
+func TestHandler_PerServiceTimeout_ZeroFallsBack(t *testing.T) {
+	h := newHarness(t, "default.example.com")
+	h.handler.RequestTimeout = 80 * time.Millisecond
+	// Service has no Timeout set (zero value).
+
+	req := httptest.NewRequest(http.MethodGet, "http://default.example.com/", nil)
+	rr := httptest.NewRecorder()
+
+	done := runServeHTTP(h.handler, rr, req)
+	_ = h.readForwardedRequest()
+	<-done
+
 	if rr.Code != http.StatusGatewayTimeout {
 		t.Fatalf("status=%d, want 504", rr.Code)
 	}
@@ -151,11 +194,8 @@ func TestHandler_UploadStreaming(t *testing.T) {
 	req.ContentLength = int64(totalSize)
 	rr := httptest.NewRecorder()
 
-	done := make(chan error, 1)
-	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+	done := runServeHTTP(h.handler, rr, req)
 
-	// Drain chunks until we've reassembled the full upload. The first message
-	// must be http_upload_start; subsequent messages are http_upload_chunk.
 	_ = h.client.SetReadDeadline(time.Now().Add(5 * time.Second))
 	dec := json.NewDecoder(h.client)
 
@@ -216,9 +256,7 @@ func TestHandler_UploadStreaming(t *testing.T) {
 		},
 	})
 
-	if err := <-done; err != nil {
-		t.Fatalf("ServeHTTP: %v", err)
-	}
+	<-done
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status=%d want 201", rr.Code)
 	}
@@ -234,9 +272,7 @@ func TestHandler_MissingHost(t *testing.T) {
 	req.Host = ""
 	rr := httptest.NewRecorder()
 
-	if err := h.handler.ServeHTTP(rr, req, nil); err != nil {
-		t.Fatalf("ServeHTTP: %v", err)
-	}
+	h.handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", rr.Code)
 	}
@@ -247,23 +283,19 @@ func TestHandler_MissingHost(t *testing.T) {
 
 func TestHandler_ContextCancelled(t *testing.T) {
 	h := newHarness(t, "ctx.example.com")
-	h.handler.RequestTimeout = caddy.Duration(5 * time.Second)
+	h.handler.RequestTimeout = 5 * time.Second
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "http://ctx.example.com/", nil).WithContext(ctx)
 	rr := httptest.NewRecorder()
 
-	done := make(chan error, 1)
-	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+	done := runServeHTTP(h.handler, rr, req)
 
 	_ = h.readForwardedRequest()
 	cancel()
 
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("ServeHTTP: %v", err)
-		}
+	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeHTTP did not return after context cancel")
 	}
@@ -314,8 +346,7 @@ func TestHandler_AgentErrorResponse(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://err.example.com/", nil)
 	rr := httptest.NewRecorder()
 
-	done := make(chan error, 1)
-	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+	done := runServeHTTP(h.handler, rr, req)
 
 	fwd := h.readForwardedRequest()
 	cb, ok := h.agent.TakeResponseHandler(fwd.ID)
@@ -324,35 +355,26 @@ func TestHandler_AgentErrorResponse(t *testing.T) {
 	}
 	cb(&common.Message{ID: fwd.ID, Error: "upstream down"})
 
-	if err := <-done; err != nil {
-		t.Fatalf("ServeHTTP: %v", err)
-	}
+	<-done
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status=%d, want 502", rr.Code)
 	}
 }
 
-// TestHandler_Timeout verifies the timeout path in ServeHTTP.
 func TestHandler_Timeout(t *testing.T) {
 	const host = "timeout.example.com"
 	h := newHarness(t, host)
-	h.handler.RequestTimeout = caddy.Duration(50 * time.Millisecond)
+	h.handler.RequestTimeout = 50 * time.Millisecond
 
 	req := httptest.NewRequest(http.MethodGet, "http://"+host+"/slow", nil)
 	rr := httptest.NewRecorder()
 
-	// Run ServeHTTP — agent never replies, so timeout fires.
-	done := make(chan error, 1)
-	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+	done := runServeHTTP(h.handler, rr, req)
 
-	// Drain the forwarded request but don't send a response.
 	_ = h.readForwardedRequest()
 
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("ServeHTTP: %v", err)
-		}
+	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeHTTP did not return after timeout")
 	}
@@ -362,25 +384,19 @@ func TestHandler_Timeout(t *testing.T) {
 	}
 }
 
-// TestHandler_BodyReadError exercises the body-read error path.
 func TestHandler_BodyReadError(t *testing.T) {
 	const host = "bodyerr.example.com"
 	h := newHarness(t, host)
 
-	// errReader always returns an error.
 	errReader := &alwaysErrReader{}
 	req := httptest.NewRequest(http.MethodPost, "http://"+host+"/upload", errReader)
-	req.ContentLength = 10 // non-zero so we don't take the stream-upload path
+	req.ContentLength = 10
 	rr := httptest.NewRecorder()
 
-	done := make(chan error, 1)
-	go func() { done <- h.handler.ServeHTTP(rr, req, nil) }()
+	done := runServeHTTP(h.handler, rr, req)
 
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("ServeHTTP: %v", err)
-		}
+	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeHTTP did not return")
 	}
@@ -392,5 +408,3 @@ func TestHandler_BodyReadError(t *testing.T) {
 type alwaysErrReader struct{}
 
 func (r *alwaysErrReader) Read(p []byte) (int, error) { return 0, io.ErrUnexpectedEOF }
-
-var _ = (*ztagents.App)(nil) // keep import

@@ -183,14 +183,19 @@ func (fw *FileWatcher) watchLoop() {
 	}
 }
 
-// scheduleReload schedules a configuration reload with debouncing
+// scheduleReload schedules a configuration reload with debouncing.
+// Reads and writes to debounceTimer happen under fw.mu (Stop also
+// touches it, from a different goroutine).
 func (fw *FileWatcher) scheduleReload() {
-	// Stop existing timer if running
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+
+	if !fw.running {
+		return
+	}
 	if fw.debounceTimer != nil {
 		fw.debounceTimer.Stop()
 	}
-
-	// Start new timer
 	fw.debounceTimer = time.AfterFunc(fw.debounceDelay, func() {
 		if err := fw.performReload(); err != nil {
 			log.Error("❌ Failed to reload config for %s: %v", fw.reloader.GetComponentName(), err)

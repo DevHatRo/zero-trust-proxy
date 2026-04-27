@@ -48,16 +48,18 @@ type LoggingConfig struct {
 	Output string `yaml:"output"` // Output destination (stdout, stderr, or file path)
 }
 
-// ServiceConfig represents an enhanced service configuration
+// ServiceConfig represents an enhanced service configuration. The
+// global `http_redirect` lives at the server level
+// (`config/server.yaml`); per-service redirect/listen-on flags from
+// older versions are no-ops and have been removed.
 type ServiceConfig struct {
 	ID             string                `yaml:"id" json:"id"`
 	Name           string                `yaml:"name" json:"name"`
 	Hostname       string                `yaml:"hostname,omitempty" json:"hostname,omitempty"` // Backward compatibility - single hostname
 	Hosts          []string              `yaml:"hosts,omitempty" json:"hosts,omitempty"`       // New: multiple hostnames support
 	Protocol       string                `yaml:"protocol" json:"protocol"`
-	WebSocket      bool                  `yaml:"websocket,omitempty" json:"websocket,omitempty"`         // Enable WebSocket support
-	HTTPRedirect   bool                  `yaml:"http_redirect,omitempty" json:"http_redirect,omitempty"` // Enable HTTP to HTTPS redirect
-	ListenOn       string                `yaml:"listen_on,omitempty" json:"listen_on,omitempty"`         // Protocol binding: "http", "https", "both" (default: "both")
+	WebSocket      bool                  `yaml:"websocket,omitempty" json:"websocket,omitempty"`
+	Timeout        time.Duration         `yaml:"timeout,omitempty" json:"timeout,omitempty"` // Per-service request timeout override; 0 = use router default
 	Upstreams      []UpstreamConfig      `yaml:"upstreams" json:"upstreams"`
 	LoadBalancing  *LoadBalancingConfig  `yaml:"load_balancing,omitempty" json:"load_balancing,omitempty"`
 	Routes         []RouteConfig         `yaml:"routes,omitempty" json:"routes,omitempty"`
@@ -312,37 +314,13 @@ func validateAndApplyDefaults(config *AgentConfig) error {
 			return fmt.Errorf("services[%d] must have at least one upstream", i)
 		}
 
+		if service.Timeout < 0 {
+			return fmt.Errorf("services[%d].timeout must be >= 0 (got %s)", i, service.Timeout)
+		}
+
 		// Apply defaults
 		if service.Protocol == "" {
 			config.Services[i].Protocol = "http"
-		}
-
-		// Apply default for ListenOn first
-		if service.ListenOn == "" {
-			config.Services[i].ListenOn = "both" // Default to listening on both HTTP and HTTPS
-		}
-
-		// Apply default for HTTPRedirect (security-first: redirect HTTP to HTTPS by default)
-		// Only enable redirect if the service listens on both protocols or HTTPS-only with fallback
-		if config.Services[i].ListenOn == "both" {
-			config.Services[i].HTTPRedirect = true // Default to redirecting HTTP to HTTPS for security
-		}
-		// Note: For "http" only services, HTTPRedirect stays false (no HTTPS to redirect to)
-		// Note: For "https" only services, HTTPRedirect doesn't matter (no HTTP listener)
-
-		// Validate ListenOn values
-		validListenOn := map[string]bool{
-			"http":  true,
-			"https": true,
-			"both":  true,
-		}
-		if !validListenOn[config.Services[i].ListenOn] {
-			return fmt.Errorf("services[%d].listen_on must be 'http', 'https', or 'both' (got: %s)", i, config.Services[i].ListenOn)
-		}
-
-		// Validate HTTPRedirect configuration
-		if config.Services[i].HTTPRedirect && config.Services[i].ListenOn == "http" {
-			return fmt.Errorf("services[%d].http_redirect cannot be true when listen_on is 'http' (no HTTPS listener to redirect to)", i)
 		}
 
 		// Apply default weights if not set
