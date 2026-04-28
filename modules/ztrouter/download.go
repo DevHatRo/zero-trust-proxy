@@ -1,7 +1,9 @@
 package ztrouter
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -28,8 +30,14 @@ func (h *Handler) handleDownloadStream(
 	initial *common.Message,
 	respCh chan *common.Message,
 ) error {
+	// Try to hijack the connection (HTTP/1.1). The type assertion alone is not
+	// sufficient — middleware wrappers (access-log, metrics) always expose
+	// Hijack() even when the underlying writer is HTTP/2. Attempt the actual
+	// Hijack() call and fall through to the flush path on failure.
 	if hijacker, ok := w.(http.Hijacker); ok {
-		return h.streamDownloadHijack(w, hijacker, agent, msgID, initial, respCh)
+		if conn, rw, err := hijacker.Hijack(); err == nil {
+			return h.streamDownloadHijackConn(conn, rw, agent, msgID, initial, respCh)
+		}
 	}
 	if flusher, ok := w.(http.Flusher); ok {
 		return h.streamDownloadFlush(w, r, flusher, agent, msgID, initial, respCh)
@@ -38,19 +46,14 @@ func (h *Handler) handleDownloadStream(
 	return nil
 }
 
-func (h *Handler) streamDownloadHijack(
-	w http.ResponseWriter,
-	hijacker http.Hijacker,
+func (h *Handler) streamDownloadHijackConn(
+	clientConn net.Conn,
+	_ *bufio.ReadWriter,
 	agent *ztagents.Agent,
 	msgID string,
 	initial *common.Message,
 	respCh chan *common.Message,
 ) error {
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		http.Error(w, "Hijack failed: "+err.Error(), http.StatusInternalServerError)
-		return nil
-	}
 	defer clientConn.Close()
 
 	log.Info("ztrouter: download stream (h1) id=%s size=%d agent=%s",

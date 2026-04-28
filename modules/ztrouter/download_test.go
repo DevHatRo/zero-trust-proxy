@@ -446,20 +446,41 @@ func (f *failHijackRW) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, fmt.Errorf("forced hijack failure")
 }
 
-// TestStreamDownloadHijack_Failure covers the error path when Hijack returns an error.
-func TestStreamDownloadHijack_Failure(t *testing.T) {
+// failHijackFlusherRW implements Hijacker (always fails) + Flusher so that
+// handleDownloadStream falls through to the flush path when Hijack fails.
+type failHijackFlusherRW struct {
+	*httptest.ResponseRecorder
+}
+
+func (f *failHijackFlusherRW) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return nil, nil, fmt.Errorf("forced hijack failure")
+}
+func (f *failHijackFlusherRW) Flush() { f.ResponseRecorder.Flush() }
+
+// TestHandleDownloadStream_HijackFallsBackToFlush verifies that a failing
+// Hijack (e.g. HTTP/2 behind a middleware wrapper) falls through to the
+// flush-based streaming path instead of returning 500.
+func TestHandleDownloadStream_HijackFallsBackToFlush(t *testing.T) {
 	h := &Handler{}
-	agent := newTestAgent(t, "a-hijack-fail")
-	rr := &failHijackRW{httptest.NewRecorder()}
+	agent := newTestAgent(t, "a-hijack-fallback")
+	rr := &failHijackFlusherRW{httptest.NewRecorder()}
 
 	respCh := make(chan *common.Message, 1)
-	initial := &common.Message{HTTP: &common.HTTPData{StatusCode: 200, Headers: map[string][]string{}}}
+	initial := &common.Message{HTTP: &common.HTTPData{
+		StatusCode: 200,
+		Headers:    map[string][]string{},
+		IsLastChunk: true,
+	}}
+	respCh <- &common.Message{HTTP: &common.HTTPData{
+		Body: []byte("data"), IsLastChunk: true,
+	}}
 
-	if err := h.streamDownloadHijack(rr, rr, agent, "msg-hf", initial, respCh); err != nil {
-		t.Fatalf("streamDownloadHijack returned error: %v", err)
+	req := httptest.NewRequest(http.MethodGet, "/stream", nil)
+	if err := h.handleDownloadStream(rr, req, agent, "msg-fallback", initial, respCh); err != nil {
+		t.Fatalf("handleDownloadStream: %v", err)
 	}
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status=%d, want 500", rr.Code)
+	if rr.Code == http.StatusInternalServerError {
+		t.Fatalf("got 500 but expected flush path to be used (no 500)")
 	}
 }
 
