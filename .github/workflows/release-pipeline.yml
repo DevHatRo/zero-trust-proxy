@@ -50,7 +50,7 @@ jobs:
         platform: [ amd64, arm64 ]
         include:
           - component: server
-            dockerfile: ./cmd/caddy/Dockerfile
+            dockerfile: ./cmd/zero-trust-proxy/Dockerfile
           - component: agent
             dockerfile: ./cmd/agent/Dockerfile
     steps:
