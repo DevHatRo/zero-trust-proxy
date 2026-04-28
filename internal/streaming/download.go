@@ -180,8 +180,10 @@ func (ds *DownloadStreamer) StreamToConnection(conn net.Conn, responseChan <-cha
 		headers[key] = values
 	}
 
-	// Set essential headers for browser download progress
-	headers.Set("Content-Length", fmt.Sprintf("%d", ds.stream.TotalSize))
+	// Set Content-Length only when the size is known; -1 means chunked/unknown.
+	if ds.stream.TotalSize > 0 {
+		headers.Set("Content-Length", fmt.Sprintf("%d", ds.stream.TotalSize))
+	}
 
 	// Ensure proper content-type
 	contentType := headers.Get("Content-Type")
@@ -247,21 +249,24 @@ func (ds *DownloadStreamer) StreamToConnection(conn net.Conn, responseChan <-cha
 			// Log progress with transfer rate
 			now := time.Now()
 			if now.Sub(lastProgressTime) > ds.stream.Config.ProgressInterval || chunk.HTTP.IsLastChunk {
-				progress := float64(ds.stream.Transferred) / float64(ds.stream.TotalSize) * 100
 				elapsed := now.Sub(lastProgressTime)
 				var rate float64
 				if elapsed > 0 {
 					rate = float64(chunkSize) / elapsed.Seconds() / (1024 * 1024) // MB/s
 				}
-
-				var eta time.Duration
-				if rate > 0 && ds.stream.TotalSize > ds.stream.Transferred {
-					remainingBytes := float64(ds.stream.TotalSize - ds.stream.Transferred)
-					eta = time.Duration(remainingBytes/rate/1024/1024) * time.Second
+				if ds.stream.TotalSize > 0 {
+					progress := float64(ds.stream.Transferred) / float64(ds.stream.TotalSize) * 100
+					var eta time.Duration
+					if rate > 0 && ds.stream.TotalSize > ds.stream.Transferred {
+						remainingBytes := float64(ds.stream.TotalSize - ds.stream.Transferred)
+						eta = time.Duration(remainingBytes/rate/1024/1024) * time.Second
+					}
+					log.Info("📈 Download streaming progress: %.1f%% (%d chunks, %d MB, %.2f MB/s, ETA: %v)",
+						progress, ds.stream.ChunkIndex, ds.stream.Transferred/(1024*1024), rate, eta.Round(time.Second))
+				} else {
+					log.Info("📈 Download streaming progress: %d chunks, %d bytes, %.2f MB/s",
+						ds.stream.ChunkIndex, ds.stream.Transferred, rate)
 				}
-
-				log.Info("📈 Download streaming progress: %.1f%% (%d chunks, %d MB, %.2f MB/s, ETA: %v)",
-					progress, ds.stream.ChunkIndex, ds.stream.Transferred/(1024*1024), rate, eta.Round(time.Second))
 				lastProgressTime = now
 			}
 

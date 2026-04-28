@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -137,7 +138,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if resp.HTTP != nil && resp.HTTP.IsStream {
 			if err := h.handleDownloadStream(w, r, agent, msgID, resp, respCh); err != nil {
-				log.Error("ztrouter: download stream: %v", err)
+				if isClientGone(err) {
+					log.Debug("ztrouter: download stream: client gone id=%s: %v", msgID, err)
+				} else {
+					log.Error("ztrouter: download stream: %v", err)
+				}
 			}
 			return
 		}
@@ -178,6 +183,19 @@ func writeAgentResponse(w http.ResponseWriter, resp *common.Message) {
 	if len(resp.HTTP.Body) > 0 {
 		_, _ = io.Copy(w, bytes.NewReader(resp.HTTP.Body))
 	}
+}
+
+// isClientGone returns true for network errors that mean the client disconnected
+// mid-stream. These are expected during large downloads and should not be logged
+// at ERROR level.
+func isClientGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "use of closed network connection")
 }
 
 var _ http.Handler = (*Handler)(nil)

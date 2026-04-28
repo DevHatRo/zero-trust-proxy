@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 )
@@ -15,7 +16,11 @@ func (a *App) handleAgentConnection(conn net.Conn) {
 
 	var initial common.Message
 	if err := decoder.Decode(&initial); err != nil {
-		log.Error("ztagents: read initial message: %v", err)
+		if isExpectedConnError(err) {
+			log.Debug("ztagents: rejected pre-auth connection: %v", err)
+		} else {
+			log.Error("ztagents: read initial message: %v", err)
+		}
 		return
 	}
 	if initial.Type != "register" {
@@ -151,6 +156,19 @@ func (a *App) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		log.Debug("ztagents: unknown message type %s from %s", msg.Type, agent.ID)
 		return nil
 	}
+}
+
+// isExpectedConnError returns true for TLS rejections and connection resets
+// that are routine on a public mTLS port (port scanners, health checks,
+// clients without a certificate). These are noise, not server errors.
+func isExpectedConnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.HasPrefix(msg, "tls:") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "EOF")
 }
 
 func writeAll(w interface {
