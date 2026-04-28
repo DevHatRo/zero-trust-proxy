@@ -94,6 +94,9 @@ func (a *AgentsConfig) validate() error {
 	if a.CertFile == "" || a.KeyFile == "" || a.CAFile == "" {
 		return fmt.Errorf("agents: cert_file, key_file, ca_file all required")
 	}
+	if (a.TCPPortMin > 0 || a.TCPPortMax > 0) && a.TCPPortMin >= a.TCPPortMax {
+		return fmt.Errorf("agents: tcp_port_min (%d) must be less than tcp_port_max (%d)", a.TCPPortMin, a.TCPPortMax)
+	}
 	return nil
 }
 

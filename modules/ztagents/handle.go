@@ -59,6 +59,7 @@ func (a *App) handleAgentConnection(conn net.Conn) {
 	}
 
 	remaining := a.rt.registry.remove(agent.ID)
+	a.rt.tcpManager.ReleaseAgent(agent.ID)
 	log.Info("ztagents: agent %s disconnected (remaining=%d)", agent.ID, remaining)
 }
 
@@ -92,7 +93,21 @@ func (a *App) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		agent.Services[hostname] = msg.Service
 		agent.mu.Unlock()
 		log.Info("ztagents: service_add host=%s agent=%s", hostname, agent.ID)
-		return agent.SendMessage(&common.Message{Type: "service_add_response", ID: msg.ID})
+		resp := &common.Message{Type: "service_add_response", ID: msg.ID}
+		if msg.Service.Protocol == "tcp" {
+			port, err := a.rt.tcpManager.Allocate(
+				msg.Service.TCPPort, agent.ID, hostname, msg.Service.TLSOffload, agent,
+			)
+			if err != nil {
+				resp.Error = err.Error()
+				log.Error("ztagents: TCP allocate for %s: %v", hostname, err)
+			} else {
+				resp.Service = &common.ServiceConfig{}
+				*resp.Service = *msg.Service
+				resp.Service.TCPPort = port
+			}
+		}
+		return agent.SendMessage(resp)
 
 	case "service_update":
 		if msg.Service == nil {
@@ -108,10 +123,15 @@ func (a *App) handleAgentMessage(agent *Agent, msg *common.Message) error {
 		if msg.Service == nil {
 			return fmt.Errorf("service config missing")
 		}
+		hostname := msg.Service.Hostname
 		agent.mu.Lock()
-		delete(agent.Services, msg.Service.Hostname)
+		svc, hasSvc := agent.Services[hostname]
+		delete(agent.Services, hostname)
 		agent.mu.Unlock()
-		log.Info("ztagents: service_remove host=%s agent=%s", msg.Service.Hostname, agent.ID)
+		if hasSvc && svc != nil && svc.Protocol == "tcp" {
+			a.rt.tcpManager.Release(hostname)
+		}
+		log.Info("ztagents: service_remove host=%s agent=%s", hostname, agent.ID)
 		return agent.SendMessage(&common.Message{Type: "service_remove_response", ID: msg.ID})
 
 	case "ping":
@@ -150,6 +170,23 @@ func (a *App) handleAgentMessage(agent *Agent, msg *common.Message) error {
 
 	case "websocket_disconnect":
 		a.rt.wsManager.RemoveConnection(msg.ID)
+		return nil
+
+	case "tcp_connect_ack":
+		a.rt.tcpManager.HandleConnectAck(msg.ID, msg.Error)
+		return nil
+
+	case "tcp_data":
+		if msg.TCP == nil {
+			return nil
+		}
+		if err := a.rt.tcpManager.WriteToClient(msg.ID, msg.TCP.Data); err != nil {
+			log.Debug("ztagents: tcp_data write id=%s: %v", msg.ID, err)
+		}
+		return nil
+
+	case "tcp_disconnect":
+		a.rt.tcpManager.CloseClient(msg.ID)
 		return nil
 
 	default:

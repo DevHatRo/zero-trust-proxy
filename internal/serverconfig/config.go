@@ -60,11 +60,13 @@ type ACMEConfig struct {
 }
 
 type AgentsConfig struct {
-	Listen    string `yaml:"listen" json:"listen"`
-	CertFile  string `yaml:"cert_file" json:"cert_file"`
-	KeyFile   string `yaml:"key_file" json:"key_file"`
-	CAFile    string `yaml:"ca_file" json:"ca_file"`
-	CheckAddr string `yaml:"check_addr,omitempty" json:"check_addr,omitempty"`
+	Listen      string `yaml:"listen" json:"listen"`
+	CertFile    string `yaml:"cert_file" json:"cert_file"`
+	KeyFile     string `yaml:"key_file" json:"key_file"`
+	CAFile      string `yaml:"ca_file" json:"ca_file"`
+	CheckAddr   string `yaml:"check_addr,omitempty" json:"check_addr,omitempty"`
+	TCPPortMin  int    `yaml:"tcp_port_min,omitempty" json:"tcp_port_min,omitempty"`
+	TCPPortMax  int    `yaml:"tcp_port_max,omitempty" json:"tcp_port_max,omitempty"`
 }
 
 type RouterConfig struct {
