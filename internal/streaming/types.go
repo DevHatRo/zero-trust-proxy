@@ -135,32 +135,31 @@ func (s *Stream) IsComplete() bool {
 	return s.Transferred >= s.TotalSize
 }
 
-// UpdateProgress updates the stream's progress and sends progress info
+// UpdateProgress updates the stream's progress and sends progress
+// info. The send to ProgressChan happens under closeMu so a
+// concurrent Close() can't close the channel mid-send (and so a
+// closed Stream silently drops the update).
 func (s *Stream) UpdateProgress(transferred int64) {
 	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
 	if s.closed {
-		s.closeMu.Unlock()
-		return // Don't update progress on closed stream
+		return
 	}
-	s.closeMu.Unlock()
 
 	s.Transferred = transferred
 	s.LastActivity = time.Now()
 
-	// Calculate progress percentage
 	var progress float64
 	if s.TotalSize > 0 {
 		progress = float64(s.Transferred) / float64(s.TotalSize) * 100
 	}
 
-	// Calculate transfer rate
 	elapsed := time.Since(s.StartTime)
 	var transferRate float64
 	if elapsed.Seconds() > 0 {
 		transferRate = float64(s.Transferred) / elapsed.Seconds()
 	}
 
-	// Calculate ETA
 	var eta time.Duration
 	if transferRate > 0 && s.TotalSize > s.Transferred {
 		remainingBytes := float64(s.TotalSize - s.Transferred)
@@ -179,11 +178,12 @@ func (s *Stream) UpdateProgress(transferred int64) {
 		Elapsed:      elapsed,
 	}
 
-	// Send progress info non-blocking, with closed channel protection
+	// Non-blocking — safe under closeMu because Close() also takes
+	// closeMu and runs to completion before any close() of the
+	// channel here.
 	select {
 	case s.ProgressChan <- progressInfo:
 	default:
-		// Channel full or closed, skip this progress update
 	}
 }
 

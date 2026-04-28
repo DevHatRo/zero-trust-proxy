@@ -1,0 +1,26 @@
+# Smoke-test config — equivalent of the legacy config/caddy.smoke.json.
+# Uses non-privileged ports so it can run in CI / local dev without root.
+listen:
+  http: ""
+  https: ":18080"
+  http_redirect: false
+
+tls:
+  mode: manual
+  manual:
+    cert_file: config/certs/server.crt
+    key_file:  config/certs/server.key
+
+agents:
+  listen:    ":18443"
+  cert_file: config/certs/server.crt
+  key_file:  config/certs/server.key
+  ca_file:   config/certs/ca.crt
+  check_addr: ":12020"
+
+router:
+  request_timeout: 30s
+
+logging:
+  level: info
+  format: console

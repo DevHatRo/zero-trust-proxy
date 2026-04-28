@@ -1,6 +1,10 @@
 package ztagents
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/devhatro/zero-trust-proxy/internal/common"
+)
 
 type registry struct {
 	mu     sync.RWMutex
@@ -33,17 +37,29 @@ func (r *registry) get(id string) (*Agent, bool) {
 }
 
 func (r *registry) lookupByHost(host string) (*Agent, bool) {
+	a, _, ok := r.lookupServiceByHost(host)
+	return a, ok
+}
+
+// lookupServiceByHost returns the agent serving the given host along with
+// a copy of its on-wire ServiceConfig (so callers don't read the agent's
+// internal map without its lock).
+func (r *registry) lookupServiceByHost(host string) (*Agent, *common.ServiceConfig, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for _, a := range r.agents {
 		a.mu.RLock()
-		_, ok := a.Services[host]
+		svc, ok := a.Services[host]
+		var copy common.ServiceConfig
+		if ok && svc != nil {
+			copy = *svc
+		}
 		a.mu.RUnlock()
 		if ok {
-			return a, true
+			return a, &copy, true
 		}
 	}
-	return nil, false
+	return nil, nil, false
 }
 
 func (r *registry) snapshot() []*Agent {

@@ -238,12 +238,11 @@ func applyLoggingConfig(config LoggingConfig) {
 // convertCommonToTypes converts common.ServiceConfig to types.ServiceConfig
 func convertCommonToTypes(config *common.ServiceConfig) *types.ServiceConfig {
 	return &types.ServiceConfig{
-		Hostname:     config.Hostname,
-		Backend:      config.Backend,
-		Protocol:     config.Protocol,
-		WebSocket:    config.WebSocket,
-		HTTPRedirect: config.HTTPRedirect,
-		ListenOn:     config.ListenOn,
+		Hostname:  config.Hostname,
+		Backend:   config.Backend,
+		Protocol:  config.Protocol,
+		WebSocket: config.WebSocket,
+		Timeout:   config.Timeout,
 	}
 }
 
@@ -1577,12 +1576,11 @@ func (a *Agent) convertToCommonServiceConfig(service *ServiceConfig, hostname st
 
 	return &common.ServiceConfig{
 		ServiceConfig: types.ServiceConfig{
-			Hostname:     hostname,
-			Backend:      primaryUpstream,
-			Protocol:     service.Protocol,
-			WebSocket:    service.WebSocket,    // CRITICAL: Copy WebSocket flag for server/Caddy configuration
-			HTTPRedirect: service.HTTPRedirect, // Copy HTTP redirect setting
-			ListenOn:     service.ListenOn,     // Copy protocol binding setting
+			Hostname:  hostname,
+			Backend:   primaryUpstream,
+			Protocol:  service.Protocol,
+			WebSocket: service.WebSocket,
+			Timeout:   service.Timeout,
 		},
 	}
 }
@@ -1849,38 +1847,12 @@ func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttem
 
 		log.Info("⚙️  Configuring service: %s (attempt %d/%d)", config.Hostname, attempt, maxAttempts)
 
-		// Check if we have enhanced configuration for this service
-		var enhancedConfig *common.EnhancedServiceConfig
-		if a.config != nil {
-			for _, service := range a.config.Services {
-				// Check if this hostname is handled by this service
-				for _, serviceHost := range service.GetAllHosts() {
-					if serviceHost == config.Hostname {
-						// Convert agent ServiceConfig to common EnhancedServiceConfig
-						enhancedConfig = a.convertToCommonEnhancedServiceConfig(&service, config.Hostname)
-						break
-					}
-				}
-				if enhancedConfig != nil {
-					break
-				}
-			}
-		}
-
-		// Create message with both simple and enhanced configs for full compatibility
 		msg := &common.Message{
-			Type:            "service_add",
-			ID:              a.id,
-			Service:         config,         // Simple config for backward compatibility
-			EnhancedService: enhancedConfig, // Enhanced config if available
+			Type:    "service_add",
+			ID:      a.id,
+			Service: config,
 		}
-
-		if enhancedConfig != nil {
-			log.Debug("📦 Sending enhanced service configuration for %s with %d upstreams",
-				config.Hostname, len(enhancedConfig.Upstreams))
-		} else {
-			log.Debug("📄 Sending simple service configuration for %s", config.Hostname)
-		}
+		log.Debug("📄 Sending service configuration for %s", config.Hostname)
 
 		if err := a.SendMessage(msg); err != nil {
 			lastErr = fmt.Errorf("failed to send service configuration: %w", err)
@@ -1940,134 +1912,6 @@ func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttem
 	}
 
 	return lastErr
-}
-
-// convertToCommonEnhancedServiceConfig converts agent ServiceConfig to common EnhancedServiceConfig
-func (a *Agent) convertToCommonEnhancedServiceConfig(service *ServiceConfig, hostname string) *common.EnhancedServiceConfig {
-	enhancedConfig := &common.EnhancedServiceConfig{
-		ID:           service.ID,
-		Name:         service.Name,
-		Hostname:     hostname,
-		Protocol:     service.Protocol,
-		WebSocket:    service.WebSocket,    // Copy WebSocket configuration
-		HTTPRedirect: service.HTTPRedirect, // Copy HTTP redirect setting
-		ListenOn:     service.ListenOn,     // Copy protocol binding setting
-	}
-
-	// Convert upstreams
-	for _, upstream := range service.Upstreams {
-		commonUpstream := common.UpstreamConfig{
-			Address: upstream.Address,
-			Weight:  upstream.Weight,
-		}
-
-		// Convert health check if present
-		if upstream.HealthCheck != nil {
-			commonUpstream.HealthCheck = &common.HealthCheckConfig{
-				Path:     upstream.HealthCheck.Path,
-				Interval: upstream.HealthCheck.Interval.String(),
-				Timeout:  upstream.HealthCheck.Timeout.String(),
-				Method:   upstream.HealthCheck.Method,
-				Headers:  upstream.HealthCheck.Headers,
-			}
-		}
-
-		enhancedConfig.Upstreams = append(enhancedConfig.Upstreams, commonUpstream)
-	}
-
-	// Convert load balancing config if present
-	if service.LoadBalancing != nil {
-		enhancedConfig.LoadBalancing = &common.LoadBalancingConfig{
-			Policy:              service.LoadBalancing.Policy,
-			HealthCheckRequired: service.LoadBalancing.HealthCheckRequired,
-			SessionAffinity:     service.LoadBalancing.SessionAffinity,
-		}
-		if service.LoadBalancing.AffinityDuration > 0 {
-			enhancedConfig.LoadBalancing.AffinityDuration = service.LoadBalancing.AffinityDuration.String()
-		}
-	}
-
-	// Convert routes
-	for _, route := range service.Routes {
-		commonRoute := common.RouteConfig{
-			Match: common.MatchConfig{
-				Path:    route.Match.Path,
-				Method:  route.Match.Method,
-				Headers: route.Match.Headers,
-				Query:   route.Match.Query,
-			},
-		}
-
-		// Convert middleware handlers
-		for _, handler := range route.Handle {
-			commonHandler := common.MiddlewareConfig{
-				Type:   handler.Type,
-				Config: handler.Config,
-			}
-			commonRoute.Handle = append(commonRoute.Handle, commonHandler)
-		}
-
-		enhancedConfig.Routes = append(enhancedConfig.Routes, commonRoute)
-	}
-
-	// Convert TLS config if present
-	if service.TLS != nil {
-		enhancedConfig.TLS = &common.TLSConfig{
-			CertFile:     service.TLS.CertFile,
-			KeyFile:      service.TLS.KeyFile,
-			CAFile:       service.TLS.CAFile,
-			MinVersion:   service.TLS.MinVersion,
-			Ciphers:      service.TLS.Ciphers,
-			ClientAuth:   service.TLS.ClientAuth,
-			ClientCAFile: service.TLS.ClientCAFile,
-		}
-	}
-
-	// Convert security config if present
-	if service.Security != nil {
-		enhancedConfig.Security = &common.SecurityConfig{}
-
-		if service.Security.CORS != nil {
-			enhancedConfig.Security.CORS = &common.CORSConfig{
-				Origins: service.Security.CORS.Origins,
-				Methods: service.Security.CORS.Methods,
-				Headers: service.Security.CORS.Headers,
-			}
-		}
-
-		if service.Security.Auth != nil {
-			enhancedConfig.Security.Auth = &common.AuthConfig{
-				Type:   service.Security.Auth.Type,
-				Config: service.Security.Auth.Config,
-			}
-		}
-	}
-
-	// Convert monitoring config if present
-	if service.Monitoring != nil {
-		enhancedConfig.Monitoring = &common.MonitoringConfig{
-			MetricsEnabled: service.Monitoring.MetricsEnabled,
-		}
-
-		// Use simplified logging configuration
-		if service.Monitoring.LoggingFormat != "" || len(service.Monitoring.LoggingFields) > 0 {
-			enhancedConfig.Monitoring.Logging = &common.LoggingConfig{
-				Format: service.Monitoring.LoggingFormat,
-				Fields: service.Monitoring.LoggingFields,
-			}
-		}
-	}
-
-	// Convert traffic shaping config if present
-	if service.TrafficShaping != nil {
-		enhancedConfig.TrafficShaping = &common.TrafficShapingConfig{
-			UploadLimit:   service.TrafficShaping.UploadLimit,
-			DownloadLimit: service.TrafficShaping.DownloadLimit,
-			PerIPLimit:    service.TrafficShaping.PerIPLimit,
-		}
-	}
-
-	return enhancedConfig
 }
 
 // sendHeartbeat sends a heartbeat to the server
@@ -2924,9 +2768,7 @@ func (a *Agent) servicesEqual(old, new *common.ServiceConfig) bool {
 	return old.Hostname == new.Hostname &&
 		old.Backend == new.Backend &&
 		old.Protocol == new.Protocol &&
-		old.WebSocket == new.WebSocket &&
-		old.HTTPRedirect == new.HTTPRedirect &&
-		old.ListenOn == new.ListenOn
+		old.WebSocket == new.WebSocket
 }
 
 // logConfigChanges logs what changed between configurations

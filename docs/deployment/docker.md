@@ -2,27 +2,34 @@
 
 This guide covers building and running the Zero Trust Proxy with Docker Compose.
 
-> **Note**: There are no pre-built Docker images. You build the custom Caddy binary and agent from source.
+> **Note**: There are no pre-built Docker images. You build the
+> server and agent from source.
 
-## Dockerfile — Server (custom Caddy)
+## Dockerfile — Server
 
-```dockerfile
-FROM golang:1.22 AS builder
-WORKDIR /src
-COPY . .
-RUN go build -o /bin/caddy ./cmd/caddy
+Two Dockerfiles ship with the repo:
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /bin/caddy /usr/local/bin/caddy
-EXPOSE 80 443 8443
-ENTRYPOINT ["caddy", "run", "--config", "/config/Caddyfile", "--adapter", "caddyfile"]
+- `cmd/zero-trust-proxy/Dockerfile` — production image. Expects a
+  prebuilt static binary at
+  `bin/zero-trust-proxy-server-linux-${TARGETARCH}` (run
+  `./scripts/build.sh` first). Smaller and faster to build.
+- `cmd/zero-trust-proxy/Dockerfile.dev` — self-contained multi-stage
+  build, no prerequisites. Useful for one-shot `docker build .` or CI
+  smoke jobs.
+
+```bash
+# production (prebuilt binary)
+./scripts/build.sh
+docker build -f cmd/zero-trust-proxy/Dockerfile -t zero-trust-proxy:latest .
+
+# one-shot (no prerequisites)
+docker build -f cmd/zero-trust-proxy/Dockerfile.dev -t zero-trust-proxy:dev .
 ```
 
 ## Dockerfile — Agent
 
 ```dockerfile
-FROM golang:1.22 AS builder
+FROM golang:1.25 AS builder
 WORKDIR /src
 COPY . .
 RUN go build -o /bin/agent ./cmd/agent
@@ -37,11 +44,11 @@ ENTRYPOINT ["agent"]
 
 ```yaml
 services:
-  caddy:
+  server:
     build:
       context: .
-      dockerfile: Dockerfile.caddy
-    container_name: zero-trust-caddy
+      dockerfile: Dockerfile.server
+    container_name: zero-trust-proxy
     restart: unless-stopped
     ports:
       - "80:80"
@@ -59,7 +66,7 @@ services:
     container_name: zero-trust-agent
     restart: unless-stopped
     command:
-      - "--server=caddy:8443"
+      - "--server=server:8443"
       - "--cert=/config/certs/agent.crt"
       - "--key=/config/certs/agent.key"
       - "--ca=/config/certs/ca.crt"
@@ -71,7 +78,7 @@ services:
       - zero-trust
       - backend
     depends_on:
-      - caddy
+      - server
 
 networks:
   zero-trust:
@@ -80,35 +87,55 @@ networks:
     driver: bridge
 ```
 
-## Config Files
+## Config files
 
-### config/Caddyfile
+### `config/server.yaml`
 
-```caddyfile
-{
-    zerotrust_agents {
-        listen    :8443
-        cert_file /config/certs/server.crt
-        key_file  /config/certs/server.key
-        ca_file   /config/certs/ca.crt
-    }
-}
+```yaml
+listen:
+  http: ":80"
+  https: ":443"
+  http_redirect: true
 
-:443 {
-    route {
-        zerotrust_router { request_timeout 2m }
-    }
-}
+tls:
+  mode: manual
+  manual:
+    cert_file: /config/certs/public.crt
+    key_file:  /config/certs/public.key
+
+agents:
+  listen:    ":8443"
+  cert_file: /config/certs/server.crt
+  key_file:  /config/certs/server.key
+  ca_file:   /config/certs/ca.crt
+  check_addr: ":2020"
+
+router:
+  request_timeout: 2m
+
+logging:
+  level: info
+  format: json
 ```
 
-### config/agent.yaml
+For Let's Encrypt instead of `manual`:
+
+```yaml
+tls:
+  mode: acme
+  acme:
+    storage_dir: /config/acme
+    email: ops@example.com
+```
+
+### `config/agent.yaml`
 
 ```yaml
 agent:
   id: "docker-agent"
 
 server:
-  address: "caddy:8443"
+  address: "server:8443"
   cert:    "/config/certs/agent.crt"
   key:     "/config/certs/agent.key"
   ca_cert: "/config/certs/ca.crt"
@@ -125,7 +152,7 @@ services:
       - address: "web-app:3000"
 ```
 
-## Certificate Setup
+## Certificate setup
 
 ```bash
 # Build certgen
@@ -136,7 +163,7 @@ mkdir -p config/certs
 # CA
 ./bin/certgen --out config/certs --name ca --type ca
 
-# Server cert
+# Server cert (presented on :8443 to agents)
 ./bin/certgen --ca config/certs/ca.crt --ca-key config/certs/ca.key \
               --out config/certs --name server --type server
 
@@ -144,7 +171,6 @@ mkdir -p config/certs
 ./bin/certgen --ca config/certs/ca.crt --ca-key config/certs/ca.key \
               --out config/certs --name agent --type agent
 
-# Set permissions
 chmod 600 config/certs/*.key
 chmod 644 config/certs/*.crt
 ```
@@ -152,18 +178,13 @@ chmod 644 config/certs/*.crt
 ## Deploy
 
 ```bash
-# Build images and start
 docker compose up -d
-
-# Check status
 docker compose ps
-
-# View logs
-docker compose logs -f caddy
+docker compose logs -f server
 docker compose logs -f agent
 ```
 
-## Homelab Example (Multi-Service Agent)
+## Homelab example (multi-service agent)
 
 ```yaml
 # config/agent.yaml

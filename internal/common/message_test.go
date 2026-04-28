@@ -62,96 +62,6 @@ func TestMessageSerialization(t *testing.T) {
 			},
 		},
 		{
-			name: "enhanced service config message",
-			msg: &Message{
-				Type: "enhanced_service_add",
-				ID:   "enhanced1",
-				EnhancedService: &EnhancedServiceConfig{
-					ID:           "svc1",
-					Name:         "Test Service",
-					Hostname:     "test.example.com",
-					Protocol:     "https",
-					WebSocket:    true,
-					HTTPRedirect: true,
-					ListenOn:     "https",
-					Upstreams: []UpstreamConfig{
-						{
-							Address: "192.168.1.100:8080",
-							Weight:  100,
-							HealthCheck: &HealthCheckConfig{
-								Path:     "/health",
-								Interval: "30s",
-								Timeout:  "5s",
-								Method:   "GET",
-								Headers:  map[string]string{"X-Health": "check"},
-							},
-						},
-					},
-					LoadBalancing: &LoadBalancingConfig{
-						Policy:              "round_robin",
-						HealthCheckRequired: true,
-						SessionAffinity:     false,
-					},
-					Routes: []RouteConfig{
-						{
-							Match: MatchConfig{
-								Path:   "/api/*",
-								Method: "GET",
-								Headers: map[string][]string{
-									"Accept": {"application/json"},
-								},
-								Query: map[string]string{
-									"version": "v1",
-								},
-							},
-							Handle: []MiddlewareConfig{
-								{
-									Type: "headers",
-									Config: map[string]interface{}{
-										"set": map[string]string{
-											"X-API-Version": "v1",
-										},
-									},
-								},
-							},
-						},
-					},
-					TLS: &TLSConfig{
-						MinVersion: "1.2",
-						Ciphers:    []string{"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
-						ClientAuth: "require",
-					},
-					Security: &SecurityConfig{
-						CORS: &CORSConfig{
-							Origins: []string{"https://example.com"},
-							Methods: []string{"GET", "POST"},
-							Headers: []string{"Content-Type", "Authorization"},
-						},
-						Auth: &AuthConfig{
-							Type: "jwt",
-							Config: map[string]interface{}{
-								"secret": "test-secret",
-								"issuer": "test-issuer",
-							},
-						},
-					},
-					Monitoring: &MonitoringConfig{
-						MetricsEnabled: true,
-						Logging: &LoggingConfig{
-							Level:  "info",
-							Format: "json",
-							Fields: []string{"timestamp", "level", "message"},
-						},
-					},
-					TrafficShaping: &TrafficShapingConfig{
-						UploadLimit:   "10MB/s",
-						DownloadLimit: "100MB/s",
-						PerIPLimit:    "1MB/s",
-					},
-				},
-			},
-		},
-		{
 			name: "http request message",
 			msg: &Message{
 				Type: "http_request",
@@ -440,12 +350,10 @@ func TestMessageRoundTrip(t *testing.T) {
 		ID:   "update-123",
 		Service: &ServiceConfig{
 			ServiceConfig: types.ServiceConfig{
-				Hostname:     "api.example.com",
-				Backend:      "192.168.1.100:8080",
-				Protocol:     "https",
-				WebSocket:    true,
-				HTTPRedirect: true,
-				ListenOn:     "both",
+				Hostname:  "api.example.com",
+				Backend:   "192.168.1.100:8080",
+				Protocol:  "https",
+				WebSocket: true,
 			},
 		},
 		HTTP: &HTTPData{
@@ -541,9 +449,6 @@ func TestMessageTypes(t *testing.T) {
 		"service_add",
 		"service_remove",
 		"service_update",
-		"enhanced_service_add",
-		"enhanced_service_remove",
-		"enhanced_service_update",
 		"http_request",
 		"http_response",
 		"websocket_upgrade",
@@ -567,15 +472,6 @@ func TestMessageTypes(t *testing.T) {
 						Hostname: "test.example.com",
 						Backend:  "127.0.0.1:8080",
 						Protocol: "http",
-					},
-				}
-			case "enhanced_service_add", "enhanced_service_remove", "enhanced_service_update":
-				msg.EnhancedService = &EnhancedServiceConfig{
-					ID:       "test-service",
-					Hostname: "enhanced.example.com",
-					Protocol: "https",
-					Upstreams: []UpstreamConfig{
-						{Address: "192.168.1.100:8080", Weight: 100},
 					},
 				}
 			case "http_request", "http_response":

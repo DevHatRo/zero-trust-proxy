@@ -15,8 +15,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/caddyserver/caddy/v2"
 )
 
 // generateTestCerts creates a self-signed CA and a server cert signed by it,
@@ -111,12 +109,12 @@ func TestApp_Validate_MissingFields(t *testing.T) {
 
 func TestApp_Provision_NoCerts(t *testing.T) {
 	app := &App{ListenAddr: ":0"}
-	// No cert files: Provision should initialize runtime and return nil.
-	if err := app.Provision(caddy.Context{}); err != nil {
-		t.Fatalf("Provision with no certs: %v", err)
+	// No cert files: provision should initialize runtime and return nil.
+	if err := app.provision(); err != nil {
+		t.Fatalf("provision with no certs: %v", err)
 	}
 	if app.rt == nil {
-		t.Fatal("runtime should be initialized after Provision")
+		t.Fatal("runtime should be initialized after provision")
 	}
 }
 
@@ -128,8 +126,8 @@ func TestApp_Provision_BadCerts(t *testing.T) {
 		CAFile:     "/nonexistent/ca.crt",
 	}
 	// loadTLSConfig fails on missing files.
-	if err := app.Provision(caddy.Context{}); err == nil {
-		t.Fatal("expected error from Provision with missing cert files")
+	if err := app.provision(); err == nil {
+		t.Fatal("expected error from provision with missing cert files")
 	}
 }
 
@@ -232,10 +230,10 @@ func TestApp_Provision_WithCerts(t *testing.T) {
 		KeyFile:    keyFile,
 		CAFile:     caFile,
 	}
-	if err := app.Provision(caddy.Context{}); err != nil {
-		t.Fatalf("Provision with valid certs: %v", err)
+	if err := app.provision(); err != nil {
+		t.Fatalf("provision with valid certs: %v", err)
 	}
 	if app.rt == nil || app.rt.tlsConfig == nil {
-		t.Fatal("runtime.tlsConfig should be set after Provision with valid certs")
+		t.Fatal("runtime.tlsConfig should be set after provision with valid certs")
 	}
 }

@@ -2,14 +2,11 @@ package ztrouter
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"net/http"
 	"sync/atomic"
 	"time"
 
-	"github.com/caddyserver/caddy/v2"
-	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/google/uuid"
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
@@ -20,57 +17,48 @@ import (
 
 var log = logger.WithComponent("ztrouter")
 
-func init() {
-	caddy.RegisterModule(Handler{})
-}
-
 type Handler struct {
-	RequestTimeout caddy.Duration `json:"request_timeout,omitempty"`
+	RequestTimeout time.Duration `json:"request_timeout,omitempty"`
 
 	app        *ztagents.App
 	timeoutCfg *common.TimeoutConfig // nil → common.DefaultTimeouts(); set in tests
 }
 
-func (Handler) CaddyModule() caddy.ModuleInfo {
-	return caddy.ModuleInfo{
-		ID:  "http.handlers.zerotrust_router",
-		New: func() caddy.Module { return new(Handler) },
-	}
-}
-
 // SetApp injects the ztagents App directly. Intended for tests; production code
-// resolves the app via Provision.
+// constructs the handler via New.
 func (h *Handler) SetApp(app *ztagents.App) { h.app = app }
 
-func (h *Handler) Provision(ctx caddy.Context) error {
-	appIface, err := ctx.App("zerotrust.agents")
-	if err != nil {
-		return fmt.Errorf("ztrouter: load zerotrust.agents app: %w", err)
+// New builds a Handler. requestTimeout==0 falls back to 2m.
+func New(app *ztagents.App, requestTimeout time.Duration) *Handler {
+	if requestTimeout == 0 {
+		requestTimeout = 2 * time.Minute
 	}
-	app, ok := appIface.(*ztagents.App)
-	if !ok {
-		return fmt.Errorf("ztrouter: zerotrust.agents app has unexpected type %T", appIface)
+	return &Handler{
+		RequestTimeout: requestTimeout,
+		app:            app,
 	}
-	h.app = app
-	if h.RequestTimeout == 0 {
-		h.RequestTimeout = caddy.Duration(2 * time.Minute)
-	}
-	log.Debug("ztrouter: provisioned (timeout=%s)", time.Duration(h.RequestTimeout))
-	return nil
 }
 
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.Handler) error {
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
 	if host == "" {
 		http.Error(w, "Missing Host header", http.StatusBadRequest)
-		return nil
+		return
 	}
 
-	agent, ok := h.app.LookupAgent(host)
+	agent, svc, ok := h.app.LookupService(host)
 	if !ok {
 		log.Debug("ztrouter: no agent for host=%s", host)
 		http.Error(w, "No agent for host "+host, http.StatusServiceUnavailable)
-		return nil
+		return
+	}
+	if ri := common.RequestInfoFrom(r.Context()); ri != nil {
+		ri.AgentID = agent.ID
+	}
+
+	requestTimeout := h.RequestTimeout
+	if svc != nil && svc.Timeout > 0 {
+		requestTimeout = svc.Timeout
 	}
 
 	isWS := isWebSocketUpgrade(r)
@@ -109,7 +97,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		); err != nil {
 			log.Error("ztrouter: upload stream to agent %s: %v", agent.ID, err)
 			http.Error(w, "Failed to stream upload: "+err.Error(), http.StatusBadGateway)
-			return nil
+			return
 		}
 	} else {
 		var body []byte
@@ -117,7 +105,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 			b, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, "Failed to read body: "+err.Error(), http.StatusBadRequest)
-				return nil
+				return
 			}
 			body = b
 		}
@@ -135,24 +123,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		if err := agent.SendMessage(httpMsg); err != nil {
 			log.Error("ztrouter: send to agent %s: %v", agent.ID, err)
 			http.Error(w, "Failed to forward request", http.StatusBadGateway)
-			return nil
+			return
 		}
 	}
 
 	select {
 	case resp := <-respCh:
 		if resp.HTTP != nil && resp.HTTP.IsWebSocket {
-			return h.handleWebSocketUpgrade(w, agent, msgID, resp)
+			if err := h.handleWebSocketUpgrade(w, agent, msgID, resp); err != nil {
+				log.Error("ztrouter: ws upgrade: %v", err)
+			}
+			return
 		}
 		if resp.HTTP != nil && resp.HTTP.IsStream {
-			return h.handleDownloadStream(w, r, agent, msgID, resp, respCh)
+			if err := h.handleDownloadStream(w, r, agent, msgID, resp, respCh); err != nil {
+				log.Error("ztrouter: download stream: %v", err)
+			}
+			return
 		}
-		return writeAgentResponse(w, resp)
+		writeAgentResponse(w, resp)
 	case <-r.Context().Done():
-		return nil
-	case <-time.After(time.Duration(h.RequestTimeout)):
+		return
+	case <-time.After(requestTimeout):
 		http.Error(w, "Agent response timeout", http.StatusGatewayTimeout)
-		return nil
 	}
 }
 
@@ -163,14 +156,14 @@ func requestURL(r *http.Request) string {
 	return r.URL.Path + "?" + r.URL.RawQuery
 }
 
-func writeAgentResponse(w http.ResponseWriter, resp *common.Message) error {
+func writeAgentResponse(w http.ResponseWriter, resp *common.Message) {
 	if resp.Error != "" {
 		http.Error(w, resp.Error, http.StatusBadGateway)
-		return nil
+		return
 	}
 	if resp.HTTP == nil {
 		http.Error(w, "Invalid response from agent", http.StatusBadGateway)
-		return nil
+		return
 	}
 
 	dst := w.Header()
@@ -183,14 +176,8 @@ func writeAgentResponse(w http.ResponseWriter, resp *common.Message) error {
 	}
 	w.WriteHeader(status)
 	if len(resp.HTTP.Body) > 0 {
-		if _, err := io.Copy(w, bytes.NewReader(resp.HTTP.Body)); err != nil {
-			return err
-		}
+		_, _ = io.Copy(w, bytes.NewReader(resp.HTTP.Body))
 	}
-	return nil
 }
 
-var (
-	_ caddy.Provisioner           = (*Handler)(nil)
-	_ caddyhttp.MiddlewareHandler = (*Handler)(nil)
-)
+var _ http.Handler = (*Handler)(nil)

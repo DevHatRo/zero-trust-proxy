@@ -33,28 +33,22 @@ jobs:
           go-version: "1.25"
           cache: true
 
-      - name: Install Caddy Binary
-        run: |
-          # Install Caddy for binary validation tests
-          echo "Installing Caddy binary for testing..."
-          curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-          curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-          sudo apt update
-          sudo apt install caddy
-          caddy version
-          echo "Caddy installed successfully"
-
-      - name: Update Go dependencies
+      - name: Verify go.mod tidy
         run: |
           go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "go.mod or go.sum out of date — run 'go mod tidy' locally" >&2
+            exit 1
+          fi
 
-      - name: Run Tests
-        run: |
-          go test ./... -v
+      - name: Build
+        run: go build ./...
 
-      - name: Build Binary
-        run: |
-          ./scripts/build.sh
+      - name: Run Tests (race detector)
+        run: go test -race -count=1 ./...
+
+      - name: Build Release Binaries
+        run: ./scripts/build.sh
 
       - name: Upload Test Artifacts
         uses: actions/upload-artifact@v5

@@ -69,8 +69,6 @@ services:
     hosts: ["app.example.com", "www.example.com"]
     protocol: "http"
     websocket: true
-    http_redirect: true
-    listen_on: "both"
     upstreams:
       - address: "localhost:3000"
         weight: 100
@@ -136,12 +134,6 @@ health_checks:
 				}
 				if !service.WebSocket {
 					t.Error("Expected WebSocket to be enabled")
-				}
-				if !service.HTTPRedirect {
-					t.Error("Expected HTTPRedirect to be enabled")
-				}
-				if service.ListenOn != "both" {
-					t.Errorf("Expected ListenOn 'both', got %s", service.ListenOn)
 				}
 			},
 		},
@@ -426,12 +418,6 @@ func TestValidateAndApplyDefaults(t *testing.T) {
 				if service.Protocol != "http" {
 					t.Errorf("Expected default protocol 'http', got %s", service.Protocol)
 				}
-				if service.ListenOn != "both" {
-					t.Errorf("Expected default ListenOn 'both', got %s", service.ListenOn)
-				}
-				if !service.HTTPRedirect {
-					t.Error("Expected HTTPRedirect to be true by default for 'both' listen mode")
-				}
 				if service.Upstreams[0].Weight != 100 {
 					t.Errorf("Expected default upstream weight 100, got %d", service.Upstreams[0].Weight)
 				}
@@ -492,14 +478,14 @@ func TestValidateAndApplyDefaults(t *testing.T) {
 			errMsg:  "must have at least one upstream",
 		},
 		{
-			name: "invalid listen_on value",
+			name: "negative service timeout rejected",
 			config: &AgentConfig{
 				Agent: AgentSettings{ID: "test-agent"},
 				Services: []ServiceConfig{
 					{
-						ID:       "web-service",
-						Hosts:    []string{"app.example.com"},
-						ListenOn: "invalid",
+						ID:      "web-service",
+						Hosts:   []string{"app.example.com"},
+						Timeout: -1 * time.Second,
 						Upstreams: []UpstreamConfig{
 							{Address: "localhost:3000"},
 						},
@@ -507,26 +493,7 @@ func TestValidateAndApplyDefaults(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "listen_on must be 'http', 'https', or 'both'",
-		},
-		{
-			name: "http_redirect with http-only service",
-			config: &AgentConfig{
-				Agent: AgentSettings{ID: "test-agent"},
-				Services: []ServiceConfig{
-					{
-						ID:           "web-service",
-						Hosts:        []string{"app.example.com"},
-						ListenOn:     "http",
-						HTTPRedirect: true,
-						Upstreams: []UpstreamConfig{
-							{Address: "localhost:3000"},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "http_redirect cannot be true when listen_on is 'http'",
+			errMsg:  "services[0].timeout must be >= 0",
 		},
 		{
 			name: "backward compatibility with hostname field",
@@ -799,13 +766,11 @@ func TestConfigRoundTrip(t *testing.T) {
 		},
 		Services: []ServiceConfig{
 			{
-				ID:           "web-service",
-				Name:         "Web Service",
-				Hosts:        []string{"app.example.com", "www.example.com"},
-				Protocol:     "http",
-				WebSocket:    true,
-				HTTPRedirect: true,
-				ListenOn:     "both",
+				ID:        "web-service",
+				Name:      "Web Service",
+				Hosts:     []string{"app.example.com", "www.example.com"},
+				Protocol:  "http",
+				WebSocket: true,
 				Upstreams: []UpstreamConfig{
 					{
 						Address: "localhost:3000",

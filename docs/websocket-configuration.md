@@ -7,7 +7,7 @@ WebSocket proxying is supported end-to-end through the mTLS channel.
 ```
 Client
   ↓  WebSocket upgrade (HTTP 101)
-Caddy / ztrouter handler
+zero-trust-proxy / ztrouter handler
   ↓  hijacks client TCP connection
   ↕  websocket_frame messages over mTLS
 Agent
@@ -36,7 +36,7 @@ services:
       - address: "192.168.1.100:80"
 ```
 
-The server-side Caddyfile does **not** need any WebSocket-specific directives — `zerotrust_router` handles upgrades automatically.
+The `config/server.yaml` does **not** need any WebSocket-specific directives — `zerotrust_router` handles upgrades automatically. WebSocket upgrade requires HTTP/1.1 (Go's stdlib HTTP/2 server does not expose `Hijacker`); browsers downgrade automatically for the `Upgrade` request.
 
 ## Examples
 
@@ -114,6 +114,6 @@ wscat -c wss://ha.example.com/api/websocket
 ## Security
 
 WebSocket connections benefit from the same security model as HTTP requests:
-- Client → Caddy traffic is standard HTTPS/WSS
-- Caddy → Agent traffic is over the authenticated mTLS channel
+- Client → server traffic is standard HTTPS/WSS, terminated by `internal/server/tls.go`
+- Server → agent traffic is over the authenticated mTLS channel
 - Agent → Backend: protocol determined by the service `protocol` field (`http`/`https`)

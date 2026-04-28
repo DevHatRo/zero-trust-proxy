@@ -291,31 +291,6 @@ func TestConvertToCommonServiceConfig(t *testing.T) {
 	}
 }
 
-// --- convertToCommonEnhancedServiceConfig ---
-
-func TestConvertToCommonEnhancedServiceConfig(t *testing.T) {
-	a := newTestAgent()
-	svc := &ServiceConfig{
-		ID:        "svc-1",
-		Name:      "test-svc",
-		Protocol:  "http",
-		WebSocket: false,
-		Upstreams: []UpstreamConfig{
-			{Address: "backend:8080", Weight: 5},
-		},
-	}
-	result := a.convertToCommonEnhancedServiceConfig(svc, "enhanced.example.com")
-	if result.Hostname != "enhanced.example.com" {
-		t.Fatalf("hostname=%s", result.Hostname)
-	}
-	if result.ID != "svc-1" {
-		t.Fatalf("id=%s, want svc-1", result.ID)
-	}
-	if len(result.Upstreams) != 1 || result.Upstreams[0].Address != "backend:8080" {
-		t.Fatalf("upstreams=%+v", result.Upstreams)
-	}
-}
-
 // --- startHealthChecks (no health checks — should be a no-op) ---
 
 func TestStartHealthChecks_NoHealthChecks(t *testing.T) {

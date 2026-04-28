@@ -1,15 +1,22 @@
 package types
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
-// ServiceConfig represents a service configuration that can be used by both agent and caddy
+// ServiceConfig is the on-wire shape of a service registration sent
+// from the agent to the server.
+//
+// Timeout, when non-zero, overrides router.request_timeout for this
+// service. Encoded as a Go duration string (e.g. "30s", "5m") on the
+// wire and in YAML.
 type ServiceConfig struct {
-	Hostname     string `json:"hostname" yaml:"hostname"`
-	Backend      string `json:"backend" yaml:"backend"`
-	Protocol     string `json:"protocol" yaml:"protocol"`
-	WebSocket    bool   `json:"websocket,omitempty" yaml:"websocket,omitempty"`
-	HTTPRedirect bool   `json:"http_redirect,omitempty" yaml:"http_redirect,omitempty"`
-	ListenOn     string `json:"listen_on,omitempty" yaml:"listen_on,omitempty"`
+	Hostname  string        `json:"hostname" yaml:"hostname"`
+	Backend   string        `json:"backend" yaml:"backend"`
+	Protocol  string        `json:"protocol" yaml:"protocol"`
+	WebSocket bool          `json:"websocket,omitempty" yaml:"websocket,omitempty"`
+	Timeout   time.Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 }
 
 // ValidationError represents a configuration validation error

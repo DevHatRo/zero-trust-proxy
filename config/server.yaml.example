@@ -1,0 +1,60 @@
+# Example configuration for the zero-trust-proxy server.
+# Translated 1:1 from the legacy config/Caddyfile.example.
+
+listen:
+  http: ":80"
+  https: ":443"
+  # Optional QUIC/HTTP3 listener. Same TLS config as :443; uses UDP.
+  # http3: ":443"
+  # 308 redirect for HTTP, with /.well-known/acme-challenge/* bypass
+  # automatically mounted when tls.mode == acme.
+  http_redirect: true
+
+tls:
+  mode: acme            # manual | sni | acme | none
+
+  # On-demand TLS via Let's Encrypt. Cert issuance is gated by the
+  # agent registry — only domains with an active service registered
+  # over mTLS will be issued certs.
+  acme:
+    storage_dir: /config/acme
+    email: ops@example.com
+    # ca_url: ""        # optional override (e.g. staging directory URL)
+
+  # Alternative modes (mutually exclusive):
+  #
+  # mode: manual
+  # manual:
+  #   cert_file: /etc/certs/server.crt
+  #   key_file:  /etc/certs/server.key
+  #
+  # mode: sni
+  # sni:
+  #   "service.example.com":
+  #     cert_file: /etc/certs/service.crt
+  #     key_file:  /etc/certs/service.key
+  #   "other.example.com":
+  #     cert_file: /etc/certs/other.crt
+  #     key_file:  /etc/certs/other.key
+
+agents:
+  listen:    ":8443"
+  cert_file: /config/certs/server.crt
+  key_file:  /config/certs/server.key
+  ca_file:   /config/certs/ca.crt
+  # Optional legacy "ask" endpoint for external tooling. The in-process
+  # ACME HostPolicy already consults the registry directly; you only
+  # need this if something outside the proxy queries domain liveness.
+  check_addr: ":2020"
+
+router:
+  request_timeout: 2m
+
+logging:
+  level: info        # debug | info | warn | error
+  format: console    # console | json
+
+# Optional Prometheus exporter at /metrics. Bind to a private interface
+# — there is no auth on this endpoint.
+metrics:
+  addr: ""           # e.g. "127.0.0.1:9100"
