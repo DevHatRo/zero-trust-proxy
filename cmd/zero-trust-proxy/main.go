@@ -59,6 +59,7 @@ func runCmd(args []string) int {
 	}
 
 	fmt.Fprintf(os.Stderr, "zero-trust-proxy %s (built %s)\n", Version, BuildTime)
+	server.BuildVersion = Version
 
 	if *httpOverride == "" && *httpsOverride == "" {
 		if err := server.Run(*cfgPath); err != nil {
