@@ -142,6 +142,7 @@ func TestServer_MetricsIntegration(t *testing.T) {
 	// via the same setters refreshGauges uses.
 	srv.metrics.setAgentsRegistered(srv.agents.AgentCount())
 	srv.metrics.setWebSocketSessions(srv.agents.WebSocketCount())
+	srv.metrics.setAgentServices(srv.agents.AgentServiceCounts())
 
 	// Scrape /metrics.
 	mResp, err := http.Get("http://" + metricsAddr + "/metrics") //nolint:noctx // test
@@ -156,6 +157,8 @@ func TestServer_MetricsIntegration(t *testing.T) {
 		`ztp_requests_total{method="GET",status="2xx"} 1`,
 		`ztp_request_duration_seconds_count 1`,
 		`ztp_agents_registered 1`,
+		`ztp_agent_services{agent_id="agent-m"}`,
+		`ztp_build_info{`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("metrics output missing %q\n--- /metrics ---\n%s", want, out)

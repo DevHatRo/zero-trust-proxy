@@ -209,6 +209,7 @@ func (s *Server) refreshGauges() {
 		case <-s.metricsTkr.C:
 			s.metrics.setWebSocketSessions(s.agents.WebSocketCount())
 			s.metrics.setAgentsRegistered(s.agents.AgentCount())
+			s.metrics.setAgentServices(s.agents.AgentServiceCounts())
 		}
 	}
 }

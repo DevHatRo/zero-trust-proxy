@@ -153,6 +153,19 @@ func (a *App) WebSocketCount() int {
 	return a.rt.wsManager.GetConnectionCount()
 }
 
+// AgentServiceCounts returns a snapshot of agentID → number of registered
+// services. Used by the metrics layer to populate the ztp_agent_services gauge.
+func (a *App) AgentServiceCounts() map[string]int {
+	agents := a.rt.registry.snapshot()
+	counts := make(map[string]int, len(agents))
+	for _, ag := range agents {
+		ag.mu.RLock()
+		counts[ag.ID] = len(ag.Services)
+		ag.mu.RUnlock()
+	}
+	return counts
+}
+
 func (a *App) acceptLoop() {
 	defer a.rt.wg.Done()
 	for {

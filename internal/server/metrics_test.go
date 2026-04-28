@@ -15,6 +15,7 @@ func TestMetrics_TextFormat(t *testing.T) {
 	m.observeRequest(http.MethodPost, http.StatusCreated, 50*time.Millisecond)
 	m.setAgentsRegistered(3)
 	m.setWebSocketSessions(2)
+	m.setAgentServices(map[string]int{"agent-a": 2, "agent-b": 5})
 
 	rec := httptest.NewRecorder()
 	m.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -32,6 +33,9 @@ func TestMetrics_TextFormat(t *testing.T) {
 		`ztp_request_duration_seconds_count 3`,
 		`ztp_agents_registered 3`,
 		`ztp_websocket_sessions 2`,
+		`ztp_agent_services{agent_id="agent-a"} 2`,
+		`ztp_agent_services{agent_id="agent-b"} 5`,
+		`ztp_build_info{`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("output missing %q\n--- body ---\n%s", want, body)
@@ -71,5 +75,24 @@ func TestStatusClass(t *testing.T) {
 		if got := statusClass(code); got != want {
 			t.Errorf("statusClass(%d) = %q, want %q", code, got, want)
 		}
+	}
+}
+
+func TestMetrics_AgentServicesReset(t *testing.T) {
+	m := newMetrics()
+	m.setAgentServices(map[string]int{"agent-x": 3})
+
+	rec := httptest.NewRecorder()
+	m.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(rec.Body.String(), `ztp_agent_services{agent_id="agent-x"} 3`) {
+		t.Fatal("expected agent-x with 3 services")
+	}
+
+	// Agent disconnects — next refresh has no agents.
+	m.setAgentServices(map[string]int{})
+	rec2 := httptest.NewRecorder()
+	m.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if strings.Contains(rec2.Body.String(), "agent-x") {
+		t.Fatal("agent-x should be gone after reset")
 	}
 }

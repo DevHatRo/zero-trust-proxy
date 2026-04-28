@@ -59,7 +59,6 @@ func (h *Handler) streamDownloadHijack(
 	streamer := streaming.NewStreamingHandler()
 	defer streamer.Close()
 	if err := streamer.HandleDownloadToConnection(msgID, clientConn, respCh, initial, agent); err != nil {
-		log.Error("ztrouter: download stream id=%s: %v", msgID, err)
 		return fmt.Errorf("download stream: %w", err)
 	}
 	return nil
