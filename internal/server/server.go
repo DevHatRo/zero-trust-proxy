@@ -87,6 +87,14 @@ func (s *Server) Start(_ context.Context) error {
 	}
 	s.tls = bundle
 
+	// Wire TCP proxy settings into the agents module.
+	if s.cfg.Agents.TCPPortMin > 0 || s.cfg.Agents.TCPPortMax > 0 {
+		s.agents.SetTCPPortRange(s.cfg.Agents.TCPPortMin, s.cfg.Agents.TCPPortMax)
+	}
+	if bundle.tlsConfig != nil {
+		s.agents.SetTCPOffloadTLS(bundle.tlsConfig)
+	}
+
 	if s.cfg.Listen.HTTPS != "" {
 		if bundle.tlsConfig == nil {
 			_ = s.agents.Stop()

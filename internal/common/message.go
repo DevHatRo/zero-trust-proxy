@@ -35,6 +35,13 @@ type Message struct {
 	Service *ServiceConfig `json:"service,omitempty"`
 	Error   string         `json:"error,omitempty"`
 	HTTP    *HTTPData      `json:"http,omitempty"`
+	TCP     *TCPData       `json:"tcp,omitempty"`
+}
+
+// TCPData carries raw bytes for the TCP tunnel. []byte is base64-encoded
+// by encoding/json on the wire.
+type TCPData struct {
+	Data []byte `json:"data"`
 }
 
 // HTTPData represents HTTP request/response data.

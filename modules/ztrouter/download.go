@@ -7,19 +7,13 @@ import (
 	"time"
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
-	"github.com/devhatro/zero-trust-proxy/internal/streaming"
 	"github.com/devhatro/zero-trust-proxy/modules/ztagents"
 )
 
-// handleDownloadStream streams chunks arriving on respCh to the client. The
-// initial response carries the status/headers; subsequent http_response
+// handleDownloadStream streams chunks arriving on respCh to the client.
+// The initial response carries the status/headers; subsequent http_response
 // messages flow in through respCh as they are dispatched by the agent message
-// handler.
-//
-// Under HTTP/1.1 we hijack the client connection so the streaming library can
-// write the response directly. Under HTTP/2 the ResponseWriter does not
-// implement http.Hijacker — h2 framing handles chunking natively, so we use
-// http.Flusher to push each chunk instead.
+// handler. Go's http.Flusher path works for both HTTP/1.1 and HTTP/2.
 func (h *Handler) handleDownloadStream(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -28,39 +22,10 @@ func (h *Handler) handleDownloadStream(
 	initial *common.Message,
 	respCh chan *common.Message,
 ) error {
-	if hijacker, ok := w.(http.Hijacker); ok {
-		return h.streamDownloadHijack(w, hijacker, agent, msgID, initial, respCh)
-	}
 	if flusher, ok := w.(http.Flusher); ok {
 		return h.streamDownloadFlush(w, r, flusher, agent, msgID, initial, respCh)
 	}
 	http.Error(w, "Streaming not supported", http.StatusInternalServerError)
-	return nil
-}
-
-func (h *Handler) streamDownloadHijack(
-	w http.ResponseWriter,
-	hijacker http.Hijacker,
-	agent *ztagents.Agent,
-	msgID string,
-	initial *common.Message,
-	respCh chan *common.Message,
-) error {
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		http.Error(w, "Hijack failed: "+err.Error(), http.StatusInternalServerError)
-		return nil
-	}
-	defer clientConn.Close()
-
-	log.Info("ztrouter: download stream (h1) id=%s size=%d agent=%s",
-		msgID, initial.HTTP.TotalSize, agent.ID)
-
-	streamer := streaming.NewStreamingHandler()
-	defer streamer.Close()
-	if err := streamer.HandleDownloadToConnection(msgID, clientConn, respCh, initial, agent); err != nil {
-		return fmt.Errorf("download stream: %w", err)
-	}
 	return nil
 }
 

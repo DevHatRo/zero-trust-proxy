@@ -162,6 +162,9 @@ type Agent struct {
 	// removed when the goroutine exits.
 	uploadChans map[string]chan *common.Message
 	uploadMu    sync.RWMutex
+	// Active TCP tunnel connections keyed by msgID.
+	tcpConns map[string]net.Conn
+	tcpMu    sync.Mutex
 }
 
 // NewAgent creates a new agent instance
@@ -178,6 +181,7 @@ func NewAgent(id, serverAddress string, tlsConfig *tls.Config, validator types.S
 		hotReloadManager:    common.NewHotReloadManager(),
 		caddyValidator:      validator,
 		uploadChans:         make(map[string]chan *common.Message),
+		tcpConns:            make(map[string]net.Conn),
 		stopCh:              make(chan struct{}),
 	}
 }
@@ -207,6 +211,7 @@ func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config, validator ty
 		hotReloadManager:    common.NewHotReloadManager(),
 		caddyValidator:      validator,
 		uploadChans:         make(map[string]chan *common.Message),
+		tcpConns:            make(map[string]net.Conn),
 		stopCh:              make(chan struct{}),
 	}
 
@@ -328,6 +333,7 @@ func (a *Agent) handleMessages() {
 			// Trigger reconnection after panic
 			a.signalConnectionBroken()
 			a.cleanupAllWebSocketConnections()
+			a.cleanupAllTCPConnections()
 			a.mu.Lock()
 			a.registered = false
 			a.mu.Unlock()
@@ -359,6 +365,7 @@ func (a *Agent) handleMessages() {
 				// Signal connection broken and clean up
 				a.signalConnectionBroken()
 				a.cleanupAllWebSocketConnections()
+				a.cleanupAllTCPConnections()
 
 				// Mark as unregistered and clean up connection state
 				a.mu.Lock()
@@ -381,6 +388,7 @@ func (a *Agent) handleMessages() {
 				// Signal connection broken and clean up
 				a.signalConnectionBroken()
 				a.cleanupAllWebSocketConnections()
+				a.cleanupAllTCPConnections()
 
 				// Mark as unregistered and clean up connection state
 				a.mu.Lock()
@@ -486,6 +494,32 @@ func (a *Agent) handleMessages() {
 			case ch <- &chunk:
 			case <-time.After(5 * time.Second):
 				log.Error("📤 upload chunk %s dropped: channel full", msg.ID)
+			}
+		case "tcp_connect":
+			go a.handleTCPConnect(&msg)
+		case "tcp_data":
+			if msg.TCP == nil {
+				continue
+			}
+			a.tcpMu.Lock()
+			conn, ok := a.tcpConns[msg.ID]
+			a.tcpMu.Unlock()
+			if !ok {
+				log.Debug("tcp_data for unknown id=%s", msg.ID)
+				continue
+			}
+			if _, err := conn.Write(msg.TCP.Data); err != nil {
+				log.Debug("tcp write id=%s: %v", msg.ID, err)
+			}
+		case "tcp_disconnect":
+			a.tcpMu.Lock()
+			conn, ok := a.tcpConns[msg.ID]
+			if ok {
+				delete(a.tcpConns, msg.ID)
+			}
+			a.tcpMu.Unlock()
+			if ok {
+				_ = conn.Close()
 			}
 		default:
 			log.Error("❓ Unknown message type: %s", msg.Type)
@@ -1495,6 +1529,97 @@ func (a *Agent) handleWebSocketDisconnect(msg *common.Message) {
 		msg.ID[:8]+"...", totalConnections)
 }
 
+// handleTCPConnect dials the backend for a tcp_connect message and relays
+// data in both directions until one side closes.
+func (a *Agent) handleTCPConnect(msg *common.Message) {
+	// Look up the service to find the backend address.
+	a.mu.RLock()
+	svc, ok := a.services[msg.ID]
+	// tcp_connect uses the hostname stored in the service registry; the server
+	// puts the target hostname in Message.Service when Protocol=="tcp".
+	// Fall back: scan services for the first TCP entry if direct lookup misses.
+	if !ok && msg.Service != nil {
+		svc, ok = a.services[msg.Service.Hostname]
+	}
+	a.mu.RUnlock()
+
+	ackMsg := &common.Message{Type: "tcp_connect_ack", ID: msg.ID}
+
+	if !ok || svc == nil {
+		ackMsg.Error = "no TCP service found for connection"
+		_ = a.SendMessage(ackMsg)
+		return
+	}
+
+	backend := svc.Backend
+	conn, err := net.DialTimeout("tcp", backend, 10*time.Second)
+	if err != nil {
+		ackMsg.Error = err.Error()
+		_ = a.SendMessage(ackMsg)
+		return
+	}
+
+	a.tcpMu.Lock()
+	a.tcpConns[msg.ID] = conn
+	a.tcpMu.Unlock()
+
+	if err := a.SendMessage(ackMsg); err != nil {
+		conn.Close()
+		a.tcpMu.Lock()
+		delete(a.tcpConns, msg.ID)
+		a.tcpMu.Unlock()
+		return
+	}
+
+	// Relay backend → server (client).
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				sendErr := a.SendMessage(&common.Message{
+					Type: "tcp_data",
+					ID:   msg.ID,
+					TCP:  &common.TCPData{Data: chunk},
+				})
+				if sendErr != nil {
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+		// Backend closed: tell the server the tunnel is done.
+		a.tcpMu.Lock()
+		_, stillActive := a.tcpConns[msg.ID]
+		if stillActive {
+			delete(a.tcpConns, msg.ID)
+		}
+		a.tcpMu.Unlock()
+		if stillActive {
+			_ = conn.Close()
+			_ = a.SendMessage(&common.Message{Type: "tcp_disconnect", ID: msg.ID})
+		}
+	}()
+}
+
+// cleanupAllTCPConnections closes every active TCP tunnel connection.
+func (a *Agent) cleanupAllTCPConnections() {
+	a.tcpMu.Lock()
+	conns := make(map[string]net.Conn, len(a.tcpConns))
+	for id, c := range a.tcpConns {
+		conns[id] = c
+	}
+	a.tcpConns = make(map[string]net.Conn)
+	a.tcpMu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
 // loadAndRegisterServices loads services from config and registers them with the server
 func (a *Agent) loadAndRegisterServices() error {
 	// Use the config that was already loaded and passed to the agent
@@ -2185,8 +2310,9 @@ func (a *Agent) reconnect() error {
 	// Signal connection broken to stop any ongoing operations
 	a.signalConnectionBroken()
 
-	// Clean up all WebSocket connections
+	// Clean up all WebSocket and TCP connections
 	a.cleanupAllWebSocketConnections()
+	a.cleanupAllTCPConnections()
 
 	// Connect to server with exponential backoff (never give up)
 	attempt := 0

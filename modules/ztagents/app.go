@@ -14,6 +14,7 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
 	"github.com/devhatro/zero-trust-proxy/internal/serverconfig"
+	"github.com/devhatro/zero-trust-proxy/modules/zttcp"
 )
 
 var log = logger.WithComponent("ztagents")
@@ -33,6 +34,7 @@ type runtime struct {
 	listener    net.Listener
 	registry    *registry
 	wsManager   *common.WebSocketManager
+	tcpManager  *zttcp.Manager
 	checkServer *http.Server
 	ctx         context.Context
 	cancelCtx   context.CancelFunc
@@ -61,8 +63,9 @@ func (a *App) provision() error {
 	}
 
 	rt := &runtime{
-		registry:  newRegistry(),
-		wsManager: common.NewWebSocketManager(),
+		registry:   newRegistry(),
+		wsManager:  common.NewWebSocketManager(),
+		tcpManager: zttcp.NewManager(),
 	}
 	rt.ctx, rt.cancelCtx = context.WithCancel(context.Background())
 	a.rt = rt
@@ -118,6 +121,7 @@ func (a *App) Stop() error {
 			_ = agent.Conn.Close()
 		}
 	}
+	a.rt.tcpManager.ReleaseAll()
 	a.rt.wg.Wait()
 	return nil
 }
@@ -164,6 +168,19 @@ func (a *App) AgentServiceCounts() map[string]int {
 		ag.mu.RUnlock()
 	}
 	return counts
+}
+
+// TCPManager exposes the underlying zttcp.Manager for server wiring.
+func (a *App) TCPManager() *zttcp.Manager { return a.rt.tcpManager }
+
+// SetTCPPortRange configures the allowed port range for TCP services.
+func (a *App) SetTCPPortRange(min, max int) {
+	a.rt.tcpManager.SetPortRange(min, max)
+}
+
+// SetTCPOffloadTLS passes the TLS config for TLS-offloading TCP services.
+func (a *App) SetTCPOffloadTLS(cfg *tls.Config) {
+	a.rt.tcpManager.SetOffloadTLS(cfg)
 }
 
 func (a *App) acceptLoop() {
