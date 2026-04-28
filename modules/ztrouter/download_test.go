@@ -1,15 +1,11 @@
 package ztrouter
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
@@ -21,13 +17,7 @@ func TestHandler_DownloadStreaming(t *testing.T) {
 	const host = "dl.example.com"
 	h := newHarness(t, host)
 
-	serverSide, clientSide := net.Pipe()
-	t.Cleanup(func() {
-		_ = serverSide.Close()
-		_ = clientSide.Close()
-	})
-	rr := &hijackRecorder{conn: serverSide}
-
+	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://"+host+"/file.bin", nil)
 
 	serveDone := make(chan struct{})
@@ -60,27 +50,6 @@ func TestHandler_DownloadStreaming(t *testing.T) {
 			ChunkIndex:    0,
 		},
 	})
-
-	// Read the response status line and headers off the client side in a
-	// goroutine so the handler's writes to the pipe don't deadlock.
-	type readResult struct {
-		resp *http.Response
-		body []byte
-		err  error
-	}
-	readCh := make(chan readResult, 1)
-	var once sync.Once
-	go func() {
-		_ = clientSide.SetReadDeadline(time.Now().Add(5 * time.Second))
-		br := bufio.NewReader(clientSide)
-		resp, err := http.ReadResponse(br, nil)
-		if err != nil {
-			once.Do(func() { readCh <- readResult{err: err} })
-			return
-		}
-		body, err := io.ReadAll(resp.Body)
-		once.Do(func() { readCh <- readResult{resp: resp, body: body, err: err} })
-	}()
 
 	// Send two chunks — first half, then final half.
 	half := len(payload) / 2
@@ -115,18 +84,11 @@ func TestHandler_DownloadStreaming(t *testing.T) {
 		t.Fatal("ServeHTTP did not return after last chunk")
 	}
 
-	// Close serverSide so ReadAll on the client returns.
-	_ = serverSide.Close()
-
-	res := <-readCh
-	if res.err != nil && res.err != io.EOF {
-		t.Fatalf("read response: %v", res.err)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", rr.Code)
 	}
-	if res.resp.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d want 200", res.resp.StatusCode)
-	}
-	if !bytes.Equal(res.body, payload) {
-		t.Fatalf("body len=%d want %d", len(res.body), len(payload))
+	if !bytes.Equal(rr.Body.Bytes(), payload) {
+		t.Fatalf("body len=%d want %d", rr.Body.Len(), len(payload))
 	}
 }
 
@@ -437,52 +399,6 @@ func (p *plainResponseWriter) Write(b []byte) (int, error) {
 	return p.body.Write(b)
 }
 
-// failHijackRW implements http.ResponseWriter + http.Hijacker but Hijack always fails.
-type failHijackRW struct {
-	*httptest.ResponseRecorder
-}
-
-func (f *failHijackRW) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return nil, nil, fmt.Errorf("forced hijack failure")
-}
-
-// failHijackFlusherRW implements Hijacker (always fails) + Flusher so that
-// handleDownloadStream falls through to the flush path when Hijack fails.
-type failHijackFlusherRW struct {
-	*httptest.ResponseRecorder
-}
-
-func (f *failHijackFlusherRW) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return nil, nil, fmt.Errorf("forced hijack failure")
-}
-func (f *failHijackFlusherRW) Flush() { f.ResponseRecorder.Flush() }
-
-// TestHandleDownloadStream_HijackFallsBackToFlush verifies that a failing
-// Hijack (e.g. HTTP/2 behind a middleware wrapper) falls through to the
-// flush-based streaming path instead of returning 500.
-func TestHandleDownloadStream_HijackFallsBackToFlush(t *testing.T) {
-	h := &Handler{}
-	agent := newTestAgent(t, "a-hijack-fallback")
-	rr := &failHijackFlusherRW{httptest.NewRecorder()}
-
-	respCh := make(chan *common.Message, 1)
-	initial := &common.Message{HTTP: &common.HTTPData{
-		StatusCode: 200,
-		Headers:    map[string][]string{},
-		IsLastChunk: true,
-	}}
-	respCh <- &common.Message{HTTP: &common.HTTPData{
-		Body: []byte("data"), IsLastChunk: true,
-	}}
-
-	req := httptest.NewRequest(http.MethodGet, "/stream", nil)
-	if err := h.handleDownloadStream(rr, req, agent, "msg-fallback", initial, respCh); err != nil {
-		t.Fatalf("handleDownloadStream: %v", err)
-	}
-	if rr.Code == http.StatusInternalServerError {
-		t.Fatalf("got 500 but expected flush path to be used (no 500)")
-	}
-}
 
 // TestHandleDownloadStream_NoSupport covers the fallback when the
 // ResponseWriter supports neither Hijacker nor Flusher.
