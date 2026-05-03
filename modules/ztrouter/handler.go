@@ -158,7 +158,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // setForwardedHeaders populates X-Forwarded-For, X-Real-IP, X-Forwarded-Proto,
 // and X-Forwarded-Host based on r.RemoteAddr and the TLS state. The proxy is
-// the TLS termination point, so these values are authoritative.
+// the TLS termination point and is authoritative — any client-supplied values
+// for these headers are dropped to prevent spoofing.
 func setForwardedHeaders(headers map[string][]string, r *http.Request) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -166,29 +167,19 @@ func setForwardedHeaders(headers map[string][]string, r *http.Request) {
 	}
 	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
 	if host != "" {
-		if existing, ok := headers["X-Forwarded-For"]; ok && len(existing) > 0 {
-			headers["X-Forwarded-For"] = []string{existing[0] + ", " + host}
-		} else {
-			headers["X-Forwarded-For"] = []string{host}
-		}
-		if _, ok := headers["X-Real-Ip"]; !ok {
-			if _, ok2 := headers["X-Real-IP"]; !ok2 {
-				headers["X-Real-Ip"] = []string{host}
-			}
-		}
+		headers["X-Forwarded-For"] = []string{host}
+		delete(headers, "X-Real-Ip")
+		headers["X-Real-IP"] = []string{host}
 	}
 
 	proto := "http"
 	if r.TLS != nil {
 		proto = "https"
 	}
-	if _, ok := headers["X-Forwarded-Proto"]; !ok {
-		headers["X-Forwarded-Proto"] = []string{proto}
-	}
-	if _, ok := headers["X-Forwarded-Host"]; !ok {
-		if r.Host != "" {
-			headers["X-Forwarded-Host"] = []string{r.Host}
-		}
+	headers["X-Forwarded-Proto"] = []string{proto}
+
+	if r.Host != "" {
+		headers["X-Forwarded-Host"] = []string{r.Host}
 	}
 }
 
