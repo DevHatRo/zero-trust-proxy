@@ -8,6 +8,7 @@ import (
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/types"
+	"github.com/devhatro/zero-trust-proxy/modules/zttcp"
 )
 
 // newAppWithWS creates an App with both a registry and a WebSocket manager.
@@ -298,8 +299,9 @@ func TestHandleMessageNilMessage(t *testing.T) {
 
 func TestHandleAgentConnection_RegisterAndDisconnect(t *testing.T) {
 	app := &App{rt: &runtime{
-		registry:  newRegistry(),
-		wsManager: common.NewWebSocketManager(),
+		registry:   newRegistry(),
+		wsManager:  common.NewWebSocketManager(),
+		tcpManager: zttcp.NewManager(),
 	}}
 
 	client, server := net.Pipe()
