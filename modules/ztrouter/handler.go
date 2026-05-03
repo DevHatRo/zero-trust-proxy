@@ -3,6 +3,7 @@ package ztrouter
 import (
 	"bytes"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -71,6 +72,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		headers[k] = v
 	}
 	headers["Host"] = []string{host}
+	setForwardedHeaders(headers, r)
 
 	respCh := make(chan *common.Message, 16)
 	var closed int32
@@ -151,6 +153,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case <-time.After(requestTimeout):
 		http.Error(w, "Agent response timeout", http.StatusGatewayTimeout)
+	}
+}
+
+// setForwardedHeaders populates X-Forwarded-For, X-Real-IP, X-Forwarded-Proto,
+// and X-Forwarded-Host based on r.RemoteAddr and the TLS state. The proxy is
+// the TLS termination point and is authoritative — any client-supplied values
+// for these headers are dropped to prevent spoofing.
+func setForwardedHeaders(headers map[string][]string, r *http.Request) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if host != "" {
+		headers["X-Forwarded-For"] = []string{host}
+		delete(headers, "X-Real-Ip")
+		headers["X-Real-IP"] = []string{host}
+	}
+
+	proto := "http"
+	if r.TLS != nil {
+		proto = "https"
+	}
+	headers["X-Forwarded-Proto"] = []string{proto}
+
+	if r.Host != "" {
+		headers["X-Forwarded-Host"] = []string{r.Host}
 	}
 }
 
