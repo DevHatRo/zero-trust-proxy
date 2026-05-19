@@ -183,11 +183,17 @@ func setForwardedHeaders(headers map[string][]string, r *http.Request) {
 	}
 }
 
+// requestURL returns the path (and query) to forward to the agent. It uses
+// EscapedPath rather than the decoded Path so that percent-encoded path
+// separators (%2F) survive the proxy hop intact. Backends that route on the
+// raw path — e.g. branch/ref names like "feature/x" or "release/1.2" carried
+// in a single path segment as "feature%2Fx" — would otherwise see an extra
+// segment after decoding and fail to match their route.
 func requestURL(r *http.Request) string {
 	if r.URL.RawQuery == "" {
-		return r.URL.Path
+		return r.URL.EscapedPath()
 	}
-	return r.URL.Path + "?" + r.URL.RawQuery
+	return r.URL.EscapedPath() + "?" + r.URL.RawQuery
 }
 
 func writeAgentResponse(w http.ResponseWriter, resp *common.Message) {

@@ -408,3 +408,28 @@ func TestHandler_BodyReadError(t *testing.T) {
 type alwaysErrReader struct{}
 
 func (r *alwaysErrReader) Read(p []byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+// TestRequestURL_PreservesEncodedSlash guards the proxy hop against collapsing
+// percent-encoded path separators. A backend that routes on the raw path (e.g.
+// a branch/ref name like "feature/x" carried as "feature%2Fx" in one segment)
+// gets an extra path segment and a spurious 404 if %2F is decoded here.
+func TestRequestURL_PreservesEncodedSlash(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"encoded slash in segment", "http://h.example.com/api/pr/pr/38%2Fscans", "/api/pr/pr/38%2Fscans"},
+		{"encoded slash with query", "http://h.example.com/api/refs/feature%2Fx?full=1", "/api/refs/feature%2Fx?full=1"},
+		{"plain path unchanged", "http://h.example.com/hello/world", "/hello/world"},
+		{"plain path with query", "http://h.example.com/a/b?x=1&y=2", "/a/b?x=1&y=2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.target, nil)
+			if got := requestURL(req); got != tt.want {
+				t.Fatalf("requestURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
