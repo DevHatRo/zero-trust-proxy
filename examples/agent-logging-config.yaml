@@ -25,8 +25,6 @@ server:
 # Zero Trust Proxy agent application logging configuration
 # Note: Each module automatically sets its own hierarchical component name:
 # - agent: Agent core functionality
-# - caddy.manager: Caddy configuration management
-# - caddy.validation: Caddy configuration validation
 # - common.websocket: WebSocket connection management
 # - common.cert: Certificate handling
 # - common.hotreload: Configuration hot reloading

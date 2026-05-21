@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -363,7 +364,7 @@ func TestLogConfigChanges_LegacyLogLevel(t *testing.T) {
 
 func TestConfigureServiceWithRetry_ResponseError(t *testing.T) {
 	a, client := newFullAgent(t)
-	a.caddyValidator = &alwaysValidValidator{}
+	a.validator = &alwaysValidValidator{}
 	a.mu.Lock()
 	a.registered = true
 	a.mu.Unlock()
@@ -477,7 +478,7 @@ func TestGetConfigPath(t *testing.T) {
 func TestReloadConfig_MissingFile(t *testing.T) {
 	a := newTestAgent()
 	a.config = &AgentConfig{}
-	a.config.ConfigPath = "/nonexistent/config.yaml"
+	a.config.ConfigPath = filepath.Join(t.TempDir(), "missing.yaml")
 	err := a.ReloadConfig()
 	if err == nil {
 		t.Fatal("expected error reloading missing config file")
@@ -708,4 +709,3 @@ func TestHandleUploadStart_NoServiceForHost(t *testing.T) {
 		},
 	}, ch)
 }
-

@@ -1,6 +1,5 @@
-// Command zero-trust-proxy is the custom server entrypoint that
-// replaces the legacy custom-Caddy binary. It owns TLS termination,
-// HTTP routing, and the agent mTLS control plane.
+// Command zero-trust-proxy is the server entrypoint. It owns TLS
+// termination, HTTP routing, and the agent mTLS control plane.
 package main
 
 import (

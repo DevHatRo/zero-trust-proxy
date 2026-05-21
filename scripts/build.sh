@@ -5,9 +5,7 @@ BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS="-w -s -X main.Version=$VERSION -X main.BuildTime=$BUILD_TIME"
 
 
-# Build server binary (custom zero-trust-proxy server, replacing the
-# legacy custom-Caddy build). The legacy ./cmd/caddy entrypoint still
-# exists during the migration but is no longer the shipped artifact.
+# Build server binary.
 echo "Building server binaries (version=$VERSION, build_time=$BUILD_TIME)..."
 
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="$LDFLAGS" -o ./bin/zero-trust-proxy-server-linux-amd64 ./cmd/zero-trust-proxy

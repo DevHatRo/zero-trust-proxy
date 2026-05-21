@@ -1,8 +1,7 @@
-// Package server is the lifecycle orchestrator for the custom
+// Package server is the lifecycle orchestrator for the
 // zero-trust-proxy binary. It owns the agent mTLS listener, the public
 // HTTPS listener, and the optional HTTP redirector, and wires the
-// existing modules/ztagents and modules/ztrouter packages together
-// without going through Caddy.
+// modules/ztagents and modules/ztrouter packages together.
 package server
 
 import (

@@ -116,7 +116,7 @@ func main() {
 
 	log.Debug("🔒 TLS configuration loaded successfully")
 
-	// Create Caddy validator for agent-side validation
+	// Create service-config validator for agent-side validation
 	validator := serviceconfig.NewValidatorWithContext(serviceconfig.AgentValidation)
 
 	// Create agent with configuration (configPath is now stored in config.ConfigPath)
