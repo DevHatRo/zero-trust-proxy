@@ -217,3 +217,17 @@ Caddy in a single commit.
 - Metrics / Prometheus exporter (separate effort).
 - Per-agent TLS configs at the public listener.
 - Protocol changes — agent ⟷ server JSON wire format is untouched.
+
+## Post-migration addendum
+
+The "Out of scope" items above describe the migration itself. Two of
+them shipped afterwards as separate efforts:
+
+- **HTTP/3 / QUIC** — `internal/server/http3.go`, opt-in via
+  `listen.http3`. The HTTPS listener advertises `Alt-Svc`.
+- **Prometheus metrics** — `internal/server/metrics.go`, opt-in via
+  `metrics.addr`.
+
+As a result `go.mod` now also carries `github.com/quic-go/quic-go` and
+`github.com/prometheus/client_golang` as direct dependencies, in
+addition to the four listed in Step 9.

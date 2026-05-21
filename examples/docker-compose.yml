@@ -7,14 +7,14 @@ services:
     restart: unless-stopped
     ports:
       - "8443:8443"    # Agent connections (mTLS)
-      - "80:80"        # HTTP traffic (Caddy integration)
-      - "443:443"      # HTTPS traffic (Caddy integration)
-      - "9443:9443"    # Internal API (optional, for debugging)
+      - "80:80"        # HTTP (redirect + ACME HTTP-01 challenge)
+      - "443:443"      # HTTPS (public traffic)
     volumes:
       - ./config:/config:ro
       - ./config/certs:/certs:ro
-      - caddy-data:/config/caddy/storage
-      - caddy-config:/config/caddy
+      # Writable ACME storage (tls.mode: acme). The /config mount above is
+      # read-only, so issued certificates need their own writable volume.
+      - acme-data:/config/acme
     environment:
       - LOG_LEVEL=INFO
       - TZ=UTC
@@ -38,8 +38,6 @@ services:
         max-file: "3"
 
 volumes:
-  # Persistent storage for Caddy data and configuration
-  caddy-data:
-    driver: local
-  caddy-config:
+  # Persistent storage for ACME-issued certificates
+  acme-data:
     driver: local

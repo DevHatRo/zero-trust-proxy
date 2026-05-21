@@ -10,11 +10,11 @@ import (
 
 const defaultCheckAddr = "127.0.0.1:2020"
 
-// startCheckServer runs a localhost HTTP listener that answers Caddy's
-// on_demand_tls `ask` queries. Returns 200 if the requested domain has an
-// active agent-registered service, 403 otherwise. We don't use Caddy's admin
-// API here because module-provided admin routes are unreliable across Caddy
-// versions; this internal listener is deterministic and testable.
+// startCheckServer runs the optional legacy localhost domain-check
+// endpoint (configured via agents.check_addr). Returns 200 if the
+// requested domain has an active agent-registered service, 403
+// otherwise. The in-process ACME HostPolicy consults the same registry
+// directly; this listener is retained only for external tooling.
 func (a *App) startCheckServer() error {
 	addr := a.CheckAddr
 	if addr == "" {

@@ -1,5 +1,5 @@
-# Smoke-test config — equivalent of the legacy config/caddy.smoke.json.
-# Uses non-privileged ports so it can run in CI / local dev without root.
+# Smoke-test config — uses non-privileged ports so it can run in CI /
+# local dev without root.
 listen:
   http: ""
   https: ":18080"

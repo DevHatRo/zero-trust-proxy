@@ -146,7 +146,7 @@ func SetComponent(component string) {
 
 // formatConsole formats a log message for console output
 func (l *Logger) formatConsole(level LogLevel, msg string) string {
-	// Format timestamp like Caddy: "2025/06/16 12:05:17.420"
+	// Timestamp format: "2025/06/16 12:05:17.420"
 	now := time.Now().Format("2006/01/02 15:04:05.000")
 	levelName := levelNames[level]
 

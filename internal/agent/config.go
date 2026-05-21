@@ -10,8 +10,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Enhanced configuration structures supporting Caddy-style features
-
 // AgentConfig represents the complete agent configuration
 type AgentConfig struct {
 	ConfigPath       string                 `yaml:"-"` // File path for hot reload (not serialized)

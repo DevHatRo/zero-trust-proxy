@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -153,8 +154,8 @@ type Agent struct {
 	reconnectMu         sync.Mutex
 	// Hot reload management
 	hotReloadManager *common.HotReloadManager
-	// Caddy configuration validation
-	caddyValidator types.ServiceValidator
+	// Service configuration validation
+	validator types.ServiceValidator
 	// stopCh is closed when the agent shuts down; health check goroutines select on it.
 	stopCh chan struct{}
 	// Streamed upload channels, keyed by msgID. Populated on http_upload_start,
@@ -179,7 +180,7 @@ func NewAgent(id, serverAddress string, tlsConfig *tls.Config, validator types.S
 		reconnectInProgress: false,
 		reconnectMu:         sync.Mutex{},
 		hotReloadManager:    common.NewHotReloadManager(),
-		caddyValidator:      validator,
+		validator:           validator,
 		uploadChans:         make(map[string]chan *common.Message),
 		tcpConns:            make(map[string]net.Conn),
 		stopCh:              make(chan struct{}),
@@ -209,7 +210,7 @@ func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config, validator ty
 		reconnectInProgress: false,
 		reconnectMu:         sync.Mutex{},
 		hotReloadManager:    common.NewHotReloadManager(),
-		caddyValidator:      validator,
+		validator:           validator,
 		uploadChans:         make(map[string]chan *common.Message),
 		tcpConns:            make(map[string]net.Conn),
 		stopCh:              make(chan struct{}),
@@ -639,13 +640,13 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 		req.Header.Set("X-Forwarded-Host", originalHost)
 	}
 
-	// Add X-Forwarded-Proto (the original protocol - HTTPS since it came through Caddy)
+	// Add X-Forwarded-Proto (the original protocol - HTTPS since it came through the proxy)
 	req.Header.Set("X-Forwarded-Proto", "https")
 
-	// Extract client IP from the headers that Caddy set
+	// Extract client IP from the headers that the proxy set
 	clientIP := ""
 
-	// Try to get the real client IP from X-Forwarded-For (set by Caddy)
+	// Try to get the real client IP from X-Forwarded-For (set by the proxy)
 	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
 		// X-Forwarded-For can be "ip1, ip2, ip3" - take the first (original client)
 		parts := strings.Split(xff, ",")
@@ -1339,7 +1340,7 @@ func (a *Agent) buildWebSocketUpgradeRequest(msg *common.Message) string {
 	// Add X-Forwarded-Host (the original host the client requested)
 	request.WriteString(fmt.Sprintf("X-Forwarded-Host: %s\r\n", originalHost))
 
-	// Add X-Forwarded-Proto (the original protocol - HTTPS since it came through Caddy)
+	// Add X-Forwarded-Proto (the original protocol - HTTPS since it came through the proxy)
 	request.WriteString("X-Forwarded-Proto: https\r\n")
 
 	// Add client IP headers if available
@@ -1651,18 +1652,18 @@ func (a *Agent) loadAndRegisterServices() error {
 			// Convert enhanced config to common ServiceConfig for validation
 			commonServiceForValidation := a.convertToCommonServiceConfig(&serviceConfig, hostname)
 			typesServiceForValidation := convertCommonToTypes(commonServiceForValidation)
-			validationResult := a.caddyValidator.ValidateServiceConfig(typesServiceForValidation)
+			validationResult := a.validator.ValidateServiceConfig(typesServiceForValidation)
 
 			if !validationResult.Valid {
 				var errorMessages []string
 				for _, err := range validationResult.Errors {
 					errorMessages = append(errorMessages, err.Error())
 				}
-				return fmt.Errorf("❌ Caddy configuration validation failed for service %s (host: %s): %s",
+				return fmt.Errorf("❌ service configuration validation failed for service %s (host: %s): %s",
 					serviceConfig.ID, hostname, strings.Join(errorMessages, "; "))
 			}
 
-			log.Info("✅ Caddy configuration validation passed for service %s (host: %s)", serviceConfig.ID, hostname)
+			log.Info("✅ service configuration validation passed for service %s (host: %s)", serviceConfig.ID, hostname)
 
 			// Convert enhanced config to common ServiceConfig for server registration
 			commonService := a.convertToCommonServiceConfig(&serviceConfig, hostname)
@@ -1936,23 +1937,23 @@ func (a *Agent) configureServiceWithRetry(config *common.ServiceConfig, maxAttem
 	var lastErr error
 
 	// Validate configuration BEFORE attempting to send to server
-	log.Debug("🔍 Validating Caddy configuration for service: %s", config.Hostname)
+	log.Debug("🔍 Validating service configuration for service: %s", config.Hostname)
 	typesConfig := convertCommonToTypes(config)
-	validationResult := a.caddyValidator.ValidateServiceConfig(typesConfig)
+	validationResult := a.validator.ValidateServiceConfig(typesConfig)
 
 	if !validationResult.Valid {
 		var errorMessages []string
 		for _, err := range validationResult.Errors {
 			errorMessages = append(errorMessages, err.Error())
 		}
-		return fmt.Errorf("❌ Caddy configuration validation failed for service %s: %s",
+		return fmt.Errorf("❌ service configuration validation failed for service %s: %s",
 			config.Hostname, strings.Join(errorMessages, "; "))
 	}
 
-	log.Info("✅ Caddy configuration validation passed for service: %s", config.Hostname)
+	log.Info("✅ service configuration validation passed for service: %s", config.Hostname)
 
 	// Track this service for future conflict detection
-	a.caddyValidator.AddExistingService(config.Hostname, typesConfig)
+	a.validator.AddExistingService(config.Hostname, typesConfig)
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// Check registration status before each attempt
@@ -2691,6 +2692,14 @@ func (a *Agent) attemptReconnection(source string) {
 func (a *Agent) reloadConfig() error {
 	log.Info("🔄 Reloading configuration from %s", a.config.ConfigPath)
 
+	// On reload the config file must already exist. Unlike initial
+	// startup, LoadConfig's "write a fresh default" fallback is wrong
+	// here — a missing file should surface as an error, not silently
+	// reset the agent's services to a blank default.
+	if _, err := os.Stat(a.config.ConfigPath); err != nil {
+		return fmt.Errorf("failed to load new config: %w", err)
+	}
+
 	// Load new config
 	newConfig, err := LoadConfig(a.config.ConfigPath)
 	if err != nil {
@@ -2789,7 +2798,7 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 		log.Debug("🔍 Validating new service configuration for host: %s", host)
 		commonServiceToValidate := a.convertToCommonServiceConfig(service, host)
 		typesServiceToValidate := convertCommonToTypes(commonServiceToValidate)
-		validationResult := a.caddyValidator.ValidateServiceConfig(typesServiceToValidate)
+		validationResult := a.validator.ValidateServiceConfig(typesServiceToValidate)
 
 		if !validationResult.Valid {
 			var errorMessages []string
@@ -2817,13 +2826,13 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 	for host, service := range hostsToUpdate {
 		// IMPORTANT: Remove the old service from validator tracking temporarily
 		// to avoid false hostname conflicts when validating the updated service
-		a.caddyValidator.RemoveExistingService(host)
+		a.validator.RemoveExistingService(host)
 
 		// Validate service configuration for updated services
 		log.Debug("🔍 Validating updated service configuration for host: %s", host)
 		commonServiceToValidate := a.convertToCommonServiceConfig(service, host)
 		typesServiceToValidate := convertCommonToTypes(commonServiceToValidate)
-		validationResult := a.caddyValidator.ValidateServiceConfig(typesServiceToValidate)
+		validationResult := a.validator.ValidateServiceConfig(typesServiceToValidate)
 
 		if !validationResult.Valid {
 			var errorMessages []string
@@ -2835,7 +2844,7 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 			// Re-add the old service back to validator tracking since validation failed
 			if currentService, exists := currentServices[host]; exists {
 				oldTypesService := convertCommonToTypes(currentService)
-				a.caddyValidator.AddExistingService(host, oldTypesService)
+				a.validator.AddExistingService(host, oldTypesService)
 			}
 			continue // Skip this service but continue with others
 		}
@@ -2847,7 +2856,7 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 			// Re-add the old service back to validator tracking since update failed
 			if currentService, exists := currentServices[host]; exists {
 				oldTypesService := convertCommonToTypes(currentService)
-				a.caddyValidator.AddExistingService(host, oldTypesService)
+				a.validator.AddExistingService(host, oldTypesService)
 			}
 		} else {
 			// Store updated service config locally
@@ -2856,7 +2865,7 @@ func (a *Agent) updateServicesFromConfig(newConfig *AgentConfig) error {
 			a.mu.Unlock()
 
 			// Add the new service to validator tracking (replaces the temporarily removed one)
-			a.caddyValidator.AddExistingService(host, typesServiceToValidate)
+			a.validator.AddExistingService(host, typesServiceToValidate)
 
 			log.Info("🔄 Updated service: %s -> %s", host, a.getPrimaryUpstream(service))
 			changeCount++
@@ -2880,7 +2889,7 @@ func (a *Agent) removeService(hostname string) error {
 	a.mu.Unlock()
 
 	// Remove from validator tracking
-	a.caddyValidator.RemoveExistingService(hostname)
+	a.validator.RemoveExistingService(hostname)
 
 	// Send remove message to server (if we have this functionality)
 	// For now, we'll just log since the current protocol focuses on adding services

@@ -33,7 +33,7 @@ echo "Running 'go vet' on our packages..."
 vetIssues=0
 
 # Check main command packages
-for pkg in ./cmd/agent ./cmd/server ./cmd/certgen; do
+for pkg in ./cmd/agent ./cmd/zero-trust-proxy ./cmd/certgen; do
     if go list $pkg &>/dev/null; then
         echo "Checking $pkg..."
         if ! go vet $pkg 2>/dev/null; then
@@ -43,7 +43,7 @@ for pkg in ./cmd/agent ./cmd/server ./cmd/certgen; do
     fi
 done
 
-# Check internal packages (excluding caddy which has dependency issues)
+# Check internal packages
 for pkg in ./internal/logger ./internal/common ./internal/agent ./internal/server; do
     if go list $pkg &>/dev/null; then
         echo "Checking $pkg..."
@@ -77,7 +77,7 @@ else
     echo "✅ No TODO/FIXME comments found."
 fi
 
-# 5. Build check for our packages (excluding problematic Caddy module)
+# 5. Build check for our packages
 echo "Checking if our main packages build successfully..."
 buildSuccess=1
 
@@ -85,7 +85,7 @@ buildSuccess=1
 mkdir -p bin
 
 # Build main commands
-for pkg in ./cmd/agent ./cmd/server ./cmd/certgen; do
+for pkg in ./cmd/agent ./cmd/zero-trust-proxy ./cmd/certgen; do
     binary_name=$(basename $pkg)
     echo "Building $pkg -> bin/$binary_name..."
     if go build -o bin/$binary_name $pkg; then

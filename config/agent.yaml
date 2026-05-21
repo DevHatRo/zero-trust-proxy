@@ -1,5 +1,5 @@
 # Enhanced Agent Configuration
-# Supports multiple services, advanced routing, middleware, and Caddy-style features
+# Supports multiple services, advanced routing, and middleware
 
 # Zero Trust Proxy agent logging configuration
 logging:

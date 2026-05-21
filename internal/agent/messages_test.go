@@ -19,7 +19,7 @@ func (v *alwaysValidValidator) ValidateServiceConfig(_ *types.ServiceConfig) *ty
 	return &types.ValidationResult{Valid: true}
 }
 func (v *alwaysValidValidator) AddExistingService(_ string, _ *types.ServiceConfig) {}
-func (v *alwaysValidValidator) RemoveExistingService(_ string)                       {}
+func (v *alwaysValidValidator) RemoveExistingService(_ string)                      {}
 func (v *alwaysValidValidator) GetExistingServices() map[string]*types.ServiceConfig {
 	return nil
 }
@@ -674,7 +674,7 @@ func TestConfigureService_ValidationFails(t *testing.T) {
 
 func TestConfigureService_RegisteredSendsMessage(t *testing.T) {
 	a, client := newFullAgent(t)
-	a.caddyValidator = &alwaysValidValidator{}
+	a.validator = &alwaysValidValidator{}
 	a.mu.Lock()
 	a.registered = true
 	a.mu.Unlock()

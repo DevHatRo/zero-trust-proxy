@@ -79,8 +79,8 @@ type LoggingConfig struct {
 	AccessLog bool   `yaml:"access_log,omitempty" json:"access_log,omitempty"`
 }
 
-// Defaults returns a Config populated with the same defaults the legacy
-// Caddyfile.example produces. Callers overlay user YAML on top.
+// Defaults returns a Config populated with sensible built-in defaults.
+// Callers overlay user YAML on top.
 func Defaults() Config {
 	return Config{
 		Listen: ListenConfig{
