@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 
@@ -31,10 +32,10 @@ type certEntry struct {
 // HTTPS listener plus optional state for ACME and reload.
 type tlsBundle struct {
 	tlsConfig   *tls.Config
-	acmeHandler http.Handler        // mount at :80 for HTTP-01 challenges (acme mode only)
-	acme        *autocert.Manager   // nil unless mode == acme
+	acmeHandler http.Handler      // mount at :80 for HTTP-01 challenges (acme mode only)
+	acme        *autocert.Manager // nil unless mode == acme
 	mode        serverconfig.TLSMode
-	manualCert  *certEntry          // mode == manual
+	manualCert  *certEntry            // mode == manual
 	sniCerts    map[string]*certEntry // mode == sni; key is lowercase hostname
 }
 
@@ -124,14 +125,21 @@ func buildTLSConfig(cfg serverconfig.TLSConfig, lookup HostLookup) (*tlsBundle, 
 		}, nil
 
 	case serverconfig.TLSModeACME:
+		// Remember hosts that have been served so a certificate can still be
+		// obtained/served while the agent is down (e.g. after a restart with no
+		// agents connected). Without this, HostPolicy would reject every host
+		// and the TLS handshake would fail before ztrouter could render the
+		// "Agent Unreachable" page. See knownHosts for the rationale.
+		known := loadKnownHosts(filepath.Join(cfg.ACME.StorageDir, "known_hosts.json"))
 		hostPolicy := autocert.HostPolicy(func(_ context.Context, host string) error {
-			if lookup == nil {
-				return fmt.Errorf("no host lookup configured")
+			if lookup != nil && lookup(host) {
+				known.add(host) // currently served — record it for future restarts
+				return nil
 			}
-			if !lookup(host) {
-				return fmt.Errorf("host %q not registered with any agent", host)
+			if known.has(host) {
+				return nil // previously served — allow cached/re-issued cert so the page can load
 			}
-			return nil
+			return fmt.Errorf("host %q not registered with any agent", host)
 		})
 		m := &autocert.Manager{
 			Cache:      autocert.DirCache(cfg.ACME.StorageDir),
