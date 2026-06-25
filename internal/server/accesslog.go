@@ -28,7 +28,7 @@ import (
 func accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		ri := &common.RequestInfo{}
+		ri := &common.RequestInfo{RequestID: common.NewRequestID()}
 		r = r.WithContext(common.WithRequestInfo(r.Context(), ri))
 		rw := &accessLogRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
@@ -42,6 +42,7 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 			Bytes      int64  `json:"bytes"`
 			DurationMS int64  `json:"duration_ms"`
 			AgentID    string `json:"agent_id,omitempty"`
+			RequestID  string `json:"request_id,omitempty"`
 			ClientIP   string `json:"client_ip,omitempty"`
 		}{
 			TS:         start.UTC().Format(time.RFC3339Nano),
@@ -52,6 +53,7 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 			Bytes:      rw.bytes,
 			DurationMS: time.Since(start).Milliseconds(),
 			AgentID:    ri.AgentID,
+			RequestID:  ri.RequestID,
 			ClientIP:   clientIP(r.RemoteAddr),
 		}
 		b, err := json.Marshal(entry)

@@ -303,18 +303,25 @@ func TestHandler_ContextCancelled(t *testing.T) {
 
 func TestWriteAgentResponse_ErrorField(t *testing.T) {
 	rr := httptest.NewRecorder()
-	writeAgentResponse(rr, &common.Message{Error: "backend unavailable"})
+	req := httptest.NewRequest(http.MethodGet, "http://x.example.com/", nil)
+	writeAgentResponse(rr, req, &common.Message{Error: "backend unavailable"})
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status=%d, want 502", rr.Code)
 	}
-	if !strings.Contains(rr.Body.String(), "backend unavailable") {
-		t.Fatalf("body=%q, want error message", rr.Body.String())
+	body := rr.Body.String()
+	if !strings.Contains(body, "Agent Error") {
+		t.Fatalf("body=%q, want branded title", body)
+	}
+	// The raw agent error is log-only and must not be echoed to the client.
+	if strings.Contains(body, "backend unavailable") {
+		t.Fatalf("body leaked raw agent error: %q", body)
 	}
 }
 
 func TestWriteAgentResponse_NilHTTP(t *testing.T) {
 	rr := httptest.NewRecorder()
-	writeAgentResponse(rr, &common.Message{})
+	req := httptest.NewRequest(http.MethodGet, "http://x.example.com/", nil)
+	writeAgentResponse(rr, req, &common.Message{})
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status=%d, want 502", rr.Code)
 	}
@@ -322,7 +329,8 @@ func TestWriteAgentResponse_NilHTTP(t *testing.T) {
 
 func TestWriteAgentResponse_ZeroStatusDefaultsTo200(t *testing.T) {
 	rr := httptest.NewRecorder()
-	writeAgentResponse(rr, &common.Message{
+	req := httptest.NewRequest(http.MethodGet, "http://x.example.com/", nil)
+	writeAgentResponse(rr, req, &common.Message{
 		HTTP: &common.HTTPData{
 			StatusCode: 0,
 			Headers:    map[string][]string{"X-Test": {"yes"}},

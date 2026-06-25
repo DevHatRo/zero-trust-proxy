@@ -50,8 +50,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	agent, svc, ok := h.app.LookupService(host)
 	if !ok {
-		log.Debug("ztrouter: no agent for host=%s", host)
-		http.Error(w, "No agent for host "+host, http.StatusServiceUnavailable)
+		writeProxyError(w, r, proxyError{
+			Status:  http.StatusServiceUnavailable,
+			Title:   "Agent Unreachable",
+			Summary: "No agent is currently connected to serve this hostname.",
+			Advice:  "The service may be starting up or temporarily offline. Wait a moment and retry; if it persists, confirm the agent for this host is running and registered.",
+			Failed:  nodeAgent,
+		})
 		return
 	}
 	if ri := common.RequestInfoFrom(r.Context()); ri != nil {
@@ -98,8 +103,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			msgID, r.Body, msgID, r.ContentLength,
 			r.Method, requestURL(r), headers, agent,
 		); err != nil {
-			log.Error("ztrouter: upload stream to agent %s: %v", agent.ID, err)
-			http.Error(w, "Failed to stream upload: "+err.Error(), http.StatusBadGateway)
+			writeProxyError(w, r, proxyError{
+				Status:  http.StatusBadGateway,
+				Title:   "Upload Failed",
+				Summary: "The proxy could not deliver your upload to the agent.",
+				Advice:  "The connection to the agent was interrupted. Retry the upload; if it keeps failing, check the agent's connectivity.",
+				Detail:  err.Error(),
+				Failed:  nodeAgent,
+			})
 			return
 		}
 	} else {
@@ -124,8 +135,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 		if err := agent.SendMessage(httpMsg); err != nil {
-			log.Error("ztrouter: send to agent %s: %v", agent.ID, err)
-			http.Error(w, "Failed to forward request", http.StatusBadGateway)
+			writeProxyError(w, r, proxyError{
+				Status:  http.StatusBadGateway,
+				Title:   "Agent Connection Lost",
+				Summary: "The connection to the agent dropped before your request could be delivered.",
+				Advice:  "The agent may have just disconnected. Retry shortly; if the error continues, verify the agent is connected to the proxy.",
+				Detail:  err.Error(),
+				Failed:  nodeAgent,
+			})
 			return
 		}
 	}
@@ -148,11 +165,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		writeAgentResponse(w, resp)
+		writeAgentResponse(w, r, resp)
 	case <-r.Context().Done():
 		return
 	case <-time.After(requestTimeout):
-		http.Error(w, "Agent response timeout", http.StatusGatewayTimeout)
+		writeProxyError(w, r, proxyError{
+			Status:  http.StatusGatewayTimeout,
+			Title:   "Agent Timeout",
+			Summary: "The agent did not respond in time.",
+			Advice:  "The backend may be slow or overloaded. Retry in a moment; if timeouts persist, check the upstream service behind the agent.",
+			Failed:  nodeAgent,
+		})
 	}
 }
 
@@ -196,13 +219,26 @@ func requestURL(r *http.Request) string {
 	return r.URL.EscapedPath() + "?" + r.URL.RawQuery
 }
 
-func writeAgentResponse(w http.ResponseWriter, resp *common.Message) {
+func writeAgentResponse(w http.ResponseWriter, r *http.Request, resp *common.Message) {
 	if resp.Error != "" {
-		http.Error(w, resp.Error, http.StatusBadGateway)
+		writeProxyError(w, r, proxyError{
+			Status:  http.StatusBadGateway,
+			Title:   "Agent Error",
+			Summary: "The agent reported an error while handling your request.",
+			Advice:  "This usually means the upstream service behind the agent failed. Retry, or check the backend the agent proxies to.",
+			Detail:  resp.Error,
+			Failed:  nodeAgent,
+		})
 		return
 	}
 	if resp.HTTP == nil {
-		http.Error(w, "Invalid response from agent", http.StatusBadGateway)
+		writeProxyError(w, r, proxyError{
+			Status:  http.StatusBadGateway,
+			Title:   "Invalid Agent Response",
+			Summary: "The agent returned a malformed response.",
+			Advice:  "This is unexpected. Retry the request; if it continues, inspect the agent logs.",
+			Failed:  nodeAgent,
+		})
 		return
 	}
 
