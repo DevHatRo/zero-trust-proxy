@@ -102,6 +102,42 @@ func TestBuildTLS_ACME_HostPolicyConsultsLookup(t *testing.T) {
 	}
 }
 
+// TestBuildTLS_ACME_KnownHostSurvivesAgentDown verifies that a host served
+// while its agent was connected stays allowed by HostPolicy after the agent
+// goes away (simulated by a fresh bundle built from the same storage dir with
+// a lookup that now returns false). This is what lets a cached cert be served
+// on restart so the branded error page can render instead of ERR_SSL.
+func TestBuildTLS_ACME_KnownHostSurvivesAgentDown(t *testing.T) {
+	dir := t.TempDir()
+	mkACME := func(lookup HostLookup) *tlsBundle {
+		b, err := buildTLSConfig(serverconfig.TLSConfig{
+			Mode: serverconfig.TLSModeACME,
+			ACME: &serverconfig.ACMEConfig{StorageDir: dir, Email: "ops@example.com"},
+		}, lookup)
+		if err != nil {
+			t.Fatalf("buildTLSConfig: %v", err)
+		}
+		return b
+	}
+
+	// Agent connected: host passes and is recorded.
+	up := mkACME(func(host string) bool { return host == "nas.example" })
+	if err := up.acme.HostPolicy(t.Context(), "nas.example"); err != nil {
+		t.Fatalf("HostPolicy(nas.example) while up = %v, want nil", err)
+	}
+
+	// Simulate restart with NO agents: lookup returns false for everything.
+	down := mkACME(func(string) bool { return false })
+	if err := down.acme.HostPolicy(t.Context(), "nas.example"); err != nil {
+		t.Fatalf("HostPolicy(nas.example) after restart/agent-down = %v, want nil (known host)", err)
+	}
+	// A host that was never served must still be rejected — issuance is not
+	// broadened to arbitrary SNI.
+	if err := down.acme.HostPolicy(t.Context(), "never-seen.example"); err == nil {
+		t.Fatal("HostPolicy(never-seen.example) = nil, want error")
+	}
+}
+
 // writeKeyPair generates a short-lived self-signed cert/key and writes
 // them as PEM files in a temp directory. Returns paths.
 func writeKeyPair(t *testing.T, cn string) (certPath, keyPath string) {
