@@ -1,6 +1,7 @@
 package ztrouter
 
 import (
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -117,13 +118,55 @@ func TestNodeStatuses_ClientFailureMarksLaterUnknown(t *testing.T) {
 func TestWantsHTML(t *testing.T) {
 	cases := map[string]bool{
 		"text/html,application/xhtml+xml,application/xml;q=0.9": true,
-		"*/*":              false,
-		"application/json": false,
-		"":                 false,
+		"text/html;q=0.9":                   true,
+		"*/*":                               false,
+		"application/json":                  false,
+		"":                                  false,
+		"text/html;q=0":                     false, // explicit opt-out
+		"text/html;q=0, application/json":   false, // opt out, prefer JSON
+		"text/html ; q=0.0":                 false, // spacing + zero
+		"application/json, text/html;q=0":   false,
+		"application/json, text/html;q=0.5": true, // explicitly acceptable
 	}
 	for accept, want := range cases {
 		if got := wantsHTML(newErrReq(accept)); got != want {
 			t.Errorf("wantsHTML(%q)=%v, want %v", accept, got, want)
 		}
+	}
+}
+
+// TestWriteProxyError_RenderFailureFallsBackToPlain verifies that when the
+// HTML template fails to execute, the client gets a plain-text body (with the
+// correct status) instead of a half-written HTML document.
+func TestWriteProxyError_RenderFailureFallsBackToPlain(t *testing.T) {
+	orig := errorPageTmpl
+	// A template referencing a missing field with a strict option errors at
+	// execution time, forcing the render-failure branch.
+	errorPageTmpl = template.Must(
+		template.New("boom").Option("missingkey=error").Parse(`{{.DoesNotExist}}`),
+	)
+	t.Cleanup(func() { errorPageTmpl = orig })
+
+	rr := httptest.NewRecorder()
+	req := newErrReq("text/html")
+	writeProxyError(rr, req, proxyError{
+		Status:  http.StatusBadGateway,
+		Title:   "Agent Error",
+		Summary: "boom",
+		Failed:  nodeAgent,
+	})
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want 502", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("content-type=%q, want text/plain fallback", ct)
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "<") {
+		t.Fatalf("fallback should be plain text, got markup: %q", body)
+	}
+	if !strings.Contains(body, "Agent Error") || !strings.Contains(body, "Request ID:") {
+		t.Fatalf("fallback body missing expected fields: %q", body)
 	}
 }

@@ -1,8 +1,10 @@
 package ztrouter
 
 import (
+	"bytes"
 	"html/template"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,22 +58,17 @@ func writeProxyError(w http.ResponseWriter, r *http.Request, pe proxyError) {
 	}
 
 	if !wantsHTML(r) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(pe.Status)
-		var b strings.Builder
-		b.WriteString(pe.Title)
-		b.WriteByte('\n')
-		b.WriteString(pe.Summary)
-		b.WriteString("\n\nRequest ID: ")
-		b.WriteString(reqID)
-		b.WriteByte('\n')
-		_, _ = w.Write([]byte(b.String()))
+		writePlainError(w, pe, reqID)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(pe.Status)
-	_ = errorPageTmpl.Execute(w, errorPageView{
+	// Render into a buffer first. A template-execution error is then caught
+	// before the status line or any bytes are committed, so it can be logged
+	// and we can fall back to plain text — rather than streaming directly to
+	// the client and leaving a half-written, silently corrupt HTML document on
+	// failure.
+	var buf bytes.Buffer
+	if err := errorPageTmpl.Execute(&buf, errorPageView{
 		Status:    pe.Status,
 		Title:     pe.Title,
 		Summary:   pe.Summary,
@@ -80,7 +77,34 @@ func writeProxyError(w http.ResponseWriter, r *http.Request, pe proxyError) {
 		RequestID: reqID,
 		Timestamp: time.Now().UTC().Format("2006-01-02 15:04:05 MST"),
 		Nodes:     nodeStatuses(pe.Failed),
-	})
+	}); err != nil {
+		log.Error("ztrouter: render error page failed id=%s: %v", reqID, err)
+		writePlainError(w, pe, reqID)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(pe.Status)
+	if _, err := buf.WriteTo(w); err != nil && !isClientGone(err) {
+		log.Error("ztrouter: write error page failed id=%s: %v", reqID, err)
+	}
+}
+
+// writePlainError writes the compact text/plain form of a proxy error. It is
+// both the response for non-HTML clients and the fallback when HTML rendering
+// fails. Shared headers (X-Request-Id, Vary, Cache-Control) are already set by
+// writeProxyError before this is called.
+func writePlainError(w http.ResponseWriter, pe proxyError, reqID string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(pe.Status)
+	var b strings.Builder
+	b.WriteString(pe.Title)
+	b.WriteByte('\n')
+	b.WriteString(pe.Summary)
+	b.WriteString("\n\nRequest ID: ")
+	b.WriteString(reqID)
+	b.WriteByte('\n')
+	_, _ = w.Write([]byte(b.String()))
 }
 
 // requestID returns the request's correlation ID. It reuses the one stamped by
@@ -97,11 +121,38 @@ func requestID(r *http.Request) string {
 	return common.NewRequestID()
 }
 
-// wantsHTML reports whether the client prefers an HTML response. Browsers send
-// an Accept header containing text/html; curl (Accept: */*) and most API
-// clients do not, so they keep the plain-text body.
+// wantsHTML reports whether the client will accept an HTML response, honoring
+// RFC 7231 content negotiation. Browsers list text/html with a positive
+// quality; curl (Accept: */*) and most API clients don't list text/html at all
+// and keep the plain-text body. A client that sends "text/html;q=0" to
+// explicitly opt out is respected and also gets plain text. Note that "*/*"
+// alone does not select HTML — only an explicit, non-zero-quality text/html
+// does — so API clients aren't surprised with markup.
 func wantsHTML(r *http.Request) bool {
-	return strings.Contains(r.Header.Get("Accept"), "text/html")
+	for _, part := range strings.Split(r.Header.Get("Accept"), ",") {
+		if media, q := parseAcceptPart(part); media == "text/html" && q > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// parseAcceptPart splits one comma-separated Accept entry into its lowercased
+// media type and quality value. Quality defaults to 1.0 when no q parameter is
+// present or it fails to parse, matching the RFC 7231 default.
+func parseAcceptPart(part string) (media string, q float64) {
+	q = 1.0
+	fields := strings.Split(part, ";")
+	media = strings.ToLower(strings.TrimSpace(fields[0]))
+	for _, p := range fields[1:] {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if strings.HasPrefix(p, "q=") {
+			if f, err := strconv.ParseFloat(strings.TrimSpace(p[2:]), 64); err == nil {
+				q = f
+			}
+		}
+	}
+	return media, q
 }
 
 type nodeView struct {
