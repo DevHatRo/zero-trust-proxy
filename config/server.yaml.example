@@ -1,5 +1,4 @@
 # Example configuration for the zero-trust-proxy server.
-# Translated 1:1 from the legacy config/Caddyfile.example.
 
 listen:
   http: ":80"
@@ -46,6 +45,10 @@ agents:
   # ACME HostPolicy already consults the registry directly; you only
   # need this if something outside the proxy queries domain liveness.
   check_addr: ":2020"
+  # Optional port range for TCP-service listeners (services with
+  # protocol: tcp get a public port allocated from this range).
+  # tcp_port_min: 20000
+  # tcp_port_max: 30000
 
 router:
   request_timeout: 2m
@@ -53,6 +56,7 @@ router:
 logging:
   level: info        # debug | info | warn | error
   format: console    # console | json
+  access_log: false  # per-request JSON access logs
 
 # Optional Prometheus exporter at /metrics. Bind to a private interface
 # — there is no auth on this endpoint.

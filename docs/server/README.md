@@ -13,10 +13,11 @@ agent mTLS control plane.
 | Package | Role |
 |---------|------|
 | `cmd/zero-trust-proxy` | Entrypoint |
-| `internal/server` | Lifecycle: TLS, listeners, redirector, signal handling |
+| `internal/server` | Lifecycle: TLS, listeners, redirector, HTTP/3, metrics, access log, known-hosts cache, signal handling |
 | `internal/serverconfig` | YAML config schema, loader, validator |
 | `modules/ztagents` | mTLS listener, agent registry, WebSocket session tracking |
-| `modules/ztrouter` | `http.Handler`: per-request agent lookup and mTLS multiplexing |
+| `modules/ztrouter` | `http.Handler`: per-request agent lookup and mTLS multiplexing; branded error pages |
+| `modules/zttcp` | Public TCP listeners for `protocol: tcp` services (byte relay, optional TLS offload) |
 
 ## Build
 
@@ -65,6 +66,8 @@ agents:
   key_file:  config/certs/server.key
   ca_file:   config/certs/ca.crt
   check_addr: ":2020"        # optional legacy ACME-ask endpoint; "" disables
+  tcp_port_min: 20000        # optional: port range for TCP-service listeners
+  tcp_port_max: 30000        #           (protocol: tcp services get a port from this range)
 
 router:
   request_timeout: 2m
@@ -72,6 +75,7 @@ router:
 logging:
   level: info                # debug | info | warn | error
   format: console            # console | json
+  access_log: false          # per-request JSON access logs (method, host, status, duration, agent_id, …)
 
 metrics:
   addr: ""                   # e.g. "127.0.0.1:9100" — Prometheus exporter at /metrics, no auth
@@ -88,6 +92,8 @@ Setting `metrics.addr` enables a Prometheus text-format exporter at
 | `ztp_request_duration_seconds` | histogram | request duration with 5ms–10s buckets |
 | `ztp_agents_registered` | gauge | currently registered agents |
 | `ztp_websocket_sessions` | gauge | active WebSocket sessions |
+| `ztp_agent_services` | gauge | services registered across all agents |
+| `ztp_build_info{version}` | gauge | binary version info (always 1) |
 
 Bind the exporter to a private interface — no authentication is
 applied.
@@ -100,6 +106,7 @@ applied.
 | `:443` | Inbound HTTPS (TLS termination + `ztrouter` handler) |
 | `:8443`| mTLS agent control plane |
 | `:2020`| Optional `check-domain` endpoint (used by ACME `ask` and external tooling) |
+| dynamic | TCP-service listeners — one per `protocol: tcp` service, allocated from `agents.tcp_port_min`–`tcp_port_max` |
 
 ## Environment variables
 
@@ -117,6 +124,14 @@ LOG_LEVEL=DEBUG    # Override log level (DEBUG|INFO|WARN|ERROR)
 5. Start HTTP redirector on `:80` (if `http_redirect: true`), ACME
    `HTTPHandler` mounted at `/.well-known/acme-challenge/*` when
    `tls.mode == acme`.
+
+**Agent-down behavior**
+- If no agent serves a `Host`, `ztrouter` returns a branded error page
+  (HTML for browsers, plain text for API clients) instead of a bare 503.
+- In ACME mode, hostnames that have ever registered are persisted in a
+  known-hosts file (`internal/server/knownhosts.go`); their cached certs
+  keep being served while the agent is down, so clients reach the error
+  page instead of hitting a TLS handshake failure.
 
 **Hot reload — SIGHUP**
 - Re-reads config, swaps cert files / router timeout / log level
