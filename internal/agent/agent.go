@@ -96,6 +96,67 @@ func needsTLS(service *common.ServiceConfig, backendAddr string) bool {
 	return false
 }
 
+// wsDialPlan resolves the dial address and TLS mode for a WebSocket backend.
+// The backend's own scheme prefix is authoritative: service.Protocol describes
+// the client-facing leg, and a service exposed as https very commonly fronts a
+// plain-http backend (e.g. Home Assistant on http://host:8123). Overriding an
+// explicit http:// prefix with TLS — as needsTLS' service-protocol priority
+// would — makes the dial fail while regular HTTP requests to the same backend
+// succeed. This mirrors the precedence handleHTTPRequest uses ("backend
+// already has protocol, use as-is"); needsTLS is only consulted when the
+// backend address carries no scheme.
+func wsDialPlan(service *common.ServiceConfig, backend string) (addr string, useTLS bool) {
+	switch {
+	case strings.HasPrefix(backend, "https://"):
+		addr, useTLS = strings.TrimPrefix(backend, "https://"), true
+	case strings.HasPrefix(backend, "wss://"):
+		addr, useTLS = strings.TrimPrefix(backend, "wss://"), true
+	case strings.HasPrefix(backend, "http://"):
+		addr, useTLS = strings.TrimPrefix(backend, "http://"), false
+	case strings.HasPrefix(backend, "ws://"):
+		addr, useTLS = strings.TrimPrefix(backend, "ws://"), false
+	default:
+		addr, useTLS = backend, needsTLS(service, backend)
+	}
+	// net.Dial needs an explicit port; URLs get theirs from the scheme.
+	if !strings.Contains(addr, ":") {
+		if useTLS {
+			addr += ":443"
+		} else {
+			addr += ":80"
+		}
+	}
+	return addr, useTLS
+}
+
+// readUpgradeResponse reads from conn until the HTTP response header
+// terminator ("\r\n\r\n") has arrived, returning everything read so far —
+// headers plus any bytes glued after them. A single fixed-size read can
+// truncate the headers or silently swallow the backend's first WebSocket
+// frame: Home Assistant, for one, writes its auth_required frame immediately
+// after the 101, often in the same TCP segment. Those trailing bytes must be
+// preserved (they are forwarded as the response body) or the client hangs
+// waiting for a frame that never arrives.
+func readUpgradeResponse(conn net.Conn) ([]byte, error) {
+	var buf []byte
+	tmp := make([]byte, 4096)
+	for {
+		n, err := conn.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+			if bytes.Contains(buf, []byte("\r\n\r\n")) {
+				return buf, nil
+			}
+			if len(buf) > 64*1024 {
+				return nil, fmt.Errorf("upgrade response headers exceed 64KiB")
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
 // getHealthCheckScheme determines the HTTP scheme for health checks
 func getHealthCheckScheme(service *ServiceConfig, upstreamAddr string) string {
 	// Priority 1: Service protocol setting
@@ -1011,25 +1072,12 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 		log.Debug("📊 After cleanup delay: Active=%d connections", activeConnections)
 	}
 
-	// Extract backend address
-	backend := service.Backend
-	backendAddr := backend
+	// Resolve dial address and TLS mode. The backend's explicit scheme wins —
+	// service.Protocol is the client-facing protocol and must not force TLS
+	// onto a plain-http backend (see wsDialPlan).
+	backendAddr, shouldUseTLS := wsDialPlan(service, service.Backend)
 
-	// Remove protocol prefix if present and determine the actual address
-	if strings.HasPrefix(backend, "http://") {
-		backendAddr = strings.TrimPrefix(backend, "http://")
-	} else if strings.HasPrefix(backend, "https://") {
-		backendAddr = strings.TrimPrefix(backend, "https://")
-	} else if strings.HasPrefix(backend, "ws://") {
-		backendAddr = strings.TrimPrefix(backend, "ws://")
-	} else if strings.HasPrefix(backend, "wss://") {
-		backendAddr = strings.TrimPrefix(backend, "wss://")
-	}
-
-	log.Info("🔗 Connecting to WebSocket backend: %s", backendAddr)
-
-	// Determine if we need TLS based on the service protocol or backend address
-	shouldUseTLS := needsTLS(service, backendAddr)
+	log.Info("🔗 Connecting to WebSocket backend: %s (tls=%v)", backendAddr, shouldUseTLS)
 
 	var backendConn net.Conn
 	var err error
@@ -1089,15 +1137,15 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 
 	log.Debug("📤 Sent WebSocket upgrade request to backend")
 
-	// Read the upgrade response from backend
-	buffer := make([]byte, 4096)
-	n, err := backendConn.Read(buffer)
+	// Read the upgrade response from backend — complete headers plus any
+	// glued first-frame bytes (forwarded to the client via the response body).
+	raw, err := readUpgradeResponse(backendConn)
 	if err != nil {
 		log.Error("❌ Failed to read upgrade response from backend: %v", err)
 		return
 	}
 
-	response := string(buffer[:n])
+	response := string(raw)
 	log.Info("📥 Backend WebSocket response: %s", strings.Split(response, "\r\n")[0])
 
 	// Debug: Log the complete response for troubleshooting
