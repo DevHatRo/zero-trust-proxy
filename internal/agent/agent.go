@@ -106,27 +106,55 @@ func needsTLS(service *common.ServiceConfig, backendAddr string) bool {
 // already has protocol, use as-is"); needsTLS is only consulted when the
 // backend address carries no scheme.
 func wsDialPlan(service *common.ServiceConfig, backend string) (addr string, useTLS bool) {
-	switch {
-	case strings.HasPrefix(backend, "https://"):
-		addr, useTLS = strings.TrimPrefix(backend, "https://"), true
-	case strings.HasPrefix(backend, "wss://"):
-		addr, useTLS = strings.TrimPrefix(backend, "wss://"), true
-	case strings.HasPrefix(backend, "http://"):
-		addr, useTLS = strings.TrimPrefix(backend, "http://"), false
-	case strings.HasPrefix(backend, "ws://"):
-		addr, useTLS = strings.TrimPrefix(backend, "ws://"), false
-	default:
-		addr, useTLS = backend, needsTLS(service, backend)
-	}
-	// net.Dial needs an explicit port; URLs get theirs from the scheme.
-	if !strings.Contains(addr, ":") {
-		if useTLS {
-			addr += ":443"
-		} else {
-			addr += ":80"
+	scheme, rest := "", backend
+	for _, p := range []string{"https://", "wss://", "http://", "ws://"} {
+		if strings.HasPrefix(backend, p) {
+			scheme = strings.TrimSuffix(p, "://")
+			rest = strings.TrimPrefix(backend, p)
+			break
 		}
 	}
-	return addr, useTLS
+	// Drop any path component — net.Dial wants host:port only.
+	if i := strings.Index(rest, "/"); i >= 0 {
+		rest = rest[:i]
+	}
+	switch scheme {
+	case "https", "wss":
+		useTLS = true
+	case "http", "ws":
+		useTLS = false
+	default:
+		useTLS = needsTLS(service, rest)
+	}
+	return ensureDialPort(rest, useTLS), useTLS
+}
+
+// upgradeResponseTimeout bounds how long the agent waits for a backend's
+// WebSocket upgrade response headers.
+const upgradeResponseTimeout = 30 * time.Second
+
+// dialHostname extracts the host part of a host:port dial address for use as
+// a TLS ServerName. strings.Split(addr, ":")[0] breaks on bracketed IPv6
+// literals ("[::1]:443" would yield "[").
+func dialHostname(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
+// ensureDialPort appends the scheme-implied default port when addr has none.
+// A plain strings.Contains(addr, ":") check misclassifies bracketed IPv6
+// literals ([::1] has colons but no port); net.SplitHostPort gets this right.
+func ensureDialPort(addr string, useTLS bool) string {
+	if _, _, err := net.SplitHostPort(addr); err == nil {
+		return addr
+	}
+	port := "80"
+	if useTLS {
+		port = "443"
+	}
+	return net.JoinHostPort(strings.Trim(addr, "[]"), port)
 }
 
 // readUpgradeResponse reads from conn until the HTTP response header
@@ -137,7 +165,15 @@ func wsDialPlan(service *common.ServiceConfig, backend string) (addr string, use
 // after the 101, often in the same TCP segment. Those trailing bytes must be
 // preserved (they are forwarded as the response body) or the client hangs
 // waiting for a frame that never arrives.
-func readUpgradeResponse(conn net.Conn) ([]byte, error) {
+//
+// The timeout bounds the whole read: a backend that sends partial headers and
+// stalls must not pin this goroutine (and its TCP connection) forever. The
+// deadline is cleared on return — the long-lived frame relay that follows
+// must not inherit it.
+func readUpgradeResponse(conn net.Conn, timeout time.Duration) ([]byte, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+
 	var buf []byte
 	tmp := make([]byte, 4096)
 	for {
@@ -1087,7 +1123,7 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 		log.Debug("🔒 Using TLS connection for HTTPS/WSS backend")
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: true,                               // Skip verification for backends (like curl -k)
-			ServerName:         strings.Split(backendAddr, ":")[0], // Extract hostname
+			ServerName:         dialHostname(backendAddr), // hostname without port (IPv6-safe)
 		}
 		backendConn, err = tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", backendAddr, tlsConfig)
 	} else {
@@ -1139,7 +1175,7 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 
 	// Read the upgrade response from backend — complete headers plus any
 	// glued first-frame bytes (forwarded to the client via the response body).
-	raw, err := readUpgradeResponse(backendConn)
+	raw, err := readUpgradeResponse(backendConn, upgradeResponseTimeout)
 	if err != nil {
 		log.Error("❌ Failed to read upgrade response from backend: %v", err)
 		return

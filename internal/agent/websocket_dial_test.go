@@ -37,6 +37,12 @@ func TestWSDialPlan(t *testing.T) {
 		{"no scheme falls back to service protocol http", "http", "10.0.0.5:8123", "10.0.0.5:8123", false},
 		{"https backend without port gets 443", "http", "https://backend.internal", "backend.internal:443", true},
 		{"http backend without port gets 80", "https", "http://backend.internal", "backend.internal:80", false},
+		{"path component is stripped", "https", "http://10.0.0.5:8123/api/websocket", "10.0.0.5:8123", false},
+		{"path without port is stripped before defaulting", "http", "http://backend.internal/ws", "backend.internal:80", false},
+		{"no scheme with path", "http", "10.0.0.5:8123/ws", "10.0.0.5:8123", false},
+		{"ipv6 with port kept as-is", "http", "http://[::1]:8123", "[::1]:8123", false},
+		{"ipv6 without port gets default", "http", "http://[::1]", "[::1]:80", false},
+		{"ipv6 without port or brackets normalised", "https", "https://[fd00::5]", "[fd00::5]:443", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,8 +69,7 @@ func TestReadUpgradeResponse_GluedFrame(t *testing.T) {
 		_, _ = server.Write(append([]byte(headers), frame...))
 	}()
 
-	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
-	raw, err := readUpgradeResponse(client)
+	raw, err := readUpgradeResponse(client, 2*time.Second)
 	if err != nil {
 		t.Fatalf("readUpgradeResponse: %v", err)
 	}
@@ -91,8 +96,7 @@ func TestReadUpgradeResponse_SplitHeaders(t *testing.T) {
 		_, _ = server.Write([]byte(part2))
 	}()
 
-	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
-	raw, err := readUpgradeResponse(client)
+	raw, err := readUpgradeResponse(client, 2*time.Second)
 	if err != nil {
 		t.Fatalf("readUpgradeResponse: %v", err)
 	}
@@ -116,8 +120,29 @@ func TestReadUpgradeResponse_OversizedHeaders(t *testing.T) {
 		}
 	}()
 
-	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := readUpgradeResponse(client); err == nil {
+	if _, err := readUpgradeResponse(client, 2*time.Second); err == nil {
 		t.Fatal("expected error for oversized headers, got nil")
+	}
+}
+
+// TestReadUpgradeResponse_StalledBackend verifies that a backend which sends
+// partial headers and then goes silent cannot pin the goroutine forever — the
+// read deadline aborts the wait.
+func TestReadUpgradeResponse_StalledBackend(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		_, _ = server.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: web")) // never finishes
+	}()
+
+	start := time.Now()
+	_, err := readUpgradeResponse(client, 150*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error for stalled backend, got nil")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("stalled read took %v — deadline not applied", elapsed)
 	}
 }
