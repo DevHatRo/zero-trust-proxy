@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -43,6 +44,8 @@ func TestWSDialPlan(t *testing.T) {
 		{"ipv6 with port kept as-is", "http", "http://[::1]:8123", "[::1]:8123", false},
 		{"ipv6 without port gets default", "http", "http://[::1]", "[::1]:80", false},
 		{"ipv6 without port or brackets normalised", "https", "https://[fd00::5]", "[fd00::5]:443", true},
+		{"stray trailing bracket is not stripped", "http", "http://backend]", "backend]:80", false},
+		{"stray leading bracket is not stripped", "http", "http://[backend", "[backend:80", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,5 +147,29 @@ func TestReadUpgradeResponse_StalledBackend(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("stalled read took %v — deadline not applied", elapsed)
+	}
+}
+
+// deadlineRefusingConn wraps a net.Conn and fails SetReadDeadline, simulating
+// a connection that cannot install a deadline.
+type deadlineRefusingConn struct {
+	net.Conn
+}
+
+func (c deadlineRefusingConn) SetReadDeadline(time.Time) error {
+	return errors.New("deadline not supported")
+}
+
+// TestReadUpgradeResponse_DeadlineSetupFailure verifies that when the read
+// deadline cannot be installed, the function refuses to read (returning the
+// error) instead of proceeding into a potentially unbounded block.
+func TestReadUpgradeResponse_DeadlineSetupFailure(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	_, err := readUpgradeResponse(deadlineRefusingConn{client}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("expected deadline setup error, got %v", err)
 	}
 }

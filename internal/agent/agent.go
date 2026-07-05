@@ -154,7 +154,13 @@ func ensureDialPort(addr string, useTLS bool) string {
 	if useTLS {
 		port = "443"
 	}
-	return net.JoinHostPort(strings.Trim(addr, "[]"), port)
+	// Unwrap only a matched bracket pair — strings.Trim("[]") would also eat
+	// stray brackets from malformed hostnames.
+	host := addr
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // readUpgradeResponse reads from conn until the HTTP response header
@@ -171,8 +177,17 @@ func ensureDialPort(addr string, useTLS bool) string {
 // deadline is cleared on return — the long-lived frame relay that follows
 // must not inherit it.
 func readUpgradeResponse(conn net.Conn, timeout time.Duration) ([]byte, error) {
-	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		// Without a deadline the read below could block forever — refuse.
+		return nil, fmt.Errorf("set upgrade read deadline: %w", err)
+	}
+	defer func() {
+		if err := conn.SetReadDeadline(time.Time{}); err != nil {
+			// The relay inherits the stale deadline; its reads will fail
+			// loudly with i/o timeout rather than hang, but flag it here.
+			log.Warn("⚠️  Failed to clear upgrade read deadline: %v", err)
+		}
+	}()
 
 	var buf []byte
 	tmp := make([]byte, 4096)
