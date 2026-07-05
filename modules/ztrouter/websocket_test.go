@@ -225,6 +225,79 @@ func drainForMessageType(t *testing.T, c net.Conn, msgType string) *common.Messa
 	}
 }
 
+// TestHandleWebSocketUpgrade_ForwardsGluedBody verifies that bytes the agent
+// captured after the backend's 101 headers (the backend's first WebSocket
+// frame, e.g. Home Assistant's auth_required) are written to the client right
+// after the upgrade response instead of being dropped.
+func TestHandleWebSocketUpgrade_ForwardsGluedBody(t *testing.T) {
+	h := &Handler{}
+	app := ztagents.NewTestApp()
+	h.SetApp(app)
+
+	agentClient, agentServer := net.Pipe()
+	defer agentClient.Close()
+	defer agentServer.Close()
+	agent := ztagents.NewAgent("a-glued", agentServer)
+	// Drain agent-bound messages (websocket_disconnect on relay teardown).
+	go func() { _, _ = io.Copy(io.Discard, agentClient) }()
+
+	serverSide, clientSide := net.Pipe()
+	defer serverSide.Close()
+	defer clientSide.Close()
+	rec := &hijackRecorder{conn: serverSide}
+
+	frame := []byte{0x81, 0x0d, 'a', 'u', 't', 'h', '_', 'r', 'e', 'q', 'u', 'i', 'r', 'e', 'd'}
+	resp := &common.Message{
+		Type: "http_response",
+		ID:   "ws-glued-1",
+		HTTP: &common.HTTPData{
+			StatusCode:    http.StatusSwitchingProtocols,
+			StatusMessage: "101 Switching Protocols",
+			Headers:       map[string][]string{"Upgrade": {"websocket"}, "Connection": {"Upgrade"}},
+			Body:          frame, // glued first-frame bytes from the backend
+			IsWebSocket:   true,
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.handleWebSocketUpgrade(rec, agent, "ws-glued-1", resp) }()
+
+	// Read the 101 + glued frame from the client side of the hijacked conn.
+	_ = clientSide.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var got []byte
+	buf := make([]byte, 4096)
+	for !bytes.HasSuffix(got, frame) {
+		n, err := clientSide.Read(buf)
+		if n > 0 {
+			got = append(got, buf[:n]...)
+		}
+		if err != nil {
+			t.Fatalf("client read: %v (received %q)", err, got)
+		}
+	}
+	if !bytes.HasPrefix(got, []byte("HTTP/1.1 101")) {
+		t.Fatalf("client did not receive the 101 first: %q", got[:min(len(got), 40)])
+	}
+	if !bytes.Contains(got, frame) {
+		t.Fatalf("glued frame not forwarded: %q", got)
+	}
+	// The frame must come after the header terminator.
+	if idx := bytes.Index(got, []byte("\r\n\r\n")); !bytes.Equal(got[idx+4:], frame) {
+		t.Fatalf("bytes after headers = %q, want the glued frame", got[idx+4:])
+	}
+
+	// End the relay: closing the client conn makes relayClientFrames return.
+	_ = clientSide.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("handleWebSocketUpgrade: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleWebSocketUpgrade did not return after client close")
+	}
+}
+
 // TestHandleWebSocketUpgrade_NoHijacker verifies the 500 path when the
 // ResponseWriter doesn't implement http.Hijacker.
 func TestHandleWebSocketUpgrade_NoHijacker(t *testing.T) {

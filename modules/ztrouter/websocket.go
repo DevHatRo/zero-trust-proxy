@@ -69,6 +69,18 @@ func (h *Handler) handleWebSocketUpgrade(
 	if bufrw != nil {
 		_ = bufrw.Writer.Flush()
 	}
+	// Bytes the backend sent glued to its 101 — typically its first WebSocket
+	// frame (e.g. Home Assistant's auth_required) — arrive in the response
+	// body. Forward them here, on the same writer as the 101, so they reach
+	// the client in order instead of being silently dropped.
+	if len(resp.HTTP.Body) > 0 {
+		if _, err := clientConn.Write(resp.HTTP.Body); err != nil {
+			h.app.UnregisterWebSocket(msgID)
+			_ = clientConn.Close()
+			return fmt.Errorf("write initial ws frame (%d bytes): %w", len(resp.HTTP.Body), err)
+		}
+		log.Debug("ztrouter: ws forwarded %d glued handshake bytes id=%s", len(resp.HTTP.Body), msgID)
+	}
 	log.Info("ztrouter: ws upgraded id=%s agent=%s", msgID, agent.ID)
 
 	h.relayClientFrames(clientConn, bufrw, agent, msgID)
