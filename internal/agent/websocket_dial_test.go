@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -37,6 +38,18 @@ func TestWSDialPlan(t *testing.T) {
 		{"no scheme falls back to service protocol http", "http", "10.0.0.5:8123", "10.0.0.5:8123", false},
 		{"https backend without port gets 443", "http", "https://backend.internal", "backend.internal:443", true},
 		{"http backend without port gets 80", "https", "http://backend.internal", "backend.internal:80", false},
+		{"path component is stripped", "https", "http://10.0.0.5:8123/api/websocket", "10.0.0.5:8123", false},
+		{"path without port is stripped before defaulting", "http", "http://backend.internal/ws", "backend.internal:80", false},
+		{"no scheme with path", "http", "10.0.0.5:8123/ws", "10.0.0.5:8123", false},
+		{"ipv6 with port kept as-is", "http", "http://[::1]:8123", "[::1]:8123", false},
+		{"ipv6 without port gets default", "http", "http://[::1]", "[::1]:80", false},
+		{"unbracketed ipv6 gets brackets and default port", "https", "https://fd00::5", "[fd00::5]:443", true},
+		{"bracketed ipv6 without port gets default", "https", "https://[fd00::5]", "[fd00::5]:443", true},
+		{"query suffix is stripped", "https", "http://10.0.0.5:8123?token=x", "10.0.0.5:8123", false},
+		{"fragment suffix is stripped", "https", "http://10.0.0.5:8123#frag", "10.0.0.5:8123", false},
+		{"query without port stripped before defaulting", "http", "backend.internal?x=1", "backend.internal:80", false},
+		{"stray trailing bracket is not stripped", "http", "http://backend]", "backend]:80", false},
+		{"stray leading bracket is not stripped", "http", "http://[backend", "[backend:80", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,8 +76,7 @@ func TestReadUpgradeResponse_GluedFrame(t *testing.T) {
 		_, _ = server.Write(append([]byte(headers), frame...))
 	}()
 
-	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
-	raw, err := readUpgradeResponse(client)
+	raw, err := readUpgradeResponse(client, 2*time.Second)
 	if err != nil {
 		t.Fatalf("readUpgradeResponse: %v", err)
 	}
@@ -91,8 +103,7 @@ func TestReadUpgradeResponse_SplitHeaders(t *testing.T) {
 		_, _ = server.Write([]byte(part2))
 	}()
 
-	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
-	raw, err := readUpgradeResponse(client)
+	raw, err := readUpgradeResponse(client, 2*time.Second)
 	if err != nil {
 		t.Fatalf("readUpgradeResponse: %v", err)
 	}
@@ -116,8 +127,57 @@ func TestReadUpgradeResponse_OversizedHeaders(t *testing.T) {
 		}
 	}()
 
-	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := readUpgradeResponse(client); err == nil {
+	if _, err := readUpgradeResponse(client, 2*time.Second); err == nil {
 		t.Fatal("expected error for oversized headers, got nil")
+	}
+}
+
+// TestReadUpgradeResponse_StalledBackend verifies that a backend which sends
+// partial headers and then goes silent cannot pin the goroutine forever — the
+// read deadline aborts the wait.
+func TestReadUpgradeResponse_StalledBackend(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		_, _ = server.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: web")) // never finishes
+	}()
+
+	start := time.Now()
+	_, err := readUpgradeResponse(client, 150*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error for stalled backend, got nil")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("error should be a net.Error timeout, got %T: %v", err, err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("stalled read took %v — deadline not applied", elapsed)
+	}
+}
+
+// deadlineRefusingConn wraps a net.Conn and fails SetReadDeadline, simulating
+// a connection that cannot install a deadline.
+type deadlineRefusingConn struct {
+	net.Conn
+}
+
+func (c deadlineRefusingConn) SetReadDeadline(time.Time) error {
+	return errors.New("deadline not supported")
+}
+
+// TestReadUpgradeResponse_DeadlineSetupFailure verifies that when the read
+// deadline cannot be installed, the function refuses to read (returning the
+// error) instead of proceeding into a potentially unbounded block.
+func TestReadUpgradeResponse_DeadlineSetupFailure(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	_, err := readUpgradeResponse(deadlineRefusingConn{client}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("expected deadline setup error, got %v", err)
 	}
 }
