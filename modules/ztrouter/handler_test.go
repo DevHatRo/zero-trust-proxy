@@ -23,7 +23,10 @@ type testHarness struct {
 	agent   *ztagents.Agent
 	client  net.Conn // reads what handler sends
 	handler *Handler
+	host    string
 }
+
+func (h *testHarness) agentHost() string { return h.host }
 
 func newHarness(t *testing.T, host string) *testHarness {
 	t.Helper()
@@ -44,7 +47,7 @@ func newHarness(t *testing.T, host string) *testHarness {
 	h := &Handler{RequestTimeout: 2 * time.Second}
 	h.SetApp(app)
 
-	return &testHarness{t: t, app: app, agent: agent, client: client, handler: h}
+	return &testHarness{t: t, app: app, agent: agent, client: client, handler: h, host: host}
 }
 
 // readForwardedRequest drains the pipe to capture the agent-bound message.
