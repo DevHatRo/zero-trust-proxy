@@ -76,6 +76,12 @@ func (h *Handler) streamDownloadFlush(
 	var chunkIdx int
 
 	writeChunk := func(chunk *common.Message) (bool, error) {
+		if chunk != nil && chunk.Error != "" {
+			// Mid-stream failure (e.g. queue overflow, agent-side error).
+			// Surface it so the caller aborts the response instead of
+			// ending the truncated body cleanly.
+			return false, fmt.Errorf("stream aborted after %d bytes: %s", transferred, chunk.Error)
+		}
 		if chunk == nil || chunk.HTTP == nil {
 			return true, nil
 		}

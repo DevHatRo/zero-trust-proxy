@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,8 +21,9 @@ var log = logger.WithComponent("ztrouter")
 type Handler struct {
 	RequestTimeout time.Duration `json:"request_timeout,omitempty"`
 
-	app        *ztagents.App
-	timeoutCfg *common.TimeoutConfig // nil → common.DefaultTimeouts(); set in tests
+	app             *ztagents.App
+	timeoutCfg      *common.TimeoutConfig // nil → common.DefaultTimeouts(); set in tests
+	maxStreamBuffer int64                 // 0 → defaultMaxStreamBuffer; set in tests
 }
 
 // SetApp injects the ztagents App directly. Intended for tests; production code
@@ -79,20 +79,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	headers["Host"] = []string{host}
 	setForwardedHeaders(headers, r)
 
+	// Response messages flow: agent read loop → queue.push (never blocks) →
+	// pump goroutine → respCh (blocks; backpressure lands on the pump, not
+	// the shared read loop). The queue never drops chunks — the previous
+	// buffered-channel-with-default-drop here silently lost streaming chunks
+	// under bursts, truncating download bodies (and hanging the stream when
+	// the IsLastChunk message was the one dropped).
 	respCh := make(chan *common.Message, 16)
-	var closed int32
-	agent.SetResponseHandler(msgID, func(m *common.Message) {
-		if atomic.LoadInt32(&closed) == 1 {
-			return
-		}
-		select {
-		case respCh <- m:
-		default:
-		}
-	})
+	queue := newMsgQueue(h.maxStreamBuffer)
+	stop := make(chan struct{})
+	go queue.pump(r.Context(), stop, respCh)
+	agent.SetResponseHandler(msgID, queue.push)
 	defer func() {
-		atomic.StoreInt32(&closed, 1)
 		agent.TakeResponseHandler(msgID)
+		close(stop)
 	}()
 
 	if streamUpload {
@@ -159,9 +159,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err := h.handleDownloadStream(w, r, agent, msgID, resp, respCh); err != nil {
 				if isClientGone(err) {
 					log.Debug("ztrouter: download stream: client gone id=%s: %v", msgID, err)
-				} else {
-					log.Error("ztrouter: download stream: %v", err)
+					return
 				}
+				log.Error("ztrouter: download stream: id=%s: %v", msgID, err)
+				// Abort the response (HTTP/2 RST_STREAM, HTTP/1.1 connection
+				// close mid-body) so the client sees a failed transfer. A
+				// plain return would end the stream cleanly and clients —
+				// browsers especially — would treat the truncated body as
+				// complete and may cache it.
+				panic(http.ErrAbortHandler)
 			}
 			return
 		}

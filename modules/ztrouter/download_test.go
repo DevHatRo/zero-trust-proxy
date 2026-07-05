@@ -3,9 +3,11 @@ package ztrouter
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,6 +91,228 @@ func TestHandler_DownloadStreaming(t *testing.T) {
 	}
 	if !bytes.Equal(rr.Body.Bytes(), payload) {
 		t.Fatalf("body len=%d want %d", rr.Body.Len(), len(payload))
+	}
+}
+
+// slowFlushRW is a ResponseWriter+Flusher whose Write is slow (and optionally
+// gated on a channel), simulating a client that reads slower than the agent
+// sends — the condition that made the old buffered-channel dispatch drop
+// streaming chunks.
+type slowFlushRW struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	code   int
+	header http.Header
+	delay  time.Duration
+	gate   chan struct{} // if non-nil, the first Write blocks until closed
+	gated  bool
+}
+
+func newSlowFlushRW(delay time.Duration, gate chan struct{}) *slowFlushRW {
+	return &slowFlushRW{header: make(http.Header), delay: delay, gate: gate}
+}
+
+func (s *slowFlushRW) Header() http.Header { return s.header }
+func (s *slowFlushRW) WriteHeader(c int)   { s.code = c }
+func (s *slowFlushRW) Flush()              {}
+func (s *slowFlushRW) Write(b []byte) (int, error) {
+	if s.gate != nil && !s.gated {
+		<-s.gate
+		s.gated = true
+	}
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(b)
+}
+
+func (s *slowFlushRW) bodyLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Len()
+}
+
+// runServeHTTPCatch runs ServeHTTP on a goroutine and reports the recovered
+// panic value (nil if it returned normally).
+func runServeHTTPCatch(handler *Handler, w http.ResponseWriter, r *http.Request) <-chan any {
+	out := make(chan any, 1)
+	go func() {
+		defer func() { out <- recover() }()
+		handler.ServeHTTP(w, r)
+	}()
+	return out
+}
+
+// startDownloadStream drives the harness up to the point where the agent
+// starts a streaming response: it issues the request, captures the response
+// callback, and dispatches the initial IsStream header message.
+func startDownloadStream(t *testing.T, h *testHarness, w http.ResponseWriter, total int64) (func(*common.Message), <-chan any) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "http://"+h.agentHost()+"/big.js", nil)
+	done := runServeHTTPCatch(h.handler, w, req)
+
+	fwd := h.readForwardedRequest()
+	cb, ok := h.agent.TakeResponseHandler(fwd.ID)
+	if !ok {
+		t.Fatalf("no response handler registered")
+	}
+	h.agent.SetResponseHandler(fwd.ID, cb)
+
+	cb(&common.Message{
+		Type: "http_response",
+		ID:   fwd.ID,
+		HTTP: &common.HTTPData{
+			StatusCode: http.StatusOK,
+			Headers:    map[string][]string{"Content-Type": {"application/javascript"}},
+			IsStream:   true,
+			TotalSize:  total,
+		},
+	})
+	return cb, done
+}
+
+// TestHandler_DownloadStreaming_BurstNoDrop is the regression test for the
+// silent chunk-drop bug: an agent bursts far more chunks than the old
+// 16-message channel buffer while the client writes slowly. Every chunk must
+// still reach the client, in order, ending with IsLastChunk. With the old
+// select/default dispatch this test fails with a truncated body (and, when
+// the IsLastChunk message was dropped, a hang until timeout). Observed in the
+// wild as Synology DSM's UIString i18n script arriving truncated, which broke
+// the login page.
+func TestHandler_DownloadStreaming_BurstNoDrop(t *testing.T) {
+	const (
+		numChunks = 200
+		chunkSize = 4096
+	)
+	h := newHarness(t, "dl.example.com")
+
+	var expected bytes.Buffer
+	chunks := make([][]byte, numChunks)
+	for i := range chunks {
+		c := bytes.Repeat([]byte{0}, chunkSize)
+		copy(c, fmt.Sprintf("%06d|", i)) // ordering marker
+		chunks[i] = c
+		expected.Write(c)
+	}
+
+	w := newSlowFlushRW(200*time.Microsecond, nil)
+	cb, done := startDownloadStream(t, h, w, int64(expected.Len()))
+
+	// Burst all chunks synchronously, like the agent read loop does.
+	for i, c := range chunks {
+		cb(&common.Message{
+			Type: "http_response",
+			HTTP: &common.HTTPData{
+				Body:        c,
+				IsStream:    true,
+				ChunkIndex:  i + 1,
+				IsLastChunk: i == len(chunks)-1,
+			},
+		})
+	}
+
+	select {
+	case p := <-done:
+		if p != nil {
+			t.Fatalf("ServeHTTP panicked: %v", p)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("stream did not complete: IsLastChunk was likely dropped (received %d of %d bytes)",
+			w.bodyLen(), expected.Len())
+	}
+
+	if w.code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", w.code)
+	}
+	if !bytes.Equal(w.buf.Bytes(), expected.Bytes()) {
+		t.Fatalf("body truncated or reordered: got %d bytes, want %d", w.buf.Len(), expected.Len())
+	}
+}
+
+// TestHandler_DownloadStreaming_OverflowAborts verifies that when the byte
+// cap is genuinely exceeded the response is aborted (http.ErrAbortHandler)
+// rather than ended cleanly — a clean end would let clients cache the
+// truncated body as complete.
+func TestHandler_DownloadStreaming_OverflowAborts(t *testing.T) {
+	h := newHarness(t, "dl.example.com")
+	h.handler.maxStreamBuffer = 16 * 1024 // tiny cap to force overflow
+
+	gate := make(chan struct{})
+	w := newSlowFlushRW(0, gate)
+	cb, done := startDownloadStream(t, h, w, 1<<20)
+
+	// Flood while the writer is gated shut: respCh (16) fills, then the
+	// queue exceeds its 16 KiB cap.
+	chunk := bytes.Repeat([]byte("x"), 4096)
+	for i := 0; i < 60; i++ {
+		cb(&common.Message{
+			Type: "http_response",
+			HTTP: &common.HTTPData{Body: chunk, IsStream: true, ChunkIndex: i + 1},
+		})
+	}
+	close(gate) // let queued writes drain so the overflow sentinel is reached
+
+	select {
+	case p := <-done:
+		if p != http.ErrAbortHandler {
+			t.Fatalf("recovered %v, want http.ErrAbortHandler", p)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeHTTP did not return after overflow")
+	}
+	if w.bodyLen() >= 60*len(chunk) {
+		t.Fatal("full body written despite overflow — abort came too late")
+	}
+}
+
+// TestHandler_DownloadStreaming_TimeoutAborts verifies that an inter-chunk
+// timeout aborts the response instead of ending the truncated body cleanly.
+func TestHandler_DownloadStreaming_TimeoutAborts(t *testing.T) {
+	h := newHarness(t, "dl.example.com")
+	h.handler.timeoutCfg = &common.TimeoutConfig{
+		StreamingTimeout: 50 * time.Millisecond,
+		LargeFileTimeout: 50 * time.Millisecond,
+	}
+
+	w := newSlowFlushRW(0, nil)
+	cb, done := startDownloadStream(t, h, w, 1)
+
+	// One data chunk, never the last one — the agent side went silent.
+	cb(&common.Message{
+		Type: "http_response",
+		HTTP: &common.HTTPData{Body: []byte("partial"), IsStream: true, ChunkIndex: 1},
+	})
+
+	select {
+	case p := <-done:
+		if p != http.ErrAbortHandler {
+			t.Fatalf("recovered %v, want http.ErrAbortHandler", p)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeHTTP did not return after inter-chunk timeout")
+	}
+}
+
+// TestStreamDownloadFlush_ErrorChunkAborts verifies that an Error-carrying
+// message mid-stream surfaces as an error from the flush loop.
+func TestStreamDownloadFlush_ErrorChunkAborts(t *testing.T) {
+	h := &Handler{}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data", nil)
+	agent := newTestAgent(t, "a-errchunk")
+
+	respCh := make(chan *common.Message, 2)
+	respCh <- &common.Message{HTTP: &common.HTTPData{Body: []byte("data"), IsStream: true}}
+	respCh <- &common.Message{Error: "boom"}
+
+	initial := &common.Message{
+		HTTP: &common.HTTPData{StatusCode: http.StatusOK, Headers: map[string][]string{}},
+	}
+	err := h.streamDownloadFlush(rr, req, rr, agent, "msg-err", initial, respCh)
+	if err == nil {
+		t.Fatal("expected error from Error-carrying chunk, got nil")
 	}
 }
 
