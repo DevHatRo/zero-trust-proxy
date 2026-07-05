@@ -18,12 +18,16 @@ The server is a purpose-built `zero-trust-proxy` binary
 
 - **`internal/server`** — lifecycle: TLS termination (manual / SNI /
   ACME), HTTP→HTTPS redirector, optional HTTP/3 listener, optional
-  Prometheus exporter, SIGHUP cert hot-swap.
+  Prometheus exporter, optional JSON access log, SIGHUP cert hot-swap.
 - **`modules/ztagents`** — mTLS agent listener, agent registry,
   WebSocket session tracking.
 - **`modules/ztrouter`** — `http.Handler` that catches every inbound
   request, looks up the agent by `Host`, and multiplexes it over the
-  mTLS channel.
+  mTLS channel. Serves a branded error page when the agent is
+  unreachable.
+- **`modules/zttcp`** — public TCP listeners for `protocol: tcp`
+  services: one port per service, raw byte relay to the agent over the
+  same mTLS channel, optional server-side TLS offload.
 
 The **agent** (`cmd/agent`) runs on-premises: connects out to the
 server over mTLS, validates service configs locally, and proxies to
@@ -181,6 +185,9 @@ services:
 5. WebSocket: client connection is hijacked; frames are relayed bidirectionally.
 6. Streaming downloads (`IsStream: true` response): chunks are piped straight to the client.
 7. Agent proxies to the upstream and responds with `http_response` (or chunked equivalents).
+8. If no agent serves the `Host`, `ztrouter` returns a branded error page (HTML for browsers, plain text for API clients). In ACME mode, certs for previously-registered hosts keep being served while the agent is down, so clients reach the error page instead of a TLS failure.
+
+TCP services (`protocol: tcp`) bypass the HTTP flow: `modules/zttcp` accepts on a dedicated public port and relays raw bytes via `tcp_connect` / `tcp_data` messages.
 
 ## Build & test
 
@@ -208,8 +215,16 @@ make sec                         # security scan (HIGH severity, G402 excluded)
   upgrade automatically.
 - **Prometheus metrics** — set `metrics.addr: "127.0.0.1:9100"`.
   Exposes `ztp_requests_total`, `ztp_request_duration_seconds`,
-  `ztp_agents_registered`, `ztp_websocket_sessions`. No auth — bind to
-  a private interface.
+  `ztp_agents_registered`, `ztp_websocket_sessions`,
+  `ztp_agent_services`, `ztp_build_info`. No auth — bind to a private
+  interface.
+- **Access logging** — set `logging.access_log: true` for per-request
+  JSON logs (method, host, path, status, duration, agent id, client
+  IP).
+- **TCP proxying** — set `agents.tcp_port_min` / `tcp_port_max` in
+  `server.yaml` and declare a service with `protocol: tcp` on the
+  agent. The server allocates a public port from the range and returns
+  it in the `service_add_response`.
 
 ## Documentation
 

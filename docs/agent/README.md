@@ -38,7 +38,11 @@ server:
   key:     "config/certs/agent.key"
   ca_cert: "config/certs/ca.crt"
 
-log_level: "INFO"
+# Structured logging (preferred over top-level log_level, which is deprecated):
+logging:
+  level: "INFO"        # DEBUG | INFO | WARN | ERROR | FATAL
+  format: "console"    # console | json
+  output: "stdout"     # stdout | stderr | file path
 
 hot_reload:
   enabled: true            # watch agent.yaml for changes
@@ -69,10 +73,20 @@ services:
 |-------|----------|-------------|
 | `id` | yes | Unique service identifier |
 | `hostname` | yes | Hostname clients use to reach this service |
-| `protocol` | yes | `http` or `https` |
+| `hosts` | no | Multiple hostnames for one service (alternative to single `hostname`) |
+| `name` | no | Human-readable service label |
+| `protocol` | yes | `http`, `https`, or `tcp` |
 | `upstreams` | yes | One or more backend addresses |
 | `websocket` | no | Enable WebSocket proxying (default: false) |
+| `timeout` | no | Per-service request-timeout override (0 = server's `router.request_timeout`) |
 | `load_balancing.policy` | no | `round_robin`, `weighted_round_robin`, `least_conn`, `ip_hash` |
+
+### TCP services
+
+With `protocol: tcp`, the server opens a public TCP listener for the
+service and relays raw bytes to the agent. The port is allocated from
+the server's `agents.tcp_port_min`–`tcp_port_max` range and returned to
+the agent in the `service_add_response`.
 
 ## Load Balancing
 
@@ -104,5 +118,5 @@ With `hot_reload.enabled: true`, the agent watches `agent.yaml` for changes and 
 2. Establish mTLS connection to `server.address`.
 3. Send `register` message with agent ID and metadata.
 4. Push all configured services via `service_add`.
-5. Enter message loop: handle `http_request`, `http_upload_*`, `websocket_frame`, `ping`.
+5. Enter message loop: handle `http_request`, `http_upload_*`, `websocket_frame`, `tcp_connect` / `tcp_data` / `tcp_disconnect`, `ping`.
 6. On disconnect: reconnect with exponential backoff; re-register all services on reconnect.

@@ -57,7 +57,7 @@ kill -HUP $(pgrep zero-trust-proxy)
 |-------|-------------|
 | `router.request_timeout` | yes — applied immediately |
 | `logging.level`, `logging.format` | yes |
-| `tls.manual.cert_file` / `tls.manual.key_file` (file content change) | yes — atomic-pointer hot swap (planned in follow-up; current build re-reads on SIGHUP) |
+| `tls.manual.cert_file` / `tls.manual.key_file` (file content change) | yes — atomic-pointer hot swap, no connection drop |
 | `tls.sni[*].cert_file` / `key_file` | yes (same) |
 | `listen.http`, `listen.https` | **no — restart required** |
 | `tls.mode` | **no — restart required** |
