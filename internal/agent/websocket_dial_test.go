@@ -43,7 +43,11 @@ func TestWSDialPlan(t *testing.T) {
 		{"no scheme with path", "http", "10.0.0.5:8123/ws", "10.0.0.5:8123", false},
 		{"ipv6 with port kept as-is", "http", "http://[::1]:8123", "[::1]:8123", false},
 		{"ipv6 without port gets default", "http", "http://[::1]", "[::1]:80", false},
-		{"ipv6 without port or brackets normalised", "https", "https://[fd00::5]", "[fd00::5]:443", true},
+		{"unbracketed ipv6 gets brackets and default port", "https", "https://fd00::5", "[fd00::5]:443", true},
+		{"bracketed ipv6 without port gets default", "https", "https://[fd00::5]", "[fd00::5]:443", true},
+		{"query suffix is stripped", "https", "http://10.0.0.5:8123?token=x", "10.0.0.5:8123", false},
+		{"fragment suffix is stripped", "https", "http://10.0.0.5:8123#frag", "10.0.0.5:8123", false},
+		{"query without port stripped before defaulting", "http", "backend.internal?x=1", "backend.internal:80", false},
 		{"stray trailing bracket is not stripped", "http", "http://backend]", "backend]:80", false},
 		{"stray leading bracket is not stripped", "http", "http://[backend", "[backend:80", false},
 	}
@@ -144,6 +148,10 @@ func TestReadUpgradeResponse_StalledBackend(t *testing.T) {
 	_, err := readUpgradeResponse(client, 150*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout error for stalled backend, got nil")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("error should be a net.Error timeout, got %T: %v", err, err)
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("stalled read took %v — deadline not applied", elapsed)

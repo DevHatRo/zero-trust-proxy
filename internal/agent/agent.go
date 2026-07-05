@@ -114,8 +114,8 @@ func wsDialPlan(service *common.ServiceConfig, backend string) (addr string, use
 			break
 		}
 	}
-	// Drop any path component — net.Dial wants host:port only.
-	if i := strings.Index(rest, "/"); i >= 0 {
+	// Drop any path, query, or fragment — net.Dial wants host:port only.
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
 		rest = rest[:i]
 	}
 	switch scheme {
