@@ -26,9 +26,31 @@ func (sc *ServiceConfig) ToTypes() *types.ServiceConfig {
 	return &sc.ServiceConfig
 }
 
+// ProtocolVersion is the wire-protocol version this build speaks.
+// Bumped by any change that adds a message type or required field.
+// The server accepts agents in [MinSupportedVersion, ProtocolVersion];
+// an agent that omits the field (version 0 on the wire) is treated as
+// version 1 — the protocol before versioning existed.
+const (
+	ProtocolVersion     = 1
+	MinSupportedVersion = 1
+)
+
+// AgentMeta is descriptive agent metadata sent in `register` for
+// observability (logs, future admin API). It is NOT trusted for
+// authorization — only the client certificate and the server-side ACL
+// are.
+type AgentMeta struct {
+	Name   string   `json:"name,omitempty"`
+	Region string   `json:"region,omitempty"`
+	Tags   []string `json:"tags,omitempty"`
+}
+
 // Message is the on-wire envelope for every agent ⟷ server message.
 // Each message carries a UUID `id` that multiplexes concurrent
 // requests over the single agent connection.
+//
+// Version and Meta are populated only in `register`.
 type Message struct {
 	Type    string         `json:"type"`
 	ID      string         `json:"id,omitempty"`
@@ -36,6 +58,8 @@ type Message struct {
 	Error   string         `json:"error,omitempty"`
 	HTTP    *HTTPData      `json:"http,omitempty"`
 	TCP     *TCPData       `json:"tcp,omitempty"`
+	Version int            `json:"version,omitempty"`
+	Meta    *AgentMeta     `json:"meta,omitempty"`
 }
 
 // TCPData carries raw bytes for the TCP tunnel. []byte is base64-encoded

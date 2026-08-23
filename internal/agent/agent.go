@@ -376,6 +376,27 @@ func convertTypesToCommon(config *types.ServiceConfig) *common.ServiceConfig {
 	}
 }
 
+// registerMessage builds the register message, carrying the protocol
+// version and descriptive metadata (name/region/tags) when configured.
+func (a *Agent) registerMessage() *common.Message {
+	msg := &common.Message{
+		Type:    "register",
+		ID:      a.id,
+		Version: common.ProtocolVersion,
+	}
+	if a.config != nil {
+		meta := &common.AgentMeta{
+			Name:   a.config.Agent.Name,
+			Region: a.config.Agent.Region,
+			Tags:   a.config.Agent.Tags,
+		}
+		if meta.Name != "" || meta.Region != "" || len(meta.Tags) > 0 {
+			msg.Meta = meta
+		}
+	}
+	return msg
+}
+
 // Connect establishes a connection to the server
 func (a *Agent) Connect() error {
 	log.Info("🔌 Connecting to server at %s", a.serverAddr)
@@ -399,10 +420,7 @@ func (a *Agent) Connect() error {
 	go a.handleMessages()
 
 	// Register with server
-	registerMsg := &common.Message{
-		Type: "register",
-		ID:   a.id,
-	}
+	registerMsg := a.registerMessage()
 
 	log.Info("📋 Registering agent with server...")
 	if err := a.SendMessage(registerMsg); err != nil {
@@ -420,7 +438,22 @@ func (a *Agent) Connect() error {
 
 	// Wait for registration acknowledgment
 	select {
-	case <-a.registerCh:
+	case resp := <-a.registerCh:
+		if resp.Error != "" {
+			// The server rejected us (identity mismatch, ACL, protocol
+			// version). Retrying cannot help — surface a terminal error so
+			// the operator sees the reason instead of a silent retry loop.
+			a.writeMu.Lock()
+			a.readMu.Lock()
+			_ = a.conn.Close()
+			a.conn = nil
+			a.encoder = nil
+			a.decoder = nil
+			a.readMu.Unlock()
+			a.writeMu.Unlock()
+			log.Error("🚫 Server rejected registration: %s", resp.Error)
+			return fmt.Errorf("server rejected registration: %s", resp.Error)
+		}
 		log.Info("✅ Successfully registered with server")
 		// Initialize last successful heartbeat timestamp for successful connection
 		a.mu.Lock()
@@ -526,9 +559,11 @@ func (a *Agent) handleMessages() {
 		// Handle message based on type
 		switch msg.Type {
 		case "register_response":
-			a.mu.Lock()
-			a.registered = true
-			a.mu.Unlock()
+			if msg.Error == "" {
+				a.mu.Lock()
+				a.registered = true
+				a.mu.Unlock()
+			}
 			// Use adaptive timeout based on channel pressure
 			timeout := a.getAdaptiveTimeout("register", 5*time.Second)
 			select {
@@ -2497,10 +2532,7 @@ func (a *Agent) reconnect() error {
 
 		// Send registration message
 		log.Info("📋 Sending registration message to server")
-		if err := a.SendMessage(&common.Message{
-			Type: "register",
-			ID:   a.id,
-		}); err != nil {
+		if err := a.SendMessage(a.registerMessage()); err != nil {
 			lastErr = err
 			log.Error("❌ Failed to send registration message (attempt %d): %v", attempt, err)
 			// Close this connection and try again with delay
@@ -2527,6 +2559,23 @@ func (a *Agent) reconnect() error {
 		log.Info("⏳ Waiting for registration response...")
 		select {
 		case response := <-a.registerCh:
+			if response.Error != "" {
+				// Terminal rejection (identity/ACL/version) — backing off
+				// and retrying cannot succeed. Stop the loop with a clear
+				// error so the process exits instead of spinning forever.
+				log.Error("🚫 Server rejected registration: %s", response.Error)
+				a.writeMu.Lock()
+				a.readMu.Lock()
+				if a.conn != nil {
+					_ = a.conn.Close()
+				}
+				a.conn = nil
+				a.encoder = nil
+				a.decoder = nil
+				a.readMu.Unlock()
+				a.writeMu.Unlock()
+				return fmt.Errorf("server rejected registration: %s", response.Error)
+			}
 			if response.Type != "register_response" {
 				lastErr = fmt.Errorf("unexpected response type during registration: %s", response.Type)
 				log.Error("❌ Registration failed (attempt %d): %v", attempt, lastErr)

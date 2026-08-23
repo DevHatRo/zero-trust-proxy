@@ -1,6 +1,8 @@
 package ztagents
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -32,7 +34,39 @@ func (a *App) handleAgentConnection(conn net.Conn) {
 		return
 	}
 
+	// The initial Decode succeeded, so the TLS handshake is complete and
+	// (under RequireAndVerifyClientCert) the peer chain is non-empty.
+	var peerCert *x509.Certificate
+	if tlsConn, ok := conn.(*tls.Conn); ok {
+		if certs := tlsConn.ConnectionState().PeerCertificates; len(certs) > 0 {
+			peerCert = certs[0]
+		}
+	}
+
+	// Version, identity, and ACL checks all run BEFORE registry.add — a
+	// rejected agent must never be live and routable, even briefly.
+	allowedHosts, regErr := a.checkRegister(initial.ID, initial.Version, peerCert)
+	if regErr != nil {
+		if hooks := a.rt.identityHooks(); hooks.RegisterRejected != nil {
+			hooks.RegisterRejected(regErr.reason)
+		}
+		log.Warn("ztagents: register rejected (%s): agent=%s: %s", regErr.reason, initial.ID, regErr.msg)
+		reject := &common.Message{Type: "register_response", ID: initial.ID, Error: regErr.msg}
+		if err := common.WriteMessage(conn, reject); err != nil {
+			log.Debug("ztagents: send register rejection: %v", err)
+		}
+		return
+	}
+
 	agent := NewAgent(initial.ID, conn)
+	agent.allowedHosts = allowedHosts
+	agent.Version = normalizedVersion(initial.Version)
+	if peerCert != nil {
+		agent.CertSerial = certSerialHex(peerCert)
+	}
+	if initial.Meta != nil {
+		agent.Meta = *initial.Meta
+	}
 	total := a.rt.registry.add(agent)
 
 	ack := &common.Message{Type: "register_response", ID: agent.ID}
@@ -41,7 +75,7 @@ func (a *App) handleAgentConnection(conn net.Conn) {
 		a.rt.registry.remove(agent.ID)
 		return
 	}
-	log.Info("ztagents: agent %s connected (total=%d)", agent.ID, total)
+	log.Info("ztagents: agent %s connected (total=%d, version=%d)", agent.ID, total, agent.Version)
 
 	for {
 		var msg common.Message
@@ -89,6 +123,14 @@ func (a *App) handleAgentMessage(agent *Agent, msg *common.Message) error {
 			return fmt.Errorf("service config missing")
 		}
 		hostname := msg.Service.Hostname
+		if !hostAllowed(agent.allowedHosts, hostname) {
+			log.Warn("ztagents: service_add denied: host=%s outside ACL for agent=%s", hostname, agent.ID)
+			return agent.SendMessage(&common.Message{
+				Type:  "service_add_response",
+				ID:    msg.ID,
+				Error: fmt.Sprintf("hostname %q not permitted for agent %q", hostname, agent.ID),
+			})
+		}
 		agent.mu.Lock()
 		agent.Services[hostname] = msg.Service
 		agent.mu.Unlock()
@@ -112,6 +154,14 @@ func (a *App) handleAgentMessage(agent *Agent, msg *common.Message) error {
 	case "service_update":
 		if msg.Service == nil {
 			return fmt.Errorf("service config missing")
+		}
+		if !hostAllowed(agent.allowedHosts, msg.Service.Hostname) {
+			log.Warn("ztagents: service_update denied: host=%s outside ACL for agent=%s", msg.Service.Hostname, agent.ID)
+			return agent.SendMessage(&common.Message{
+				Type:  "service_update_response",
+				ID:    msg.ID,
+				Error: fmt.Sprintf("hostname %q not permitted for agent %q", msg.Service.Hostname, agent.ID),
+			})
 		}
 		agent.mu.Lock()
 		agent.Services[msg.Service.Hostname] = msg.Service

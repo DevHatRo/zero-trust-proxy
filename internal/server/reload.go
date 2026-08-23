@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/devhatro/zero-trust-proxy/internal/serverconfig"
 )
@@ -18,12 +19,16 @@ import (
 //   - manual / sni cert files (re-read from disk; atomic-pointer swap
 //     so live connections aren't dropped)
 //   - security rules and limits (atomic swap; rate-limit buckets reset)
+//   - agents.revocation (denied serials + CRL re-read; applies to new
+//     handshakes)
 //
 // Restart-only:
 //   - listen.http / listen.https
 //   - tls.mode
 //   - tls.acme.storage_dir
 //   - agents.listen
+//   - agents.identity / agents.acl (compiled into the listener at
+//     provision; already-connected agents keep their compiled ACL)
 //   - security.*.enabled (the middleware is only inserted at startup)
 func (s *Server) Reload(newCfg *serverconfig.Config) error {
 	s.mu.Lock()
@@ -46,6 +51,10 @@ func (s *Server) Reload(newCfg *serverconfig.Config) error {
 		}
 	}
 
+	if err := s.agents.ReloadRevocation(newCfg.Agents.Revocation); err != nil {
+		return fmt.Errorf("reload revocation: %w", err)
+	}
+
 	s.router.RequestTimeout = newCfg.Router.RequestTimeout
 	s.cfg = newCfg
 	return nil
@@ -65,6 +74,10 @@ func diffRestartOnly(old, new *serverconfig.Config) error {
 		return fmt.Errorf("security.rate_limit.enabled change requires restart")
 	case old.Security.Firewall.Enabled != new.Security.Firewall.Enabled:
 		return fmt.Errorf("security.firewall.enabled change requires restart")
+	case old.Agents.Identity != new.Agents.Identity:
+		return fmt.Errorf("agents.identity change requires restart")
+	case !reflect.DeepEqual(old.Agents.ACL, new.Agents.ACL):
+		return fmt.Errorf("agents.acl change requires restart")
 	}
 	return nil
 }

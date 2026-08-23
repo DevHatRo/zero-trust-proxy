@@ -50,6 +50,33 @@ agents:
   # tcp_port_min: 20000
   # tcp_port_max: 30000
 
+  # Agent identity binding (see docs/server/agent-identity.md).
+  # cn   — register ID must equal the client-cert Subject CommonName
+  # san  — register ID must equal the first DNS SAN
+  # none — legacy, unverified (default); mismatches are still counted
+  #        in ztp_agent_identity_mismatch_total so you can observe
+  #        before flipping to cn.
+  identity:
+    bind_to: none
+
+  # Per-agent hostname allow-list. Label-aware globs: "*" matches
+  # exactly one DNS label ("*.eu.example.com" matches a.eu.example.com,
+  # NOT eu.example.com or a.b.eu.example.com). Agents absent from the
+  # list are rejected at register time unless allow_unlisted: true.
+  acl:
+    allow_unlisted: true
+    # agents:
+    #   - id: "synology"
+    #     allowed_hosts: ["*.local.example.com"]
+    #   - id: "edge-eu"
+    #     allowed_hosts: ["*.eu.example.com", "status.example.com"]
+
+  # Client-certificate revocation, checked at the TLS handshake.
+  # crl_file is re-read on SIGHUP.
+  revocation: {}
+    # crl_file: /config/certs/revoked.crl
+    # denied_serials: ["0A1B2C3D"]
+
 router:
   request_timeout: 2m
 

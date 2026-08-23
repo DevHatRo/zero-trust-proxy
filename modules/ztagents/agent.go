@@ -19,6 +19,13 @@ type Agent struct {
 	Services         map[string]*common.ServiceConfig
 	Registered       bool
 	mu               sync.RWMutex
+
+	// Phase 0 identity fields — set once at register time, immutable
+	// afterwards (no locking needed).
+	Meta         common.AgentMeta
+	Version      int        // negotiated protocol version (0 on the wire → 1)
+	CertSerial   string     // lowercase hex serial of the presented client cert
+	allowedHosts []hostGlob // compiled ACL patterns; empty = unrestricted
 }
 
 func NewAgent(id string, conn net.Conn) *Agent {

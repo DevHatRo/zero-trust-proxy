@@ -129,6 +129,51 @@ type AgentsConfig struct {
 	CheckAddr  string `yaml:"check_addr,omitempty" json:"check_addr,omitempty"`
 	TCPPortMin int    `yaml:"tcp_port_min,omitempty" json:"tcp_port_min,omitempty"`
 	TCPPortMax int    `yaml:"tcp_port_max,omitempty" json:"tcp_port_max,omitempty"`
+
+	Identity   IdentityConfig   `yaml:"identity,omitempty" json:"identity,omitempty"`
+	ACL        ACLConfig        `yaml:"acl,omitempty" json:"acl,omitempty"`
+	Revocation RevocationConfig `yaml:"revocation,omitempty" json:"revocation,omitempty"`
+}
+
+// IdentityConfig binds the agent's register ID to its client
+// certificate. bind_to: "cn" requires ID == cert Subject CommonName,
+// "san" requires ID == the first DNS SAN, "none" (default) keeps the
+// legacy unverified behavior but still logs and counts mismatches so
+// operators can observe before flipping.
+type IdentityConfig struct {
+	BindTo string `yaml:"bind_to,omitempty" json:"bind_to,omitempty"` // cn | san | none
+}
+
+// ACLConfig scopes each agent to the hostnames it may register.
+// Patterns are label-aware globs: "*" matches exactly one DNS label
+// ("*.eu.example.com" matches "a.eu.example.com", not "eu.example.com"
+// or "a.b.eu.example.com"). An agent absent from the list is rejected
+// at register time unless allow_unlisted is true.
+type ACLConfig struct {
+	AllowUnlisted *bool           `yaml:"allow_unlisted,omitempty" json:"allow_unlisted,omitempty"` // default true (legacy)
+	Agents        []AgentACLEntry `yaml:"agents,omitempty" json:"agents,omitempty"`
+}
+
+type AgentACLEntry struct {
+	ID           string   `yaml:"id" json:"id"`
+	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
+}
+
+// Unlisted reports the effective allow_unlisted value (default true so
+// an empty config preserves today's behavior).
+func (a *ACLConfig) Unlisted() bool {
+	if a.AllowUnlisted == nil {
+		return true
+	}
+	return *a.AllowUnlisted
+}
+
+// RevocationConfig rejects specific client certificates at the TLS
+// handshake: an inline serial denylist and/or a CRL file. The CRL is
+// re-read on SIGHUP.
+type RevocationConfig struct {
+	CRLFile       string   `yaml:"crl_file,omitempty" json:"crl_file,omitempty"`
+	DeniedSerials []string `yaml:"denied_serials,omitempty" json:"denied_serials,omitempty"` // hex
 }
 
 type RouterConfig struct {
