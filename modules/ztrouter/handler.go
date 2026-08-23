@@ -2,6 +2,7 @@ package ztrouter
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -118,6 +119,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !isWS {
 			b, err := io.ReadAll(r.Body)
 			if err != nil {
+				// A MaxBytesReader cap (security.firewall.max_request_bytes)
+				// on a chunked body surfaces here — answer 413, not 400.
+				var mbe *http.MaxBytesError
+				if errors.As(err, &mbe) {
+					http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+					return
+				}
 				http.Error(w, "Failed to read body: "+err.Error(), http.StatusBadRequest)
 				return
 			}

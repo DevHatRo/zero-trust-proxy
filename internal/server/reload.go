@@ -17,12 +17,14 @@ import (
 //   - logging.level / logging.format
 //   - manual / sni cert files (re-read from disk; atomic-pointer swap
 //     so live connections aren't dropped)
+//   - security rules and limits (atomic swap; rate-limit buckets reset)
 //
 // Restart-only:
 //   - listen.http / listen.https
 //   - tls.mode
 //   - tls.acme.storage_dir
 //   - agents.listen
+//   - security.*.enabled (the middleware is only inserted at startup)
 func (s *Server) Reload(newCfg *serverconfig.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -36,6 +38,12 @@ func (s *Server) Reload(newCfg *serverconfig.Config) error {
 
 	if err := s.tls.reloadCerts(); err != nil {
 		return fmt.Errorf("reload tls: %w", err)
+	}
+
+	if s.security != nil {
+		if err := s.security.Reload(newCfg.Security); err != nil {
+			return fmt.Errorf("reload security: %w", err)
+		}
 	}
 
 	s.router.RequestTimeout = newCfg.Router.RequestTimeout
@@ -53,6 +61,10 @@ func diffRestartOnly(old, new *serverconfig.Config) error {
 		return fmt.Errorf("tls.mode change requires restart (%q→%q)", old.TLS.Mode, new.TLS.Mode)
 	case old.Agents.Listen != new.Agents.Listen:
 		return fmt.Errorf("agents.listen change requires restart (%q→%q)", old.Agents.Listen, new.Agents.Listen)
+	case old.Security.RateLimit.Enabled != new.Security.RateLimit.Enabled:
+		return fmt.Errorf("security.rate_limit.enabled change requires restart")
+	case old.Security.Firewall.Enabled != new.Security.Firewall.Enabled:
+		return fmt.Errorf("security.firewall.enabled change requires restart")
 	}
 	return nil
 }

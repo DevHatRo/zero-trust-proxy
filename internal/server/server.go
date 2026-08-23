@@ -17,6 +17,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
+	"github.com/devhatro/zero-trust-proxy/internal/security"
 	"github.com/devhatro/zero-trust-proxy/internal/serverconfig"
 	"github.com/devhatro/zero-trust-proxy/modules/ztagents"
 	"github.com/devhatro/zero-trust-proxy/modules/ztrouter"
@@ -41,6 +42,7 @@ type Server struct {
 	metrics    *metrics
 	metricsTkr *time.Ticker
 	metricsCh  chan struct{}
+	security   *security.Engine // nil when both security sections are disabled
 
 	mu       sync.Mutex
 	started  bool
@@ -62,7 +64,36 @@ func New(cfg *serverconfig.Config) (*Server, error) {
 	if cfg.Metrics.Addr != "" {
 		s.metrics = newMetrics()
 	}
+	if cfg.Security.RateLimit.Enabled || cfg.Security.Firewall.Enabled {
+		eng, err := security.NewEngine(cfg.Security, s.securityHooks())
+		if err != nil {
+			return nil, fmt.Errorf("security: %w", err)
+		}
+		s.security = eng
+	}
 	return s, nil
+}
+
+// securityHooks bridges security-engine events into Prometheus. Each
+// hook tolerates s.metrics == nil (metrics listener disabled).
+func (s *Server) securityHooks() security.Hooks {
+	return security.Hooks{
+		RateLimited: func(strategy string) {
+			if s.metrics != nil {
+				s.metrics.rlRejected.WithLabelValues(strategy).Inc()
+			}
+		},
+		FirewallDeny: func(rule string) {
+			if s.metrics != nil {
+				s.metrics.fwDenied.WithLabelValues(rule).Inc()
+			}
+		},
+		Oversize: func() {
+			if s.metrics != nil {
+				s.metrics.fwOversize.Inc()
+			}
+		},
+	}
 }
 
 // Start brings up listeners in order: agents → HTTPS → HTTP. It
@@ -106,6 +137,15 @@ func (s *Server) Start(_ context.Context) error {
 		}
 		s.httpsLn = ln
 		var publicHandler http.Handler = s.router
+		// Chain wraps inner→outer; effective order outermost-first is
+		// altSvc → accessLog → metrics → WAF → rateLimit → router.
+		// WAF sits outside rateLimit so a firewall-denied request never
+		// consumes a rate-limit token; both sit inside metrics so their
+		// 403/413/429 responses are counted.
+		if s.security != nil {
+			publicHandler = s.security.WrapRateLimit(publicHandler)
+			publicHandler = s.security.WrapWAF(publicHandler)
+		}
 		if s.metrics != nil {
 			publicHandler = metricsMiddleware(s.metrics, publicHandler)
 		}
@@ -217,6 +257,9 @@ func (s *Server) refreshGauges() {
 			s.metrics.setWebSocketSessions(s.agents.WebSocketCount())
 			s.metrics.setAgentsRegistered(s.agents.AgentCount())
 			s.metrics.setAgentServices(s.agents.AgentServiceCounts())
+			if s.security != nil {
+				s.metrics.rlBuckets.Set(float64(s.security.Buckets()))
+			}
 		}
 	}
 }
@@ -232,6 +275,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 		if s.metricsCh != nil {
 			close(s.metricsCh)
+		}
+		if s.security != nil {
+			s.security.Close()
 		}
 		if s.metricsSr != nil {
 			if err := s.metricsSr.Shutdown(ctx); err != nil {

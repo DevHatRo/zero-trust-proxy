@@ -2,6 +2,8 @@ package serverconfig
 
 import (
 	"fmt"
+	"net"
+	"regexp"
 	"strings"
 )
 
@@ -21,8 +23,93 @@ func (c *Config) Validate() error {
 	if err := c.Logging.validate(); err != nil {
 		return err
 	}
+	if err := c.Security.validate(); err != nil {
+		return err
+	}
 	if c.Listen.HTTPS != "" && c.TLS.Mode == TLSModeNone {
 		return fmt.Errorf("listen.https=%q requires tls.mode != none", c.Listen.HTTPS)
+	}
+	return nil
+}
+
+// rateSpecRe matches "<n>/<unit>": 100/s, 20/minute, 5/h.
+var rateSpecRe = regexp.MustCompile(`^[1-9][0-9]*/(s|m|h|second|minute|hour)$`)
+
+func (s *SecurityConfig) validate() error {
+	if s.RateLimit.Enabled {
+		if err := s.RateLimit.Default.validate("security.rate_limit.default"); err != nil {
+			return err
+		}
+		for i, o := range s.RateLimit.Overrides {
+			where := fmt.Sprintf("security.rate_limit.overrides[%d]", i)
+			if len(o.Hosts) == 0 {
+				return fmt.Errorf("%s: hosts must list at least one pattern", where)
+			}
+			for _, h := range o.Hosts {
+				if h == "" {
+					return fmt.Errorf("%s: empty host pattern", where)
+				}
+			}
+			if err := o.RateLimitRule.validate(where); err != nil {
+				return err
+			}
+		}
+	}
+	if s.Firewall.Enabled {
+		if s.Firewall.MaxRequestBytes < 0 {
+			return fmt.Errorf("security.firewall.max_request_bytes must be >= 0")
+		}
+		names := make(map[string]bool, len(s.Firewall.Rules))
+		for i, r := range s.Firewall.Rules {
+			where := fmt.Sprintf("security.firewall.rules[%d]", i)
+			if r.Name == "" {
+				return fmt.Errorf("%s: name required (labels metrics and logs)", where)
+			}
+			if names[r.Name] {
+				return fmt.Errorf("%s: duplicate rule name %q", where, r.Name)
+			}
+			names[r.Name] = true
+			if r.Action != "allow" && r.Action != "deny" {
+				return fmt.Errorf("%s (%s): action must be allow|deny, got %q", where, r.Name, r.Action)
+			}
+			for _, c := range r.When.SourceCIDRs {
+				if _, _, err := net.ParseCIDR(c); err != nil {
+					return fmt.Errorf("%s (%s): invalid CIDR %q", where, r.Name, c)
+				}
+			}
+			for _, p := range r.When.Paths {
+				if p == "" {
+					return fmt.Errorf("%s (%s): empty path pattern", where, r.Name)
+				}
+			}
+			for _, h := range r.When.Hosts {
+				if h == "" {
+					return fmt.Errorf("%s (%s): empty host pattern", where, r.Name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (r *RateLimitRule) validate(where string) error {
+	if r.Rate == "" {
+		return fmt.Errorf("%s: rate required (e.g. \"100/s\")", where)
+	}
+	if !rateSpecRe.MatchString(r.Rate) {
+		return fmt.Errorf("%s: invalid rate %q, expected \"<n>/<s|m|h>\"", where, r.Rate)
+	}
+	if r.Burst < 0 {
+		return fmt.Errorf("%s: burst must be >= 0 (0 = default to the rate count)", where)
+	}
+	switch r.Key {
+	case "", "ip", "host", "ip+host":
+	case "identity":
+		// Explicitly rejected until the access-policy layer (Phase 2)
+		// exists — accepting it now would be silently-unenforced config.
+		return fmt.Errorf("%s: key \"identity\" requires the access-policy layer (not yet implemented)", where)
+	default:
+		return fmt.Errorf("%s: key must be ip|host|ip+host, got %q", where, r.Key)
 	}
 	return nil
 }

@@ -205,3 +205,66 @@ func TestLoad_MissingFile(t *testing.T) {
 		t.Fatalf("error message = %q", err.Error())
 	}
 }
+
+func TestSecurityValidation(t *testing.T) {
+	base := func() Config {
+		c := Defaults()
+		c.TLS = TLSConfig{Mode: TLSModeNone}
+		c.Listen = ListenConfig{HTTP: ":80"}
+		c.Agents = AgentsConfig{Listen: ":8443", CertFile: "c", KeyFile: "k", CAFile: "ca"}
+		return c
+	}
+
+	good := base()
+	good.Security = SecurityConfig{
+		RateLimit: RateLimitConfig{
+			Enabled: true,
+			Default: RateLimitRule{Key: "ip", Rate: "100/s", Burst: 200},
+			Overrides: []RateLimitOverride{
+				{Hosts: []string{"api.example.com"}, RateLimitRule: RateLimitRule{Rate: "20/s"}},
+			},
+		},
+		Firewall: FirewallConfig{
+			Enabled: true,
+			Rules: []FirewallRule{
+				{Name: "probes", Action: "deny", When: FirewallRuleMatch{Paths: []string{"/.env"}}},
+				{Name: "office", Action: "allow", When: FirewallRuleMatch{SourceCIDRs: []string{"203.0.113.0/24"}}},
+			},
+			MaxRequestBytes: 1 << 25,
+		},
+	}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid security config rejected: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"missing rate", func(c *Config) { c.Security.RateLimit.Default.Rate = "" }},
+		{"bad rate", func(c *Config) { c.Security.RateLimit.Default.Rate = "fast" }},
+		{"bad key", func(c *Config) { c.Security.RateLimit.Default.Key = "cookie" }},
+		{"identity key rejected until phase 2", func(c *Config) { c.Security.RateLimit.Default.Key = "identity" }},
+		{"override without hosts", func(c *Config) { c.Security.RateLimit.Overrides[0].Hosts = nil }},
+		{"rule without name", func(c *Config) { c.Security.Firewall.Rules[0].Name = "" }},
+		{"duplicate rule name", func(c *Config) { c.Security.Firewall.Rules[1].Name = "probes" }},
+		{"bad action", func(c *Config) { c.Security.Firewall.Rules[0].Action = "block" }},
+		{"bad cidr", func(c *Config) { c.Security.Firewall.Rules[1].When.SourceCIDRs = []string{"nope"} }},
+	}
+	for _, tc := range cases {
+		cfg := good // copy
+		cfg.Security.RateLimit.Overrides = append([]RateLimitOverride(nil), good.Security.RateLimit.Overrides...)
+		cfg.Security.Firewall.Rules = append([]FirewallRule(nil), good.Security.Firewall.Rules...)
+		tc.mutate(&cfg)
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s: expected validation error", tc.name)
+		}
+	}
+
+	// Disabled sections are not validated (dormant config is allowed).
+	off := base()
+	off.Security.RateLimit = RateLimitConfig{Enabled: false, Default: RateLimitRule{Rate: "garbage"}}
+	if err := off.Validate(); err != nil {
+		t.Fatalf("disabled section should not be validated: %v", err)
+	}
+}
