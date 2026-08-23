@@ -18,6 +18,9 @@ on:
       - "README.md"
       - "README"
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build App for Testing

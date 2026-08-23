@@ -2850,17 +2850,30 @@ func (a *Agent) reloadConfig() error {
 		return fmt.Errorf("invalid route configuration: %w", err)
 	}
 
+	// Install the new policies BEFORE updateServicesFromConfig publishes any
+	// newly added host into a.services — otherwise a request for that host
+	// could race in, find no policy, and bypass its ip_whitelist/rate_limit.
+	// Existing hosts briefly evaluate under the new policies even if the
+	// service update below fails, which is safe: these are the policies the
+	// operator just asked for. The swap resets rate-limit bucket state;
+	// acceptable on an explicit reload.
+	a.mu.Lock()
+	prevPolicies := a.routePolicies
+	a.routePolicies = policies
+	a.mu.Unlock()
+
 	// Compare with current config and update services
 	if err := a.updateServicesFromConfig(newConfig); err != nil {
+		a.mu.Lock()
+		a.routePolicies = prevPolicies
+		a.mu.Unlock()
 		return fmt.Errorf("failed to update services: %w", err)
 	}
 
-	// Update agent config. Swapping routePolicies resets rate-limit bucket
-	// state; acceptable on an explicit reload.
+	// Update agent config.
 	a.mu.Lock()
 	oldConfig := a.config
 	a.config = newConfig
-	a.routePolicies = policies
 	a.mu.Unlock()
 
 	log.Info("✅ Configuration reloaded successfully: %d services configured", len(newConfig.Services))

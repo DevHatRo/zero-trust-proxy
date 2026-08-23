@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	gopath "path"
 	"strconv"
 	"strings"
 	"sync"
@@ -544,7 +545,17 @@ func (a *Agent) checkRoutePolicy(host string, httpData *common.HTTPData) policyD
 	path := httpData.URL
 	var query url.Values
 	if u, err := url.Parse(httpData.URL); err == nil {
-		path = u.Path // decoded, so %-encoding can't dodge a path match
+		// Decoded AND dot-segment-cleaned: neither %-encoding nor "/../"
+		// tricks may dodge a path matcher, because upstreams (nginx, Traefik,
+		// Go's ServeMux) collapse those before routing — the policy must see
+		// the same path the backend will serve.
+		path = u.Path
+		if cleaned := gopath.Clean(path); path != "" && cleaned != path {
+			if strings.HasSuffix(path, "/") && cleaned != "/" {
+				cleaned += "/"
+			}
+			path = cleaned
+		}
 		query = u.Query()
 	}
 	return policy.evaluate(&policyRequest{

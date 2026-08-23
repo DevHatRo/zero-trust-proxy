@@ -393,6 +393,52 @@ func TestCheckRoutePolicy(t *testing.T) {
 	}
 }
 
+// Dot segments must be collapsed before matching: upstreams resolve
+// "/public/../admin" to "/admin", so the policy must evaluate the same path.
+func TestCheckRoutePolicyCleansDotSegments(t *testing.T) {
+	a := NewAgent("test", "localhost:0", nil, nil)
+	policy, err := compileRoutes([]RouteConfig{
+		{
+			Match: MatchConfig{Path: "/admin/*"},
+			Handle: []MiddlewareConfig{
+				{Type: "ip_whitelist", Config: map[string]interface{}{"allowed_ips": []interface{}{"10.0.0.1"}}},
+				{Type: "reverse_proxy"},
+			},
+		},
+		{Match: MatchConfig{Path: "/*"}, Handle: []MiddlewareConfig{{Type: "reverse_proxy"}}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	a.routePolicies["h.example.com"] = policy
+
+	for _, sneaky := range []string{
+		"/public/../admin/panel",
+		"/admin/./panel",
+		"/x/../../admin/panel",
+		"/%70ublic/../admin/panel", // encoding + dot segments combined
+	} {
+		dec := a.checkRoutePolicy("h.example.com", &common.HTTPData{
+			Method:  "GET",
+			URL:     sneaky,
+			Headers: map[string][]string{"X-Forwarded-For": {"9.9.9.9"}},
+		})
+		if dec.Allowed {
+			t.Errorf("%s should collapse onto the whitelisted /admin route and be denied", sneaky)
+		}
+	}
+
+	// A clean non-admin path is still allowed by the catch-all.
+	dec := a.checkRoutePolicy("h.example.com", &common.HTTPData{
+		Method:  "GET",
+		URL:     "/public/page",
+		Headers: map[string][]string{"X-Forwarded-For": {"9.9.9.9"}},
+	})
+	if !dec.Allowed {
+		t.Fatalf("clean public path should be allowed, got %+v", dec)
+	}
+}
+
 // Percent-encoded paths must not dodge a path matcher.
 func TestCheckRoutePolicyDecodesPath(t *testing.T) {
 	a := NewAgent("test", "localhost:0", nil, nil)
