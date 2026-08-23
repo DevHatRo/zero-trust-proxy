@@ -18,13 +18,17 @@ import (
 var BuildVersion = "dev"
 
 type metrics struct {
-	requestsTotal   *prometheus.CounterVec
-	requestDuration prometheus.Histogram
+	requestsTotal    *prometheus.CounterVec
+	requestDuration  prometheus.Histogram
 	agentsRegistered prometheus.Gauge
-	wsSessions      prometheus.Gauge
-	agentServices   *prometheus.GaugeVec
-	reg             *prometheus.Registry
-	handler         http.Handler
+	wsSessions       prometheus.Gauge
+	agentServices    *prometheus.GaugeVec
+	rlRejected       *prometheus.CounterVec
+	rlBuckets        prometheus.Gauge
+	fwDenied         *prometheus.CounterVec
+	fwOversize       prometheus.Counter
+	reg              *prometheus.Registry
+	handler          http.Handler
 }
 
 func newMetrics() *metrics {
@@ -55,6 +59,23 @@ func newMetrics() *metrics {
 		Help: "Number of services registered per agent.",
 	}, []string{"agent_id"})
 
+	rlRejected := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ztp_ratelimit_rejected_total",
+		Help: "Requests rejected by the edge rate limiter.",
+	}, []string{"key_strategy"})
+	rlBuckets := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ztp_ratelimit_buckets",
+		Help: "Live rate-limit buckets across all limiters.",
+	})
+	fwDenied := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ztp_firewall_denied_total",
+		Help: "Requests denied by a firewall rule.",
+	}, []string{"rule"})
+	fwOversize := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ztp_firewall_oversize_total",
+		Help: "Requests rejected for exceeding max_request_bytes.",
+	})
+
 	buildInfo := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ztp_build_info",
 		Help: "Build metadata. Always 1.",
@@ -64,7 +85,8 @@ func newMetrics() *metrics {
 		"go_version": runtime.Version(),
 	}).Set(1)
 
-	reg.MustRegister(requestsTotal, requestDuration, agentsRegistered, wsSessions, agentServices, buildInfo)
+	reg.MustRegister(requestsTotal, requestDuration, agentsRegistered, wsSessions, agentServices,
+		rlRejected, rlBuckets, fwDenied, fwOversize, buildInfo)
 
 	m := &metrics{
 		requestsTotal:    requestsTotal,
@@ -72,6 +94,10 @@ func newMetrics() *metrics {
 		agentsRegistered: agentsRegistered,
 		wsSessions:       wsSessions,
 		agentServices:    agentServices,
+		rlRejected:       rlRejected,
+		rlBuckets:        rlBuckets,
+		fwDenied:         fwDenied,
+		fwOversize:       fwOversize,
 		reg:              reg,
 	}
 	m.handler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
@@ -90,8 +116,8 @@ func (m *metrics) observeRequest(method string, status int, d time.Duration) {
 	m.requestDuration.Observe(d.Seconds())
 }
 
-func (m *metrics) setWebSocketSessions(n int)  { m.wsSessions.Set(float64(n)) }
-func (m *metrics) setAgentsRegistered(n int)   { m.agentsRegistered.Set(float64(n)) }
+func (m *metrics) setWebSocketSessions(n int) { m.wsSessions.Set(float64(n)) }
+func (m *metrics) setAgentsRegistered(n int)  { m.agentsRegistered.Set(float64(n)) }
 func (m *metrics) setAgentServices(counts map[string]int) {
 	m.agentServices.Reset()
 	for id, n := range counts {

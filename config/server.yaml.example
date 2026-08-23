@@ -62,3 +62,38 @@ logging:
 # — there is no auth on this endpoint.
 metrics:
   addr: ""           # e.g. "127.0.0.1:9100"
+
+# Edge security: pre-dispatch firewall + rate limiting. Both are
+# enforced before a request reaches any agent, and complement the
+# per-service route policies (ip_whitelist / rate_limit) that agents
+# enforce in their own service configs. Rules and limits hot-reload on
+# SIGHUP; flipping an `enabled` flag requires a restart.
+security:
+  rate_limit:
+    enabled: false
+    default:
+      key: ip            # ip | host | ip+host (bucket key)
+      rate: 100/s        # <n>/<s|m|h>
+      burst: 200         # 0 = default to the rate count
+    overrides:           # first hostname match wins
+      - hosts: ["api.example.com"]
+        key: ip
+        rate: 20/s
+        burst: 40
+  firewall:
+    enabled: false
+    max_request_bytes: 33554432   # 32 MiB; 0 = unlimited
+    rules:                        # ordered; first match wins; no match = allow
+      - name: block-secret-probes
+        action: deny
+        when:
+          paths: ["/.env", "/.git/*", "/wp-admin/*"]
+      - name: office-only-admin
+        action: allow
+        when:
+          hosts: ["admin.example.com"]
+          source_cidrs: ["203.0.113.0/24"]
+      - name: deny-other-admin
+        action: deny
+        when:
+          hosts: ["admin.example.com"]
