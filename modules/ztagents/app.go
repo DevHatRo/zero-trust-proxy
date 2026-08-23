@@ -208,7 +208,7 @@ func loadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load key pair: %w", err)
 	}
-	caPEM, err := os.ReadFile(caFile)
+	caPEM, err := os.ReadFile(caFile) // #nosec G304 -- path comes from operator config, not user input
 	if err != nil {
 		return nil, fmt.Errorf("read CA: %w", err)
 	}

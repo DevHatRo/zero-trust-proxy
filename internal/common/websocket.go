@@ -61,7 +61,7 @@ func (wsc *WebSocketConnection) Close() {
 	}
 
 	if wsc.conn != nil {
-		wsc.conn.Close()
+		_ = wsc.conn.Close() // best-effort teardown; the conn may already be dead
 	}
 }
 

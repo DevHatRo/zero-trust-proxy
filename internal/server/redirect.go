@@ -20,7 +20,10 @@ func newRedirectHandler(acmeHandler http.Handler) http.Handler {
 			http.Error(w, "Missing Host header", http.StatusBadRequest)
 			return
 		}
+		// Not an open redirect: the target is the request's own Host and URI,
+		// upgraded to https — the client is only sent back where it already
+		// asked to go (same as Caddy/nginx HTTP→HTTPS redirects).
 		target := "https://" + host + r.URL.RequestURI()
-		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		http.Redirect(w, r, target, http.StatusPermanentRedirect) // #nosec G710
 	})
 }

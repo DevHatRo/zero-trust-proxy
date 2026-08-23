@@ -29,7 +29,7 @@ docker build -f cmd/zero-trust-proxy/Dockerfile.dev -t zero-trust-proxy:dev .
 ## Dockerfile — Agent
 
 ```dockerfile
-FROM golang:1.25 AS builder
+FROM golang:1.27 AS builder
 WORKDIR /src
 COPY . .
 RUN go build -o /bin/agent ./cmd/agent

@@ -1,9 +1,12 @@
 GOSEC_FLAGS = -quiet -exclude-dir=config -exclude-dir=logs
 
-# G402 (TLS InsecureSkipVerify) is intentional for agent→backend connections:
-# backends sit on internal networks and often have self-signed / private-CA
-# certs. The agent is the TLS termination point for the external edge.
-GOSEC_CI_FLAGS = $(GOSEC_FLAGS) -severity=high -exclude=G402
+# CI gates at MEDIUM+ severity. Known-intentional findings are suppressed
+# inline with `#nosec <rule> -- <justification>` at the offending line —
+# G402 (agent→backend InsecureSkipVerify: backends are internal, the agent
+# is the TLS termination point), G304 (operator-supplied config/CLI paths),
+# G306 (certificate PEMs are public material), G710 (same-host HTTP→HTTPS
+# redirect). No blanket rule exclusions.
+GOSEC_CI_FLAGS = $(GOSEC_FLAGS) -severity=low
 
 .PHONY: build-server build-agent build-certgen build test sec sec-full
 
@@ -21,8 +24,7 @@ build: build-server build-agent build-certgen
 test:
 	go test ./...
 
-# CI gate: fails only on HIGH severity, excluding the known-intentional G402.
-# New HIGH findings (other than G402) will break CI.
+# CI gate: fails on MEDIUM+ findings not suppressed inline with #nosec.
 sec:
 	go run github.com/securego/gosec/v2/cmd/gosec@latest $(GOSEC_CI_FLAGS) ./...
 

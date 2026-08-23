@@ -226,6 +226,10 @@ func requestURL(r *http.Request) string {
 }
 
 func writeAgentResponse(w http.ResponseWriter, r *http.Request, resp *common.Message) {
+	if resp.HTTP != nil && resp.HTTP.BlockedBy != "" {
+		writeBlockedResponse(w, r, resp.HTTP)
+		return
+	}
 	if resp.Error != "" {
 		writeProxyError(w, r, proxyError{
 			Status:  http.StatusBadGateway,

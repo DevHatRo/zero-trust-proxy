@@ -1,6 +1,6 @@
 module github.com/devhatro/zero-trust-proxy
 
-go 1.25.0
+go 1.27.0
 
 require (
 	github.com/fsnotify/fsnotify v1.9.0

@@ -179,12 +179,12 @@ type HealthCheckEndpoint struct {
 func LoadConfig(configPath string) (*AgentConfig, error) {
 	// Ensure the config directory exists
 	configDir := filepath.Dir(configPath)
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create config directory: %w", err)
 	}
 
 	// Read the config file
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) // #nosec G304 -- path comes from the --config CLI flag, not user input
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Create default config if it doesn't exist
@@ -224,7 +224,7 @@ func SaveConfig(configPath string, config *AgentConfig) error {
 	}
 
 	// Write the config file
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -332,6 +332,13 @@ func validateAndApplyDefaults(config *AgentConfig) error {
 		if len(service.Routes) == 0 {
 			config.Services[i].Routes = []RouteConfig{createDefaultRoute()}
 		}
+	}
+
+	// Compile every route policy so unknown handler types or malformed
+	// handler configs (bad CIDRs, bad rate specs) reject the config at load
+	// time instead of being silently unenforced.
+	if _, err := buildRoutePolicies(config); err != nil {
+		return err
 	}
 
 	return nil

@@ -39,7 +39,7 @@ func loadKnownHosts(path string) *knownHosts {
 	if path == "" {
 		return kh
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is derived from the operator-configured ACME storage dir
 	if err != nil {
 		return kh // missing file on first run is normal
 	}
