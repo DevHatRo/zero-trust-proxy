@@ -14,6 +14,7 @@ agent mTLS control plane.
 |---------|------|
 | `cmd/zero-trust-proxy` | Entrypoint |
 | `internal/server` | Lifecycle: TLS, listeners, redirector, HTTP/3, metrics, access log, known-hosts cache, signal handling |
+| `internal/security` | Edge firewall (ordered allow/deny rules, request-size cap) + rate limiter, applied before agent dispatch |
 | `internal/serverconfig` | YAML config schema, loader, validator |
 | `modules/ztagents` | mTLS listener, agent registry, WebSocket session tracking |
 | `modules/ztrouter` | `http.Handler`: per-request agent lookup and mTLS multiplexing; branded error pages |
@@ -79,7 +80,50 @@ logging:
 
 metrics:
   addr: ""                   # e.g. "127.0.0.1:9100" — Prometheus exporter at /metrics, no auth
+
+security:                    # optional edge protections, applied before agent dispatch
+  rate_limit:
+    enabled: false
+    default:
+      key: ip                # ip | host | ip+host — bucket key strategy
+      rate: 100/s            # <n>/<s|m|h> (second/minute/hour also accepted)
+      burst: 200             # 0 = default to the rate count
+    overrides:               # first hostname match wins (exact, "*", or "*.suffix")
+      - hosts: ["api.example.com"]
+        rate: 20/s
+        burst: 40
+  firewall:
+    enabled: false
+    max_request_bytes: 33554432   # 413 above this; 0 = unlimited
+    rules:                        # ordered; first match wins; no match = allow
+      - name: block-secret-probes
+        action: deny              # allow | deny
+        when:                     # clauses AND-ed; values within a clause OR-ed
+          paths: ["/.env", "/.git/*", "/wp-admin/*"]
+      - name: office-only-admin
+        action: allow
+        when:
+          hosts: ["admin.example.com"]
+          source_cidrs: ["203.0.113.0/24"]
+      - name: deny-other-admin
+        action: deny
+        when:
+          hosts: ["admin.example.com"]
 ```
+
+## Edge security
+
+With `security.firewall` / `security.rate_limit` enabled, requests pass
+through `WAF → rateLimit` before reaching the router, so floods and
+scanner junk are rejected (403 / 413 / 429 with `Retry-After`) without
+consuming an agent connection — and a firewall-denied request never
+consumes a rate-limit token. Client IPs come from the TCP connection
+(`RemoteAddr`), never from forwarding headers; firewall paths are
+matched after percent-decoding and dot-segment collapse. This edge
+layer is coarse and pre-dispatch — for per-service, path-aware policy
+(IP whitelists, per-route rate limits) use the agent's `routes:`
+section instead. Full reference:
+[rate-limiting-firewall.md](rate-limiting-firewall.md).
 
 ## Metrics
 
@@ -93,6 +137,10 @@ Setting `metrics.addr` enables a Prometheus text-format exporter at
 | `ztp_agents_registered` | gauge | currently registered agents |
 | `ztp_websocket_sessions` | gauge | active WebSocket sessions |
 | `ztp_agent_services` | gauge | services registered across all agents |
+| `ztp_ratelimit_rejected_total{key_strategy}` | counter | requests rejected by the edge rate limiter |
+| `ztp_ratelimit_buckets` | gauge | live rate-limit buckets across all limiters |
+| `ztp_firewall_denied_total{rule}` | counter | requests denied by a firewall rule |
+| `ztp_firewall_oversize_total` | counter | requests rejected for exceeding `max_request_bytes` |
 | `ztp_build_info{version}` | gauge | binary version info (always 1) |
 
 Bind the exporter to a private interface — no authentication is
@@ -134,10 +182,11 @@ LOG_LEVEL=DEBUG    # Override log level (DEBUG|INFO|WARN|ERROR)
   page instead of hitting a TLS handshake failure.
 
 **Hot reload — SIGHUP**
-- Re-reads config, swaps cert files / router timeout / log level
-  atomically without dropping live connections.
-- Listen address, TLS mode, and ACME storage path changes require a
-  restart (logged + rejected).
+- Re-reads config, swaps cert files / router timeout / log level /
+  security rules and limits atomically without dropping live
+  connections (rate-limit buckets reset on swap).
+- Listen address, TLS mode, ACME storage path, and
+  `security.*.enabled` changes require a restart (logged + rejected).
 
 **Shutdown — SIGINT / SIGTERM**
 - HTTP redirector drains, HTTPS server drains, agent listener closes.

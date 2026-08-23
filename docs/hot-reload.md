@@ -28,6 +28,10 @@ The agent applies these changes online:
 - add / remove / update services (`service_add`, `service_update`,
   `service_remove`)
 - upstream addresses, weights, load-balancing policy
+- route policies (`routes:` — `ip_whitelist`, `rate_limit`); recompiled
+  and swapped atomically, which resets rate-limit bucket state. A bad
+  routes section (unknown handler, bad CIDR/rate) rejects the reload
+  and keeps the old policies in force.
 - health-check path, interval, timeout
 - WebSocket toggle
 - log level
@@ -59,10 +63,13 @@ kill -HUP $(pgrep zero-trust-proxy)
 | `logging.level`, `logging.format` | yes |
 | `tls.manual.cert_file` / `tls.manual.key_file` (file content change) | yes — atomic-pointer hot swap, no connection drop |
 | `tls.sni[*].cert_file` / `key_file` | yes (same) |
+| `security.firewall.rules` / `max_request_bytes` | yes — compiled set swapped atomically |
+| `security.rate_limit.default` / `overrides` | yes (same; bucket state resets on swap) |
 | `listen.http`, `listen.https` | **no — restart required** |
 | `tls.mode` | **no — restart required** |
 | `agents.listen` | **no — restart required** |
 | `tls.acme.storage_dir` | **no — restart required** |
+| `security.rate_limit.enabled`, `security.firewall.enabled` | **no — restart required** (middleware is only inserted at startup) |
 
 The reload path validates the new config first; if validation fails or
 a restart-only field changed, the SIGHUP is logged and ignored — the
