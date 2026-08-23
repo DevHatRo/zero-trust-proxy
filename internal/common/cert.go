@@ -34,7 +34,7 @@ func LoadCertificate(certFile, keyFile string) (tls.Certificate, error) {
 
 // LoadCA loads a CA certificate from a file
 func LoadCA(caFile string) (*x509.CertPool, error) {
-	caCert, err := os.ReadFile(caFile)
+	caCert, err := os.ReadFile(caFile) // #nosec G304 -- path comes from operator config, not user input
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}
@@ -66,7 +66,7 @@ func LoadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 	certLog.Info("🎯 Certificate extended key usage: %v", x509Cert.ExtKeyUsage)
 
 	// Load CA certificate
-	caCert, err := os.ReadFile(caFile)
+	caCert, err := os.ReadFile(caFile) // #nosec G304 -- path comes from operator config, not user input
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}
@@ -115,7 +115,7 @@ func LoadServerTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) 
 	certLog.Info("🎯 Certificate extended key usage: %v", x509Cert.ExtKeyUsage)
 
 	// Load CA certificate
-	caCert, err := os.ReadFile(caFile)
+	caCert, err := os.ReadFile(caFile) // #nosec G304 -- path comes from operator config, not user input
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}

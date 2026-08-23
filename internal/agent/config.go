@@ -12,6 +12,11 @@ import (
 
 // AgentConfig represents the complete agent configuration
 type AgentConfig struct {
+	// routePolicies holds the route policies compiled during validation, so
+	// load/reload paths reuse them instead of compiling a second time.
+	// Unexported: never serialized.
+	routePolicies map[string]*routePolicy
+
 	ConfigPath       string                 `yaml:"-"` // File path for hot reload (not serialized)
 	Agent            AgentSettings          `yaml:"agent"`
 	Server           ServerConfig           `yaml:"server"`
@@ -179,12 +184,12 @@ type HealthCheckEndpoint struct {
 func LoadConfig(configPath string) (*AgentConfig, error) {
 	// Ensure the config directory exists
 	configDir := filepath.Dir(configPath)
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create config directory: %w", err)
 	}
 
 	// Read the config file
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) // #nosec G304 -- path comes from the --config CLI flag, not user input
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Create default config if it doesn't exist
@@ -224,7 +229,7 @@ func SaveConfig(configPath string, config *AgentConfig) error {
 	}
 
 	// Write the config file
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -334,7 +339,32 @@ func validateAndApplyDefaults(config *AgentConfig) error {
 		}
 	}
 
+	// Compile every route policy so unknown handler types or malformed
+	// handler configs (bad CIDRs, bad rate specs) reject the config at load
+	// time instead of being silently unenforced. The result is cached on the
+	// config so load/reload paths don't compile a second time.
+	policies, err := buildRoutePolicies(config)
+	if err != nil {
+		return err
+	}
+	config.routePolicies = policies
+
 	return nil
+}
+
+// compiledRoutePolicies returns the route policies compiled during
+// validation, compiling (and caching) on demand for configs constructed
+// without going through LoadConfig/Validate.
+func (c *AgentConfig) compiledRoutePolicies() (map[string]*routePolicy, error) {
+	if c.routePolicies != nil {
+		return c.routePolicies, nil
+	}
+	policies, err := buildRoutePolicies(c)
+	if err != nil {
+		return nil, err
+	}
+	c.routePolicies = policies
+	return policies, nil
 }
 
 // AddService adds a service to the configuration

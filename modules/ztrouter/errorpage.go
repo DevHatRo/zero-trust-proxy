@@ -107,6 +107,57 @@ func writePlainError(w http.ResponseWriter, pe proxyError, reqID string) {
 	_, _ = w.Write([]byte(b.String()))
 }
 
+// writeBlockedResponse renders the branded page for a request the agent's
+// route policy denied (ip_whitelist, rate_limit, no_route). Unlike gateway
+// errors, the pipeline worked — the client itself was refused — so the flow
+// strip shows the Browser node as blocked and the proxy/agent as healthy.
+func writeBlockedResponse(w http.ResponseWriter, r *http.Request, h *common.HTTPData) {
+	if h.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(h.RetryAfter))
+	}
+	var pe proxyError
+	switch h.BlockedBy {
+	case "ip_whitelist":
+		pe = proxyError{
+			Status:  http.StatusForbidden,
+			Title:   "Access Restricted",
+			Summary: "Your IP address is not allowed to access this service.",
+			Advice:  "This service is limited to approved networks. If you believe you should have access, connect from an allowed network (for example your home connection or VPN) and retry.",
+			Failed:  nodeClient,
+		}
+	case "rate_limit":
+		pe = proxyError{
+			Status:  http.StatusTooManyRequests,
+			Title:   "Too Many Requests",
+			Summary: "You have sent too many requests to this service and have been temporarily rate limited.",
+			Advice:  "Wait a moment before retrying. Repeated rapid requests will extend the limit.",
+			Failed:  nodeClient,
+		}
+	case "no_route":
+		pe = proxyError{
+			Status:  http.StatusNotFound,
+			Title:   "No Route Matched",
+			Summary: "The agent serving this host has no route configured that matches this request.",
+			Advice:  "Check the request path, or add a matching route to the agent's service configuration.",
+			Failed:  nodeAgent,
+		}
+	default:
+		pe = proxyError{
+			Status:  http.StatusForbidden,
+			Title:   "Request Blocked",
+			Summary: "The agent's access policy blocked this request.",
+			Advice:  "If you believe this is a mistake, contact the operator of this service.",
+			Failed:  nodeClient,
+		}
+	}
+	// The agent's status code is authoritative when present (it may evolve
+	// independently of this switch).
+	if h.StatusCode != 0 {
+		pe.Status = h.StatusCode
+	}
+	writeProxyError(w, r, pe)
+}
+
 // requestID returns the request's correlation ID. It reuses the one stamped by
 // the access-log middleware when present so the page and the log agree; if that
 // middleware is disabled, a fresh ID is minted (and stored back so anything
@@ -175,6 +226,9 @@ type errorPageView struct {
 
 // nodeStatuses renders the Browser → Proxy → Agent strip: nodes before the
 // failed one are healthy, the failed one is in error, anything after is unknown.
+// The client node is special: it only "fails" when a policy (IP whitelist,
+// rate limit) refused the request, in which case the request did traverse the
+// proxy and agent — so they render healthy and the client renders "Blocked".
 func nodeStatuses(failed string) []nodeView {
 	order := []struct{ id, label, sub string }{
 		{nodeClient, "Browser", "You"},
@@ -188,11 +242,14 @@ func nodeStatuses(failed string) []nodeView {
 			break
 		}
 	}
+	blocked := failed == nodeClient
 	out := make([]nodeView, 0, len(order))
 	for i, n := range order {
 		v := nodeView{Label: n.label, Sub: n.sub}
 		switch {
-		case failedIdx == -1 || i < failedIdx:
+		case i == failedIdx && blocked:
+			v.State, v.Symbol = "blocked", "✕"
+		case failedIdx == -1 || i < failedIdx || blocked:
 			v.State, v.Symbol = "ok", "✓"
 		case i == failedIdx:
 			v.State, v.Symbol = "error", "✕"
@@ -254,13 +311,13 @@ var errorPageTmpl = template.Must(template.New("errorpage").Parse(`<!doctype htm
   .dot { width: 36px; height: 36px; border-radius: 50%; margin: 0 auto 10px;
     display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; }
   .ok .dot { background: #2eb872; }
-  .error .dot { background: #e2453c; }
+  .error .dot, .blocked .dot { background: #e2453c; }
   .unknown .dot { background: #9aa3af; }
   .node .label { font-weight: 600; font-size: 14px; }
   .sub { color: #6b7280; font-size: 12px; }
   .state { font-size: 12px; margin-top: 4px; font-weight: 600; }
   .ok .state { color: #2eb872; }
-  .error .state { color: #e2453c; }
+  .error .state, .blocked .state { color: #e2453c; }
   .unknown .state { color: #9aa3af; }
   .advice { margin: 18px 0 0; }
   .advice h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: #6b7280; margin: 0 0 6px; }
@@ -284,7 +341,7 @@ var errorPageTmpl = template.Must(template.New("errorpage").Parse(`<!doctype htm
           <div class="dot">{{.Symbol}}</div>
           <div class="label">{{.Label}}</div>
           <div class="sub">{{.Sub}}</div>
-          <div class="state">{{if eq .State "ok"}}Working{{else if eq .State "error"}}Error{{else}}Unknown{{end}}</div>
+          <div class="state">{{if eq .State "ok"}}Working{{else if eq .State "error"}}Error{{else if eq .State "blocked"}}Blocked{{else}}Unknown{{end}}</div>
         </div>
         {{end}}
       </div>

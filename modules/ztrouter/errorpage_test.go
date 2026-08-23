@@ -107,11 +107,90 @@ func TestNodeStatuses_AgentFailure(t *testing.T) {
 	}
 }
 
-func TestNodeStatuses_ClientFailureMarksLaterUnknown(t *testing.T) {
+// A client "failure" is a policy block: the request did traverse the proxy and
+// agent, so those render healthy and the client renders blocked.
+func TestNodeStatuses_ClientBlockedMarksOthersHealthy(t *testing.T) {
 	nodes := nodeStatuses(nodeClient)
-	if nodes[0].State != "error" || nodes[1].State != "unknown" || nodes[2].State != "unknown" {
-		t.Fatalf("client-failure states = %q/%q/%q, want error/unknown/unknown",
+	if nodes[0].State != "blocked" || nodes[1].State != "ok" || nodes[2].State != "ok" {
+		t.Fatalf("client-blocked states = %q/%q/%q, want blocked/ok/ok",
 			nodes[0].State, nodes[1].State, nodes[2].State)
+	}
+	if nodes[0].Symbol != "✕" {
+		t.Fatalf("blocked client symbol = %q, want ✕", nodes[0].Symbol)
+	}
+}
+
+func TestWriteBlockedResponse_IPWhitelist(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := newErrReq("text/html")
+	writeBlockedResponse(rr, req, &common.HTTPData{
+		StatusCode: http.StatusForbidden,
+		BlockedBy:  "ip_whitelist",
+	})
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403", rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{"Access Restricted", "IP address", "Blocked"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q\n%s", want, body)
+		}
+	}
+}
+
+func TestWriteBlockedResponse_RateLimitSetsRetryAfter(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := newErrReq("*/*") // API client → plain text
+	writeBlockedResponse(rr, req, &common.HTTPData{
+		StatusCode: http.StatusTooManyRequests,
+		BlockedBy:  "rate_limit",
+		RetryAfter: 7,
+	})
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d, want 429", rr.Code)
+	}
+	if got := rr.Header().Get("Retry-After"); got != "7" {
+		t.Fatalf("Retry-After=%q, want 7", got)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("content-type=%q, want text/plain for API client", ct)
+	}
+	if !strings.Contains(rr.Body.String(), "Too Many Requests") {
+		t.Fatalf("body missing title: %s", rr.Body.String())
+	}
+}
+
+func TestWriteBlockedResponse_NoRoute(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := newErrReq("text/html")
+	writeBlockedResponse(rr, req, &common.HTTPData{
+		StatusCode: http.StatusNotFound,
+		BlockedBy:  "no_route",
+	})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "No Route Matched") {
+		t.Fatalf("body missing title: %s", rr.Body.String())
+	}
+}
+
+// An unrecognized BlockedBy value from a newer agent still renders a branded
+// block page with the agent's status code.
+func TestWriteBlockedResponse_UnknownPolicyFallsBack(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := newErrReq("text/html")
+	writeBlockedResponse(rr, req, &common.HTTPData{
+		StatusCode: http.StatusUnavailableForLegalReasons,
+		BlockedBy:  "geo_fence",
+	})
+	if rr.Code != http.StatusUnavailableForLegalReasons {
+		t.Fatalf("status=%d, want agent's 451 to win", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "Request Blocked") {
+		t.Fatalf("body missing fallback title: %s", rr.Body.String())
 	}
 }
 

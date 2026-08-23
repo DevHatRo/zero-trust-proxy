@@ -85,7 +85,7 @@ func main() {
 	logger.SetLogLevel(level)
 
 	// Create output directory if it doesn't exist
-	if err := os.MkdirAll(*outputDir, 0755); err != nil {
+	if err := os.MkdirAll(*outputDir, 0750); err != nil {
 		log.Fatal("❌ Failed to create output directory: %v", err)
 	}
 
@@ -254,6 +254,7 @@ func saveCertAndKey(name string, certDER []byte, key *ecdsa.PrivateKey, outputDi
 		Type:  "CERTIFICATE",
 		Bytes: certDER,
 	})
+	// #nosec G306 -- certificates are public material (the private key next to it is 0600)
 	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
 		return fmt.Errorf("failed to save certificate: %w", err)
 	}
@@ -274,7 +275,7 @@ func saveCertAndKey(name string, certDER []byte, key *ecdsa.PrivateKey, outputDi
 
 func loadCertAndKey(name string, outputDir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	certFile := filepath.Join(outputDir, name+".crt")
-	certPEM, err := os.ReadFile(certFile)
+	certPEM, err := os.ReadFile(certFile) // #nosec G304 -- path built from the --output CLI flag
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read certificate: %w", err)
 	}
@@ -287,7 +288,7 @@ func loadCertAndKey(name string, outputDir string) (*x509.Certificate, *ecdsa.Pr
 		return nil, nil, fmt.Errorf("failed to parse certificate: %w", err)
 	}
 	keyFile := filepath.Join(outputDir, name+".key")
-	keyPEM, err := os.ReadFile(keyFile)
+	keyPEM, err := os.ReadFile(keyFile) // #nosec G304 -- path built from the --output CLI flag
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read private key: %w", err)
 	}
@@ -409,6 +410,7 @@ func saveCertificate(cert *x509.Certificate, key *ecdsa.PrivateKey, outputDir st
 		Type:  "CERTIFICATE",
 		Bytes: cert.Raw,
 	})
+	// #nosec G306 -- certificates are public material (the private key next to it is 0600)
 	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
 		log.Fatal("❌ Failed to save certificate: %v", err)
 	}

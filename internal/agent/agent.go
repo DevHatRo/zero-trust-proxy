@@ -245,9 +245,12 @@ type Agent struct {
 	readMu      sync.Mutex // Protects concurrent reads from connection
 	registered  bool
 	services    map[string]*common.ServiceConfig
-	mu          sync.RWMutex
-	lastPong    time.Time
-	tlsConfig   *tls.Config
+	// routePolicies maps hostname → compiled route policy (ip_whitelist,
+	// rate_limit, …). Rebuilt from config on load and hot reload; guarded by mu.
+	routePolicies map[string]*routePolicy
+	mu            sync.RWMutex
+	lastPong      time.Time
+	tlsConfig     *tls.Config
 	// Message channels
 	registerCh    chan *common.Message
 	pongCh        chan *common.Message
@@ -287,6 +290,7 @@ func NewAgent(id, serverAddress string, tlsConfig *tls.Config, validator types.S
 		serverAddr:          serverAddress,
 		tlsConfig:           tlsConfig,
 		services:            make(map[string]*common.ServiceConfig),
+		routePolicies:       make(map[string]*routePolicy),
 		conn:                nil,
 		registered:          false,
 		reconnectInProgress: false,
@@ -310,6 +314,7 @@ func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config, validator ty
 		tlsConfig:           tlsConfig,
 		config:              config,
 		services:            make(map[string]*common.ServiceConfig),
+		routePolicies:       make(map[string]*routePolicy),
 		lastPong:            time.Now(),
 		registerCh:          make(chan *common.Message, 10),
 		pongCh:              make(chan *common.Message, 500),
@@ -404,7 +409,7 @@ func (a *Agent) Connect() error {
 		// Clean up connection on registration failure with proper locking
 		a.writeMu.Lock()
 		a.readMu.Lock()
-		a.conn.Close()
+		_ = a.conn.Close()
 		a.conn = nil
 		a.encoder = nil
 		a.decoder = nil
@@ -425,7 +430,7 @@ func (a *Agent) Connect() error {
 		// Clean up connection on timeout with proper locking
 		a.writeMu.Lock()
 		a.readMu.Lock()
-		a.conn.Close()
+		_ = a.conn.Close()
 		a.conn = nil
 		a.encoder = nil
 		a.decoder = nil
@@ -675,6 +680,15 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 		return
 	}
 
+	// Enforce route policy (ip_whitelist, rate_limit, …) before any
+	// proxying — including WebSocket upgrades.
+	if dec := a.checkRoutePolicy(host, msg.HTTP); !dec.Allowed {
+		log.Warn("🚫 Request blocked by %s: host=%s method=%s url=%s client=%s",
+			dec.BlockedBy, host, msg.HTTP.Method, msg.HTTP.URL, clientIPFromHeaders(msg.HTTP.Headers))
+		a.sendBlockedResponse(msg.ID, dec)
+		return
+	}
+
 	// Check if this is a WebSocket upgrade request
 	isWebSocketUpgrade := a.isWebSocketUpgrade(msg.HTTP.Headers)
 	if isWebSocketUpgrade {
@@ -815,7 +829,7 @@ func (a *Agent) handleHTTPRequest(msg *common.Message) {
 	if isHTTPS {
 		// For HTTPS requests, create custom TLS config
 		tlsConfig := &tls.Config{
-			InsecureSkipVerify: true, // Skip certificate verification for internal services
+			InsecureSkipVerify: true, // #nosec G402 -- intentional: backends are internal (private-CA/self-signed); the agent is the external TLS termination point
 		}
 		transport.TLSClientConfig = tlsConfig
 		log.Debug("🔒 HTTPS request detected - configured to skip certificate verification for internal service")
@@ -969,6 +983,15 @@ func (a *Agent) handleUploadStart(msg *common.Message, uploadCh chan *common.Mes
 		return
 	}
 
+	// Enforce route policy before proxying the upload. The incoming chunk
+	// stream is dropped via the deferred channel removal above.
+	if dec := a.checkRoutePolicy(host, msg.HTTP); !dec.Allowed {
+		log.Warn("🚫 Upload blocked by %s: host=%s url=%s client=%s",
+			dec.BlockedBy, host, msg.HTTP.URL, clientIPFromHeaders(msg.HTTP.Headers))
+		a.sendBlockedResponse(msg.ID, dec)
+		return
+	}
+
 	// Build the backend URL using the same scheme rules as handleHTTPRequest.
 	backend := service.Backend
 	hasProtocol := strings.HasPrefix(backend, "http://") ||
@@ -1022,7 +1045,7 @@ func (a *Agent) handleUploadStart(msg *common.Message, uploadCh chan *common.Mes
 
 	transport := &http.Transport{}
 	if strings.HasPrefix(backendURL, "https://") {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- intentional: internal backends, agent is the TLS termination point
 	}
 	client := &http.Client{
 		Timeout:   0,
@@ -1137,7 +1160,7 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 		// Establish TLS connection for HTTPS/WSS backends
 		log.Debug("🔒 Using TLS connection for HTTPS/WSS backend")
 		tlsConfig := &tls.Config{
-			InsecureSkipVerify: true,                               // Skip verification for backends (like curl -k)
+			InsecureSkipVerify: true,                      // #nosec G402 -- intentional: internal backends, agent is the TLS termination point
 			ServerName:         dialHostname(backendAddr), // hostname without port (IPv6-safe)
 		}
 		backendConn, err = tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", backendAddr, tlsConfig)
@@ -1165,7 +1188,9 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 				IsWebSocket:   false,
 			},
 		}
-		a.SendMessage(errorResponse)
+		if err := a.SendMessage(errorResponse); err != nil {
+			log.Error("❌ Failed to send backend-connect error response id=%s: %v", msg.ID, err)
+		}
 		return
 	}
 	defer backendConn.Close()
@@ -1664,7 +1689,7 @@ func (a *Agent) handleTCPConnect(msg *common.Message) {
 	a.tcpMu.Unlock()
 
 	if err := a.SendMessage(ackMsg); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		a.tcpMu.Lock()
 		delete(a.tcpConns, msg.ID)
 		a.tcpMu.Unlock()
@@ -1733,6 +1758,18 @@ func (a *Agent) loadAndRegisterServices() error {
 
 	log.Info("📋 Loaded agent configuration: ID=%s, Name=%s, Services=%d",
 		config.Agent.ID, config.Agent.Name, len(config.Services))
+
+	// Route policies (ip_whitelist, rate_limit, …) must be in place before
+	// touching the registry: a policy that cannot be enforced aborts startup,
+	// not silently skipped. Normally already compiled (and cached) during
+	// config validation.
+	policies, err := config.compiledRoutePolicies()
+	if err != nil {
+		return fmt.Errorf("❌ invalid route configuration: %w", err)
+	}
+	a.mu.Lock()
+	a.routePolicies = policies
+	a.mu.Unlock()
 
 	// Register each service
 	for _, serviceConfig := range config.Services {
@@ -2010,14 +2047,15 @@ func (a *Agent) runHealthCheckServer(endpoints []HealthCheckEndpoint) {
 		endpoint := endpoint // Capture for closure
 		mux.HandleFunc(endpoint.Path, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(endpoint.Response))
+			_, _ = w.Write([]byte(endpoint.Response)) // best-effort; client may have gone away
 		})
 	}
 
 	// Start server on a dynamic port
 	server := &http.Server{
-		Addr:    ":0", // Dynamic port
-		Handler: mux,
+		Addr:              ":0", // Dynamic port
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // bound header reads (gosec G112, Slowloris)
 	}
 
 	log.Info("🏥 Starting health check server...")
@@ -2394,7 +2432,7 @@ func (a *Agent) reconnect() error {
 	a.writeMu.Lock()
 	a.readMu.Lock()
 	if a.conn != nil {
-		a.conn.Close()
+		_ = a.conn.Close()
 		a.conn = nil
 		a.encoder = nil
 		a.decoder = nil
@@ -2466,7 +2504,7 @@ func (a *Agent) reconnect() error {
 			lastErr = err
 			log.Error("❌ Failed to send registration message (attempt %d): %v", attempt, err)
 			// Close this connection and try again with delay
-			conn.Close()
+			_ = conn.Close()
 			a.writeMu.Lock()
 			a.readMu.Lock()
 			a.conn = nil
@@ -2493,7 +2531,7 @@ func (a *Agent) reconnect() error {
 				lastErr = fmt.Errorf("unexpected response type during registration: %s", response.Type)
 				log.Error("❌ Registration failed (attempt %d): %v", attempt, lastErr)
 				// Close this connection and try again with delay
-				conn.Close()
+				_ = conn.Close()
 				a.writeMu.Lock()
 				a.readMu.Lock()
 				a.conn = nil
@@ -2530,7 +2568,7 @@ func (a *Agent) reconnect() error {
 			lastErr = fmt.Errorf("timeout waiting for registration confirmation")
 			log.Error("⏰ Registration timeout (attempt %d)", attempt)
 			// Close this connection and try again with delay
-			conn.Close()
+			_ = conn.Close()
 			a.writeMu.Lock()
 			a.readMu.Lock()
 			a.conn = nil
@@ -2799,23 +2837,40 @@ func (a *Agent) reloadConfig() error {
 		return fmt.Errorf("failed to load new config: %w", err)
 	}
 
-	// Load new config
+	// Load new config. LoadConfig validates and compiles route policies as
+	// part of loading, so a bad routes section keeps the old config (and old
+	// policies) in force.
 	newConfig, err := LoadConfig(a.config.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to load new config: %w", err)
 	}
 
-	// Validate new config
-	if err := newConfig.Validate(); err != nil {
-		return fmt.Errorf("new config validation failed: %w", err)
+	policies, err := newConfig.compiledRoutePolicies()
+	if err != nil {
+		return fmt.Errorf("invalid route configuration: %w", err)
 	}
+
+	// Install the new policies BEFORE updateServicesFromConfig publishes any
+	// newly added host into a.services — otherwise a request for that host
+	// could race in, find no policy, and bypass its ip_whitelist/rate_limit.
+	// Existing hosts briefly evaluate under the new policies even if the
+	// service update below fails, which is safe: these are the policies the
+	// operator just asked for. The swap resets rate-limit bucket state;
+	// acceptable on an explicit reload.
+	a.mu.Lock()
+	prevPolicies := a.routePolicies
+	a.routePolicies = policies
+	a.mu.Unlock()
 
 	// Compare with current config and update services
 	if err := a.updateServicesFromConfig(newConfig); err != nil {
+		a.mu.Lock()
+		a.routePolicies = prevPolicies
+		a.mu.Unlock()
 		return fmt.Errorf("failed to update services: %w", err)
 	}
 
-	// Update agent config
+	// Update agent config.
 	a.mu.Lock()
 	oldConfig := a.config
 	a.config = newConfig

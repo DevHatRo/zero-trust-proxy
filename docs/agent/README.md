@@ -80,6 +80,65 @@ services:
 | `websocket` | no | Enable WebSocket proxying (default: false) |
 | `timeout` | no | Per-service request-timeout override (0 = server's `router.request_timeout`) |
 | `load_balancing.policy` | no | `round_robin`, `weighted_round_robin`, `least_conn`, `ip_hash` |
+| `routes` | no | Route policies (match + handler chain); default is a `/*` → `reverse_proxy` catch-all |
+
+## Routes and Middleware
+
+Each service can define `routes`: an ordered list of match conditions with a
+handler chain. The agent evaluates them on every HTTP request (including
+WebSocket upgrades and streamed uploads) **before** proxying to an upstream.
+First matching route wins; a request matching **no** route is rejected with
+404 — defined routes are an explicit policy, not a suggestion.
+
+```yaml
+services:
+  - id: "internal-app"
+    hosts: [app.home.example.com]
+    protocol: http
+    upstreams:
+      - address: "traefik:80"
+    routes:
+      # Tight limit on the login endpoint.
+      - match:
+          path: "/api/v1/auth/*"
+        handle:
+          - type: "rate_limit"
+            config:
+              rate: "10/minute"   # <count>/<second|minute|hour>
+              burst: 5            # optional; defaults to <count>
+          - type: "reverse_proxy"
+      # Everything else: home network only.
+      - match:
+          path: "/*"
+        handle:
+          - type: "ip_whitelist"
+            config:
+              allowed_ips:
+                - "203.0.113.7/32"   # CIDRs or bare IPs (v4 or v6)
+          - type: "reverse_proxy"
+```
+
+Match conditions (`path` with `*` / trailing `/*` wildcards, `method`,
+`headers`, `query`) are ANDed. Handlers run in order:
+
+| Handler | Effect |
+|---------|--------|
+| `ip_whitelist` | 403 unless the client IP (taken from the proxy-stamped `X-Forwarded-For`) is in `allowed_ips`. Fails closed if the client IP is missing. |
+| `rate_limit` | Per-client-IP token bucket; over-limit requests get 429 with a `Retry-After` header. Buckets are shared across all hosts of the service and reset on config reload. |
+| `reverse_proxy` | Terminal handler — proxy to an upstream. |
+
+`global_middleware` at the top level of `agent.yaml` takes the same handler
+entries and runs before every route's chain on every service (a global
+`rate_limit` shares its buckets across all services).
+
+Unknown handler types and malformed handler configs (bad CIDRs, bad rate
+specs) are **load errors** — the agent refuses to start, and a hot reload
+keeps the previous config, rather than silently skipping the policy.
+
+Blocked requests are reported to the server with a `blocked_by` marker, so
+the proxy serves its branded error page (HTML for browsers, plain text for
+API clients) showing the client as "Blocked" — the same style as the
+agent-unreachable page.
 
 ### TCP services
 

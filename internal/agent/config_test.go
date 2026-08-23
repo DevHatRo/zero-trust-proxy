@@ -1077,7 +1077,7 @@ func BenchmarkValidateAndApplyDefaults(b *testing.B) {
 
 func TestAgentConfig_Validate(t *testing.T) {
 	config := &AgentConfig{
-		Agent: AgentSettings{ID: "test-agent"},
+		Agent:  AgentSettings{ID: "test-agent"},
 		Server: ServerConfig{Address: "localhost:8443"},
 	}
 	if err := config.Validate(); err != nil {
