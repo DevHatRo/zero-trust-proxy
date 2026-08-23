@@ -1759,10 +1759,11 @@ func (a *Agent) loadAndRegisterServices() error {
 	log.Info("📋 Loaded agent configuration: ID=%s, Name=%s, Services=%d",
 		config.Agent.ID, config.Agent.Name, len(config.Services))
 
-	// Compile route policies (ip_whitelist, rate_limit, …) before touching the
-	// registry: a policy that cannot be enforced must abort startup, not be
-	// silently skipped.
-	policies, err := buildRoutePolicies(config)
+	// Route policies (ip_whitelist, rate_limit, …) must be in place before
+	// touching the registry: a policy that cannot be enforced aborts startup,
+	// not silently skipped. Normally already compiled (and cached) during
+	// config validation.
+	policies, err := config.compiledRoutePolicies()
 	if err != nil {
 		return fmt.Errorf("❌ invalid route configuration: %w", err)
 	}
@@ -2836,20 +2837,15 @@ func (a *Agent) reloadConfig() error {
 		return fmt.Errorf("failed to load new config: %w", err)
 	}
 
-	// Load new config
+	// Load new config. LoadConfig validates and compiles route policies as
+	// part of loading, so a bad routes section keeps the old config (and old
+	// policies) in force.
 	newConfig, err := LoadConfig(a.config.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to load new config: %w", err)
 	}
 
-	// Validate new config
-	if err := newConfig.Validate(); err != nil {
-		return fmt.Errorf("new config validation failed: %w", err)
-	}
-
-	// Recompile route policies before applying anything; a bad routes section
-	// keeps the old config (and old policies) in force.
-	policies, err := buildRoutePolicies(newConfig)
+	policies, err := newConfig.compiledRoutePolicies()
 	if err != nil {
 		return fmt.Errorf("invalid route configuration: %w", err)
 	}

@@ -226,11 +226,15 @@ func (h *rateLimitHandler) check(req *policyRequest) *policyDecision {
 	if !ok {
 		b = &tokenBucket{tokens: h.burst, last: now}
 		h.buckets[key] = b
-		h.maybeSweep(now)
 	}
 
 	b.tokens = math.Min(h.burst, b.tokens+now.Sub(b.last).Seconds()*h.rate)
 	b.last = now
+	// Sweep on every check, not just insertions — once all active clients
+	// have buckets no new keys are inserted, and idle entries would otherwise
+	// accumulate forever. Runs after b.last is refreshed so the sweep can
+	// never evict the bucket we are about to debit.
+	h.maybeSweep(now)
 	if b.tokens >= 1 {
 		b.tokens--
 		return nil

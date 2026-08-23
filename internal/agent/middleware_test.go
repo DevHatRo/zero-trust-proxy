@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -123,6 +124,66 @@ func TestRateLimitBucket(t *testing.T) {
 	}
 	if dec := h.check(req); dec == nil {
 		t.Fatal("after refill: second request should be limited")
+	}
+}
+
+// The sweep must fire on checks against existing buckets too — once every
+// active client has a bucket there are no more insertions, and idle entries
+// would otherwise accumulate forever.
+func TestRateLimitSweepRunsWithoutInsertions(t *testing.T) {
+	h, err := newRateLimitHandler(map[string]interface{}{"rate": "60/minute", "burst": 1})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	now := time.Unix(1000, 0)
+	h.now = func() time.Time { return now }
+
+	for i := 0; i < sweepThreshold; i++ {
+		h.check(mkReq("GET", "/", fmt.Sprintf("10.%d.%d.%d", i>>16, (i>>8)&0xff, i&0xff)))
+	}
+	if len(h.buckets) < sweepThreshold {
+		t.Fatalf("expected %d buckets, got %d", sweepThreshold, len(h.buckets))
+	}
+
+	// Everyone goes idle long past full refill; the only traffic is one
+	// returning client whose bucket already exists (no insertion happens).
+	now = now.Add(time.Hour)
+	h.check(mkReq("GET", "/", "10.0.0.1"))
+	if len(h.buckets) != 1 {
+		t.Fatalf("sweep should have evicted idle buckets, got %d remaining", len(h.buckets))
+	}
+	if _, ok := h.buckets["10.0.0.1"]; !ok {
+		t.Fatal("the active client's bucket must survive the sweep")
+	}
+}
+
+// Policies are compiled once, during validation, and reused by the load and
+// reload paths.
+func TestRoutePoliciesCompiledOnceAndCached(t *testing.T) {
+	cfg := &AgentConfig{
+		Agent: AgentSettings{ID: "a"},
+		Services: []ServiceConfig{{
+			ID:        "svc",
+			Hosts:     []string{"a.example.com"},
+			Upstreams: []UpstreamConfig{{Address: "backend:80"}},
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.routePolicies == nil {
+		t.Fatal("Validate should cache compiled route policies")
+	}
+	first, err := cfg.compiledRoutePolicies()
+	if err != nil {
+		t.Fatalf("compiledRoutePolicies: %v", err)
+	}
+	second, err := cfg.compiledRoutePolicies()
+	if err != nil {
+		t.Fatalf("compiledRoutePolicies: %v", err)
+	}
+	if first["a.example.com"] == nil || first["a.example.com"] != second["a.example.com"] {
+		t.Fatal("compiledRoutePolicies must return the cached policies, not recompile")
 	}
 }
 
