@@ -145,7 +145,7 @@ func TestCheckRegisterIdentityBinding(t *testing.T) {
 func TestCheckRegisterObserveModeCountsMismatch(t *testing.T) {
 	app := appWithIdentity("none", true, nil)
 	var mismatches int
-	app.rt.hooks = IdentityHooks{IdentityMismatch: func() { mismatches++ }}
+	app.SetIdentityHooks(IdentityHooks{IdentityMismatch: func() { mismatches++ }})
 	cert := makeCert(t, "synology", nil, 10)
 
 	if _, err := app.checkRegister("impostor", 1, cert); err != nil {
@@ -208,7 +208,7 @@ func driveRegister(t *testing.T, app *App, msg *common.Message) *common.Message 
 func TestRegisterRejectedAgentNeverEntersRegistry(t *testing.T) {
 	app := appWithIdentity("none", false, nil) // empty ACL, unlisted forbidden
 	var rejected []string
-	app.rt.hooks = IdentityHooks{RegisterRejected: func(reason string) { rejected = append(rejected, reason) }}
+	app.SetIdentityHooks(IdentityHooks{RegisterRejected: func(reason string) { rejected = append(rejected, reason) }})
 
 	resp := driveRegister(t, app, &common.Message{Type: "register", ID: "ghost"})
 	if resp.Error == "" {

@@ -119,11 +119,12 @@ func (a *App) checkRegister(id string, version int, cert *x509.Certificate) ([]h
 		}
 	}
 
+	hooks := a.rt.identityHooks()
 	if cert != nil {
 		if want, enforce := peerIdentity(cert, a.rt.bindTo); enforce {
 			if id != want {
-				if a.rt.hooks.IdentityMismatch != nil {
-					a.rt.hooks.IdentityMismatch()
+				if hooks.IdentityMismatch != nil {
+					hooks.IdentityMismatch()
 				}
 				return nil, &registerError{
 					reason: "identity",
@@ -135,8 +136,8 @@ func (a *App) checkRegister(id string, version int, cert *x509.Certificate) ([]h
 			// mismatches against the CN so operators can rotate certs
 			// before flipping to cn.
 			if cn := cert.Subject.CommonName; cn != "" && cn != id {
-				if a.rt.hooks.IdentityMismatch != nil {
-					a.rt.hooks.IdentityMismatch()
+				if hooks.IdentityMismatch != nil {
+					hooks.IdentityMismatch()
 				}
 				log.Warn("ztagents: agent %s cert CN is %q — would be rejected under identity.bind_to=cn", id, cn)
 			}

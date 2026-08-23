@@ -48,7 +48,17 @@ type runtime struct {
 	aclUnlisted bool
 	acl         map[string][]hostGlob
 	revoked     atomic.Pointer[revocationSet]
-	hooks       IdentityHooks
+	// hooks is an atomic pointer so SetIdentityHooks is safe even if
+	// called after Start (accept-loop goroutines read it per register).
+	hooks atomic.Pointer[IdentityHooks]
+}
+
+// identityHooks returns the installed hooks, or zero hooks when unset.
+func (rt *runtime) identityHooks() IdentityHooks {
+	if h := rt.hooks.Load(); h != nil {
+		return *h
+	}
+	return IdentityHooks{}
 }
 
 // New builds an App from the YAML config and provisions it.
@@ -140,8 +150,8 @@ func orNone(s string) string {
 }
 
 // SetIdentityHooks installs metric callbacks for identity events.
-// Call before Start.
-func (a *App) SetIdentityHooks(hooks IdentityHooks) { a.rt.hooks = hooks }
+// Safe to call at any time; the swap is atomic.
+func (a *App) SetIdentityHooks(hooks IdentityHooks) { a.rt.hooks.Store(&hooks) }
 
 // ReloadRevocation rebuilds the revocation set (inline serials + CRL
 // re-read) and swaps it in for new handshakes. A broken CRL keeps the

@@ -47,8 +47,8 @@ func (a *App) handleAgentConnection(conn net.Conn) {
 	// rejected agent must never be live and routable, even briefly.
 	allowedHosts, regErr := a.checkRegister(initial.ID, initial.Version, peerCert)
 	if regErr != nil {
-		if a.rt.hooks.RegisterRejected != nil {
-			a.rt.hooks.RegisterRejected(regErr.reason)
+		if hooks := a.rt.identityHooks(); hooks.RegisterRejected != nil {
+			hooks.RegisterRejected(regErr.reason)
 		}
 		log.Warn("ztagents: register rejected (%s): agent=%s: %s", regErr.reason, initial.ID, regErr.msg)
 		reject := &common.Message{Type: "register_response", ID: initial.ID, Error: regErr.msg}
