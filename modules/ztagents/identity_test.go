@@ -142,6 +142,39 @@ func TestCheckRegisterIdentityBinding(t *testing.T) {
 	}
 }
 
+// A missing peer certificate must fail closed when identity binding is
+// configured — never silently skip the check (the real listener always
+// provides a cert, but the gate must not depend on that).
+func TestCheckRegisterNoCertFailsClosed(t *testing.T) {
+	for _, mode := range []string{"cn", "san"} {
+		app := appWithIdentity(mode, true, nil)
+		_, err := app.checkRegister("any-agent", 1, nil)
+		if err == nil || err.reason != "identity" {
+			t.Fatalf("bind_to=%s with nil cert: got %v, want identity rejection", mode, err)
+		}
+	}
+	// none/"" mode keeps accepting cert-less callers (legacy behavior).
+	for _, mode := range []string{"none", ""} {
+		app := appWithIdentity(mode, true, nil)
+		if _, err := app.checkRegister("any-agent", 1, nil); err != nil {
+			t.Fatalf("bind_to=%q with nil cert should pass: %v", mode, err)
+		}
+	}
+}
+
+// End-to-end over a non-TLS pipe: the register path itself must reject
+// a cert-less connection under bind_to=cn, keeping the registry empty.
+func TestRegisterWithoutCertRejectedUnderBinding(t *testing.T) {
+	app := appWithIdentity("cn", true, nil)
+	resp := driveRegister(t, app, &common.Message{Type: "register", ID: "ghost"})
+	if resp.Error == "" || !strings.Contains(resp.Error, "no client certificate") {
+		t.Fatalf("expected cert-less rejection, got %+v", resp)
+	}
+	if n := app.AgentCount(); n != 0 {
+		t.Fatalf("registry has %d agents, want 0", n)
+	}
+}
+
 func TestCheckRegisterObserveModeCountsMismatch(t *testing.T) {
 	app := appWithIdentity("none", true, nil)
 	var mismatches int

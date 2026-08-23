@@ -120,7 +120,19 @@ func (a *App) checkRegister(id string, version int, cert *x509.Certificate) ([]h
 	}
 
 	hooks := a.rt.identityHooks()
-	if cert != nil {
+	if cert == nil {
+		// No peer certificate. Impossible over the real mTLS listener
+		// (RequireAndVerifyClientCert), but this function must fail
+		// closed on its own: if identity binding is configured, a
+		// cert-less connection (non-TLS test harness, future reuse of
+		// the handler) must not bypass it.
+		if a.rt.bindTo == "cn" || a.rt.bindTo == "san" {
+			return nil, &registerError{
+				reason: "identity",
+				msg:    fmt.Sprintf("no client certificate to verify agent identity (bind_to=%s)", a.rt.bindTo),
+			}
+		}
+	} else {
 		if want, enforce := peerIdentity(cert, a.rt.bindTo); enforce {
 			if id != want {
 				if hooks.IdentityMismatch != nil {
