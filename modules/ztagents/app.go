@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
@@ -39,6 +40,15 @@ type runtime struct {
 	ctx         context.Context
 	cancelCtx   context.CancelFunc
 	wg          sync.WaitGroup
+
+	// Phase 0 identity state. bindTo/acl/aclUnlisted are immutable
+	// after provision (identity/ACL changes apply on restart); the
+	// revocation set is swapped atomically on SIGHUP.
+	bindTo      string
+	aclUnlisted bool
+	acl         map[string][]hostGlob
+	revoked     atomic.Pointer[revocationSet]
+	hooks       IdentityHooks
 }
 
 // New builds an App from the YAML config and provisions it.
@@ -51,22 +61,36 @@ func New(cfg serverconfig.AgentsConfig) (*App, error) {
 		CAFile:     cfg.CAFile,
 		CheckAddr:  cfg.CheckAddr,
 	}
-	if err := a.provision(); err != nil {
+	if err := a.provision(cfg); err != nil {
 		return nil, err
 	}
 	return a, nil
 }
 
-func (a *App) provision() error {
+func (a *App) provision(cfg serverconfig.AgentsConfig) error {
 	if a.ListenAddr == "" {
 		a.ListenAddr = ":8443"
 	}
 
 	rt := &runtime{
-		registry:   newRegistry(),
-		wsManager:  common.NewWebSocketManager(),
-		tcpManager: zttcp.NewManager(),
+		registry:    newRegistry(),
+		wsManager:   common.NewWebSocketManager(),
+		tcpManager:  zttcp.NewManager(),
+		bindTo:      cfg.Identity.BindTo,
+		aclUnlisted: cfg.ACL.Unlisted(),
+		acl:         make(map[string][]hostGlob, len(cfg.ACL.Agents)),
 	}
+	for _, entry := range cfg.ACL.Agents {
+		rt.acl[entry.ID] = compileHostGlobs(entry.AllowedHosts)
+	}
+	if !rt.aclUnlisted && len(rt.acl) == 0 {
+		log.Warn("ztagents: acl.allow_unlisted=false with an empty agents list — no agent can register")
+	}
+	revoked, err := buildRevocationSet(cfg.Revocation)
+	if err != nil {
+		return fmt.Errorf("ztagents: revocation: %w", err)
+	}
+	rt.revoked.Store(revoked)
 	rt.ctx, rt.cancelCtx = context.WithCancel(context.Background())
 	a.rt = rt
 
@@ -75,12 +99,60 @@ func (a *App) provision() error {
 		return nil
 	}
 
-	cfg, err := loadTLSConfig(a.CertFile, a.KeyFile, a.CAFile)
+	tlsCfg, err := loadTLSConfig(a.CertFile, a.KeyFile, a.CAFile)
 	if err != nil {
 		return fmt.Errorf("ztagents: provision tls: %w", err)
 	}
-	rt.tlsConfig = cfg
-	log.Info("ztagents: TLS configured (listen=%s)", a.ListenAddr)
+	// Revocation check at handshake time via VerifyConnection, which —
+	// unlike VerifyPeerCertificate — also runs on resumed sessions
+	// (gosec G123). Session tickets are disabled anyway: agent
+	// connections are few and long-lived, so resumption buys nothing
+	// and closing the door entirely is free. Reads the atomic pointer
+	// so a SIGHUP CRL re-read applies to new handshakes without
+	// touching the listener.
+	tlsCfg.SessionTicketsDisabled = true
+	tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		set := rt.revoked.Load()
+		if set.empty() {
+			return nil
+		}
+		// PeerCertificates[0] is the leaf, non-empty under
+		// RequireAndVerifyClientCert.
+		if len(cs.PeerCertificates) == 0 {
+			return fmt.Errorf("no client certificate")
+		}
+		if serial := certSerialHex(cs.PeerCertificates[0]); set.has(serial) {
+			return fmt.Errorf("client certificate serial %s is revoked", serial)
+		}
+		return nil
+	}
+	rt.tlsConfig = tlsCfg
+	log.Info("ztagents: TLS configured (listen=%s, bind_to=%s, acl_entries=%d)", a.ListenAddr, orNone(rt.bindTo), len(rt.acl))
+	return nil
+}
+
+// orNone renders an empty bind mode as "none" for logs.
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// SetIdentityHooks installs metric callbacks for identity events.
+// Call before Start.
+func (a *App) SetIdentityHooks(hooks IdentityHooks) { a.rt.hooks = hooks }
+
+// ReloadRevocation rebuilds the revocation set (inline serials + CRL
+// re-read) and swaps it in for new handshakes. A broken CRL keeps the
+// previous set in force.
+func (a *App) ReloadRevocation(cfg serverconfig.RevocationConfig) error {
+	set, err := buildRevocationSet(cfg)
+	if err != nil {
+		return err
+	}
+	a.rt.revoked.Store(set)
+	log.Info("ztagents: revocation set reloaded (%d serials)", len(set.serials))
 	return nil
 }
 
@@ -235,4 +307,3 @@ func categorizeAcceptError(err error) {
 		log.Debug("ztagents: client rejected server cert")
 	}
 }
-

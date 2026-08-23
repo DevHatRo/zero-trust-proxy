@@ -69,6 +69,16 @@ agents:
   check_addr: ":2020"        # optional legacy ACME-ask endpoint; "" disables
   tcp_port_min: 20000        # optional: port range for TCP-service listeners
   tcp_port_max: 30000        #           (protocol: tcp services get a port from this range)
+  identity:
+    bind_to: none            # cn | san | none — bind register ID to the client cert
+  acl:                       # per-agent hostname allow-list (label-aware globs)
+    allow_unlisted: true
+    agents:
+      - id: "synology"
+        allowed_hosts: ["*.local.example.com"]
+  revocation:                # client-cert revocation at the TLS handshake
+    crl_file: ""             # re-read on SIGHUP
+    denied_serials: []       # hex serials
 
 router:
   request_timeout: 2m
@@ -141,6 +151,8 @@ Setting `metrics.addr` enables a Prometheus text-format exporter at
 | `ztp_ratelimit_buckets` | gauge | live rate-limit buckets across all limiters |
 | `ztp_firewall_denied_total{rule}` | counter | requests denied by a firewall rule |
 | `ztp_firewall_oversize_total` | counter | requests rejected for exceeding `max_request_bytes` |
+| `ztp_agent_identity_mismatch_total` | counter | agent register ID ≠ client-cert identity (also counted in `bind_to: none` observe mode) |
+| `ztp_agent_register_rejected_total{reason}` | counter | agent registrations rejected (`version` / `identity` / `acl`) |
 | `ztp_build_info{version}` | gauge | binary version info (always 1) |
 
 Bind the exporter to a private interface — no authentication is

@@ -27,6 +27,8 @@ type metrics struct {
 	rlBuckets        prometheus.Gauge
 	fwDenied         *prometheus.CounterVec
 	fwOversize       prometheus.Counter
+	idMismatch       prometheus.Counter
+	regRejected      *prometheus.CounterVec
 	reg              *prometheus.Registry
 	handler          http.Handler
 }
@@ -76,6 +78,15 @@ func newMetrics() *metrics {
 		Help: "Requests rejected for exceeding max_request_bytes.",
 	})
 
+	idMismatch := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ztp_agent_identity_mismatch_total",
+		Help: "Agent registrations whose ID differs from the client-cert identity (counted even in bind_to=none observe mode).",
+	})
+	regRejected := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ztp_agent_register_rejected_total",
+		Help: "Agent registrations rejected at the control plane.",
+	}, []string{"reason"}) // version | identity | acl
+
 	buildInfo := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ztp_build_info",
 		Help: "Build metadata. Always 1.",
@@ -86,7 +97,7 @@ func newMetrics() *metrics {
 	}).Set(1)
 
 	reg.MustRegister(requestsTotal, requestDuration, agentsRegistered, wsSessions, agentServices,
-		rlRejected, rlBuckets, fwDenied, fwOversize, buildInfo)
+		rlRejected, rlBuckets, fwDenied, fwOversize, idMismatch, regRejected, buildInfo)
 
 	m := &metrics{
 		requestsTotal:    requestsTotal,
@@ -98,6 +109,8 @@ func newMetrics() *metrics {
 		rlBuckets:        rlBuckets,
 		fwDenied:         fwDenied,
 		fwOversize:       fwOversize,
+		idMismatch:       idMismatch,
+		regRejected:      regRejected,
 		reg:              reg,
 	}
 	m.handler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})

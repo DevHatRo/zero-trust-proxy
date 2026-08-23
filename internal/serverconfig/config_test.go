@@ -268,3 +268,60 @@ func TestSecurityValidation(t *testing.T) {
 		t.Fatalf("disabled section should not be validated: %v", err)
 	}
 }
+
+func TestAgentsIdentityValidation(t *testing.T) {
+	boolPtr := func(b bool) *bool { return &b }
+	base := func() Config {
+		c := Defaults()
+		c.TLS = TLSConfig{Mode: TLSModeNone}
+		c.Listen = ListenConfig{HTTP: ":80"}
+		c.Agents = AgentsConfig{Listen: ":8443", CertFile: "c", KeyFile: "k", CAFile: "ca"}
+		return c
+	}
+
+	good := base()
+	good.Agents.Identity = IdentityConfig{BindTo: "cn"}
+	good.Agents.ACL = ACLConfig{
+		AllowUnlisted: boolPtr(false),
+		Agents: []AgentACLEntry{
+			{ID: "synology", AllowedHosts: []string{"*.local.example.com"}},
+			{ID: "edge-eu", AllowedHosts: []string{"*.eu.example.com", "status.example.com"}},
+		},
+	}
+	good.Agents.Revocation = RevocationConfig{DeniedSerials: []string{"0A1B2C3D", "ff"}}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid identity config rejected: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"bad bind_to", func(c *Config) { c.Agents.Identity.BindTo = "spiffe" }},
+		{"acl entry without id", func(c *Config) { c.Agents.ACL.Agents[0].ID = "" }},
+		{"duplicate acl id", func(c *Config) { c.Agents.ACL.Agents[1].ID = "synology" }},
+		{"acl entry without hosts", func(c *Config) { c.Agents.ACL.Agents[0].AllowedHosts = nil }},
+		{"bad host pattern chars", func(c *Config) { c.Agents.ACL.Agents[0].AllowedHosts = []string{"bad host!"} }},
+		{"empty label in pattern", func(c *Config) { c.Agents.ACL.Agents[0].AllowedHosts = []string{"a..b"} }},
+		{"non-hex serial", func(c *Config) { c.Agents.Revocation.DeniedSerials = []string{"xyz"} }},
+		{"missing crl file", func(c *Config) { c.Agents.Revocation.CRLFile = "/does/not/exist.crl" }},
+	}
+	for _, tc := range cases {
+		cfg := good
+		cfg.Agents.ACL.Agents = append([]AgentACLEntry(nil), good.Agents.ACL.Agents...)
+		cfg.Agents.Revocation.DeniedSerials = append([]string(nil), good.Agents.Revocation.DeniedSerials...)
+		tc.mutate(&cfg)
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s: expected validation error", tc.name)
+		}
+	}
+
+	// Defaults: unset ACL means allow_unlisted=true, bind_to none.
+	d := base()
+	if !d.Agents.ACL.Unlisted() {
+		t.Fatal("default allow_unlisted must be true (legacy behavior)")
+	}
+	if err := d.Validate(); err != nil {
+		t.Fatalf("default agents config should validate: %v", err)
+	}
+}

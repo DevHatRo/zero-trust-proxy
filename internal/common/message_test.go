@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -571,5 +572,42 @@ func BenchmarkMessageDeserialization(b *testing.B) {
 		if err != nil {
 			b.Fatalf("unmarshal failed: %v", err)
 		}
+	}
+}
+
+// Version/Meta ride the register message; older peers omit them and
+// must decode to zero values (which the server maps to version 1).
+func TestRegisterVersionMetaRoundTrip(t *testing.T) {
+	msg := &Message{
+		Type:    "register",
+		ID:      "synology",
+		Version: ProtocolVersion,
+		Meta:    &AgentMeta{Name: "NAS", Region: "home", Tags: []string{"prod", "media"}},
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Message
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != ProtocolVersion || got.Meta == nil || got.Meta.Name != "NAS" ||
+		got.Meta.Region != "home" || len(got.Meta.Tags) != 2 {
+		t.Fatalf("round trip lost fields: %+v meta=%+v", got, got.Meta)
+	}
+
+	// A legacy register (no version/meta on the wire) decodes cleanly.
+	var legacy Message
+	if err := json.Unmarshal([]byte(`{"type":"register","id":"old-agent"}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Version != 0 || legacy.Meta != nil {
+		t.Fatalf("legacy message should have zero version/meta: %+v", legacy)
+	}
+	// And a modern message with omitempty drops the fields when unset.
+	plain, _ := json.Marshal(&Message{Type: "ping", ID: "x"})
+	if strings.Contains(string(plain), "version") || strings.Contains(string(plain), "meta") {
+		t.Fatalf("unset version/meta must be omitted: %s", plain)
 	}
 }

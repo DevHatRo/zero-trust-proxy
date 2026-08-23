@@ -1,8 +1,11 @@
 package serverconfig
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -184,7 +187,104 @@ func (a *AgentsConfig) validate() error {
 	if (a.TCPPortMin > 0 || a.TCPPortMax > 0) && a.TCPPortMin >= a.TCPPortMax {
 		return fmt.Errorf("agents: tcp_port_min (%d) must be less than tcp_port_max (%d)", a.TCPPortMin, a.TCPPortMax)
 	}
+
+	switch a.Identity.BindTo {
+	case "", "none", "cn", "san":
+	default:
+		return fmt.Errorf("agents.identity.bind_to=%q: must be cn|san|none", a.Identity.BindTo)
+	}
+
+	seen := make(map[string]bool, len(a.ACL.Agents))
+	for i, entry := range a.ACL.Agents {
+		where := fmt.Sprintf("agents.acl.agents[%d]", i)
+		if entry.ID == "" {
+			return fmt.Errorf("%s: id required", where)
+		}
+		if seen[entry.ID] {
+			return fmt.Errorf("%s: duplicate agent id %q", where, entry.ID)
+		}
+		seen[entry.ID] = true
+		if len(entry.AllowedHosts) == 0 {
+			return fmt.Errorf("%s (%s): allowed_hosts must list at least one pattern", where, entry.ID)
+		}
+		for _, pattern := range entry.AllowedHosts {
+			if err := validateHostPattern(pattern); err != nil {
+				return fmt.Errorf("%s (%s): %w", where, entry.ID, err)
+			}
+		}
+	}
+	// allow_unlisted:false with an empty agents list means no agent can
+	// ever connect — deliberately NOT a validation error (it may be an
+	// intentional lockdown); ztagents logs a warning at startup instead.
+
+	for _, serial := range a.Revocation.DeniedSerials {
+		if serial == "" || !isHex(serial) {
+			return fmt.Errorf("agents.revocation.denied_serials: %q is not valid hex", serial)
+		}
+	}
+	if a.Revocation.CRLFile != "" {
+		if _, err := LoadCRLSerials(a.Revocation.CRLFile); err != nil {
+			return fmt.Errorf("agents.revocation.crl_file: %w", err)
+		}
+	}
 	return nil
+}
+
+// validateHostPattern checks a label-aware ACL glob: dot-separated
+// labels, each either "*" or a plain DNS label.
+func validateHostPattern(pattern string) error {
+	if pattern == "" {
+		return fmt.Errorf("empty host pattern")
+	}
+	for _, label := range strings.Split(pattern, ".") {
+		if label == "*" {
+			continue
+		}
+		if label == "" {
+			return fmt.Errorf("invalid host pattern %q: empty label", pattern)
+		}
+		for _, r := range label {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			default:
+				return fmt.Errorf("invalid host pattern %q: label %q contains %q", pattern, label, string(r))
+			}
+		}
+	}
+	return nil
+}
+
+func isHex(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// LoadCRLSerials reads a PEM- or DER-encoded CRL and returns the
+// revoked serial numbers in lowercase hex. Used both by validation and
+// by the ztagents revocation set (including on SIGHUP re-read).
+func LoadCRLSerials(path string) ([]string, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- path comes from operator config, not user input
+	if err != nil {
+		return nil, fmt.Errorf("read CRL: %w", err)
+	}
+	if block, _ := pem.Decode(data); block != nil {
+		data = block.Bytes
+	}
+	crl, err := x509.ParseRevocationList(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse CRL: %w", err)
+	}
+	serials := make([]string, 0, len(crl.RevokedCertificateEntries))
+	for _, entry := range crl.RevokedCertificateEntries {
+		serials = append(serials, strings.ToLower(entry.SerialNumber.Text(16)))
+	}
+	return serials, nil
 }
 
 func (l *LoggingConfig) validate() error {

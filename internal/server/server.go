@@ -64,6 +64,18 @@ func New(cfg *serverconfig.Config) (*Server, error) {
 	if cfg.Metrics.Addr != "" {
 		s.metrics = newMetrics()
 	}
+	agents.SetIdentityHooks(ztagents.IdentityHooks{
+		IdentityMismatch: func() {
+			if s.metrics != nil {
+				s.metrics.idMismatch.Inc()
+			}
+		},
+		RegisterRejected: func(reason string) {
+			if s.metrics != nil {
+				s.metrics.regRejected.WithLabelValues(reason).Inc()
+			}
+		},
+	})
 	if cfg.Security.RateLimit.Enabled || cfg.Security.Firewall.Enabled {
 		eng, err := security.NewEngine(cfg.Security, s.securityHooks())
 		if err != nil {
