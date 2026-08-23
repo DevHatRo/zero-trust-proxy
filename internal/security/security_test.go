@@ -334,8 +334,30 @@ func TestHostGlob(t *testing.T) {
 		{"*.example.com", "notexample.com", false},
 	}
 	for _, c := range cases {
-		if got := compileHostGlob(c.pattern).matches(c.host); got != c.want {
+		if got := CompileHostPattern(c.pattern).Matches(c.host); got != c.want {
 			t.Errorf("glob %q vs %q: got %v, want %v", c.pattern, c.host, got, c.want)
+		}
+	}
+}
+
+// Lowercase method tokens must not bypass a methods-scoped deny rule.
+func TestFirewallMethodCaseNormalized(t *testing.T) {
+	cfg := serverconfig.SecurityConfig{Firewall: serverconfig.FirewallConfig{
+		Enabled: true,
+		Rules: []serverconfig.FirewallRule{
+			{Name: "no-writes", Action: "deny",
+				When: serverconfig.FirewallRuleMatch{Hosts: []string{"api.example.com"}, Methods: []string{"POST"}}},
+		},
+	}}
+	e := newEngine(t, cfg)
+	h := e.WrapWAF(okHandler())
+	for _, method := range []string{"POST", "post", "Post"} {
+		req := httptest.NewRequest(method, "http://api.example.com/write", nil)
+		req.RemoteAddr = "1.2.3.4:555"
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("method %q: status=%d, want 403", method, rr.Code)
 		}
 	}
 }

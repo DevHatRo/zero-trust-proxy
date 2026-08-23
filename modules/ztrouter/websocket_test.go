@@ -19,12 +19,12 @@ import (
 )
 
 type hijackRecorder struct {
-	mu        sync.Mutex
-	header    http.Header
-	code      int
-	body      bytes.Buffer
-	conn      net.Conn // server side of hijacked conn — returned by Hijack()
-	hijacked  bool
+	mu       sync.Mutex
+	header   http.Header
+	code     int
+	body     bytes.Buffer
+	conn     net.Conn // server side of hijacked conn — returned by Hijack()
+	hijacked bool
 }
 
 func (r *hijackRecorder) Header() http.Header {
@@ -340,4 +340,3 @@ func TestIsWebSocketUpgrade_MissingConnectionHeader(t *testing.T) {
 		t.Fatal("expected isWebSocketUpgrade to return false without Connection header")
 	}
 }
-

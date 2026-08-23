@@ -17,6 +17,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
+	"github.com/devhatro/zero-trust-proxy/internal/policy"
 	"github.com/devhatro/zero-trust-proxy/internal/security"
 	"github.com/devhatro/zero-trust-proxy/internal/serverconfig"
 	"github.com/devhatro/zero-trust-proxy/modules/ztagents"
@@ -43,6 +44,7 @@ type Server struct {
 	metricsTkr *time.Ticker
 	metricsCh  chan struct{}
 	security   *security.Engine // nil when both security sections are disabled
+	access     *policy.Engine   // nil when access.enabled is false
 
 	mu       sync.Mutex
 	started  bool
@@ -83,7 +85,39 @@ func New(cfg *serverconfig.Config) (*Server, error) {
 		}
 		s.security = eng
 	}
+	if cfg.Access.Enabled {
+		eng, err := policy.New(cfg.Access, policy.Hooks{
+			Allowed: func(rule string) {
+				if s.metrics != nil {
+					s.metrics.accessAllowed.Inc()
+				}
+			},
+			Denied: func(rule string) {
+				if s.metrics != nil {
+					s.metrics.accessDenied.WithLabelValues(ruleLabel(rule)).Inc()
+				}
+			},
+			AuthRequired: func() {
+				if s.metrics != nil {
+					s.metrics.accessAuthReq.Inc()
+				}
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("access: %w", err)
+		}
+		s.access = eng
+	}
 	return s, nil
+}
+
+// ruleLabel keeps the denied-counter cardinality bounded: rule names
+// are operator-authored and finite, but the default action has no rule.
+func ruleLabel(rule string) string {
+	if rule == "" {
+		return "_default"
+	}
+	return rule
 }
 
 // securityHooks bridges security-engine events into Prometheus. Each
@@ -150,10 +184,14 @@ func (s *Server) Start(_ context.Context) error {
 		s.httpsLn = ln
 		var publicHandler http.Handler = s.router
 		// Chain wraps inner→outer; effective order outermost-first is
-		// altSvc → accessLog → metrics → WAF → rateLimit → router.
-		// WAF sits outside rateLimit so a firewall-denied request never
-		// consumes a rate-limit token; both sit inside metrics so their
-		// 403/413/429 responses are counted.
+		// altSvc → accessLog → metrics → WAF → rateLimit → accessPolicy
+		// → router. Cheap rejects first: a firewall-denied request never
+		// consumes a rate-limit token, and both fire before the access
+		// layer touches cookies or tokens. All sit inside metrics so
+		// their 401/403/413/429 responses are counted.
+		if s.access != nil {
+			publicHandler = s.access.Wrap(publicHandler)
+		}
 		if s.security != nil {
 			publicHandler = s.security.WrapRateLimit(publicHandler)
 			publicHandler = s.security.WrapWAF(publicHandler)

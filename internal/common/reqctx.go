@@ -21,6 +21,13 @@ type RequestInfo struct {
 	// (the X-Request-Id header and the error page) so a user-reported failure
 	// can be correlated with a log line. Set by the access-log middleware.
 	RequestID string
+	// Identity is the access-policy subject (token name or OIDC sub) that
+	// was allowed through; empty for anonymous/public requests. Set by the
+	// access middleware for the access log.
+	Identity string
+	// IdentitySource is how the identity was presented: "session",
+	// "service_token", or "" for anonymous.
+	IdentitySource string
 }
 
 // NewRequestID returns a short, opaque, URL-safe request identifier (16 hex

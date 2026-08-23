@@ -9,26 +9,26 @@ import (
 	"github.com/devhatro/zero-trust-proxy/internal/serverconfig"
 )
 
-// hostGlob matches a request Host. Supported forms: "*" (any),
+// HostPattern matches a request Host. Supported forms: "*" (any),
 // "*.suffix" (any subdomain of suffix, one or more labels), exact.
-type hostGlob struct {
+type HostPattern struct {
 	any    bool
 	suffix string // non-empty for "*.suffix"; includes the leading dot
 	exact  string
 }
 
-func compileHostGlob(pattern string) hostGlob {
+func CompileHostPattern(pattern string) HostPattern {
 	switch {
 	case pattern == "*":
-		return hostGlob{any: true}
+		return HostPattern{any: true}
 	case strings.HasPrefix(pattern, "*."):
-		return hostGlob{suffix: pattern[1:]} // ".suffix"
+		return HostPattern{suffix: pattern[1:]} // ".suffix"
 	default:
-		return hostGlob{exact: strings.ToLower(pattern)}
+		return HostPattern{exact: strings.ToLower(pattern)}
 	}
 }
 
-func (g hostGlob) matches(host string) bool {
+func (g HostPattern) Matches(host string) bool {
 	switch {
 	case g.any:
 		return true
@@ -39,30 +39,30 @@ func (g hostGlob) matches(host string) bool {
 	}
 }
 
-// pathGlob matches a cleaned request path. Same semantics as the
+// PathPattern matches a cleaned request path. Same semantics as the
 // agent's route matcher: "" / "*" / "/*" match all; "…/*" matches the
 // base and its subtree; "…*" is a plain prefix; otherwise exact.
-type pathGlob struct {
+type PathPattern struct {
 	matchAll bool
 	exact    string
 	prefix   string // set for wildcard patterns
 	subtree  bool   // prefix ends with "/": also match the base without it
 }
 
-func compilePathGlob(pattern string) pathGlob {
+func CompilePathPattern(pattern string) PathPattern {
 	switch {
 	case pattern == "" || pattern == "*" || pattern == "/*":
-		return pathGlob{matchAll: true}
+		return PathPattern{matchAll: true}
 	case strings.HasSuffix(pattern, "/*"):
-		return pathGlob{prefix: pattern[:len(pattern)-1], subtree: true}
+		return PathPattern{prefix: pattern[:len(pattern)-1], subtree: true}
 	case strings.HasSuffix(pattern, "*"):
-		return pathGlob{prefix: pattern[:len(pattern)-1]}
+		return PathPattern{prefix: pattern[:len(pattern)-1]}
 	default:
-		return pathGlob{exact: pattern}
+		return PathPattern{exact: pattern}
 	}
 }
 
-func (g pathGlob) matches(path string) bool {
+func (g PathPattern) Matches(path string) bool {
 	switch {
 	case g.matchAll:
 		return true
@@ -95,8 +95,8 @@ func CleanPath(p string) string {
 type fwRule struct {
 	name    string
 	allow   bool
-	hosts   []hostGlob
-	paths   []pathGlob
+	hosts   []HostPattern
+	paths   []PathPattern
 	methods map[string]bool
 	cidrs   []*net.IPNet
 }
@@ -129,18 +129,18 @@ func (r *fwRule) matches(host, path, method string, ip net.IP) bool {
 	return true
 }
 
-func anyHost(globs []hostGlob, host string) bool {
+func anyHost(globs []HostPattern, host string) bool {
 	for _, g := range globs {
-		if g.matches(host) {
+		if g.Matches(host) {
 			return true
 		}
 	}
 	return false
 }
 
-func anyPath(globs []pathGlob, path string) bool {
+func anyPath(globs []PathPattern, path string) bool {
 	for _, g := range globs {
-		if g.matches(path) {
+		if g.Matches(path) {
 			return true
 		}
 	}
@@ -159,10 +159,10 @@ func compileFirewall(cfg serverconfig.FirewallConfig) (*firewallSet, error) {
 	for _, rc := range cfg.Rules {
 		r := fwRule{name: rc.Name, allow: rc.Action == "allow"}
 		for _, h := range rc.When.Hosts {
-			r.hosts = append(r.hosts, compileHostGlob(h))
+			r.hosts = append(r.hosts, CompileHostPattern(h))
 		}
 		for _, p := range rc.When.Paths {
-			r.paths = append(r.paths, compilePathGlob(p))
+			r.paths = append(r.paths, CompilePathPattern(p))
 		}
 		if len(rc.When.Methods) > 0 {
 			r.methods = make(map[string]bool, len(rc.When.Methods))

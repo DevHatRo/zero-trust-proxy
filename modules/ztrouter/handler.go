@@ -13,6 +13,7 @@ import (
 
 	"github.com/devhatro/zero-trust-proxy/internal/common"
 	"github.com/devhatro/zero-trust-proxy/internal/logger"
+	"github.com/devhatro/zero-trust-proxy/internal/security"
 	"github.com/devhatro/zero-trust-proxy/internal/streaming"
 	"github.com/devhatro/zero-trust-proxy/modules/ztagents"
 )
@@ -43,6 +44,17 @@ func New(app *ztagents.App, requestTimeout time.Duration) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// /.ztp/* is the proxy-owned namespace (login callback, logout).
+	// The access middleware handles it before the router when enabled;
+	// this guard is defence-in-depth so a config with access disabled
+	// can never proxy the reserved namespace to a backend. Matched on
+	// the dot-segment-collapsed path: "/foo/../.ztp/logout" is the
+	// namespace too, and upstreams would resolve it there.
+	if isZTPPath(security.CleanPath(r.URL.Path)) {
+		http.NotFound(w, r)
+		return
+	}
+
 	host := r.Host
 	if host == "" {
 		http.Error(w, "Missing Host header", http.StatusBadRequest)
@@ -272,6 +284,12 @@ func writeAgentResponse(w http.ResponseWriter, r *http.Request, resp *common.Mes
 	if len(resp.HTTP.Body) > 0 {
 		_, _ = io.Copy(w, bytes.NewReader(resp.HTTP.Body))
 	}
+}
+
+// isZTPPath reports whether a cleaned path is inside the proxy-owned
+// /.ztp namespace (including the bare "/.ztp").
+func isZTPPath(cleaned string) bool {
+	return cleaned == "/.ztp" || strings.HasPrefix(cleaned, "/.ztp/")
 }
 
 // isClientGone returns true for network errors that mean the client disconnected

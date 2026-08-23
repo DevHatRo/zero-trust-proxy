@@ -613,16 +613,15 @@ type plainResponseWriter struct {
 	body   bytes.Buffer
 }
 
-func newPlainRW() *plainResponseWriter { return &plainResponseWriter{header: make(http.Header)} }
-func (p *plainResponseWriter) Header() http.Header        { return p.header }
-func (p *plainResponseWriter) WriteHeader(code int)        { p.code = code }
+func newPlainRW() *plainResponseWriter              { return &plainResponseWriter{header: make(http.Header)} }
+func (p *plainResponseWriter) Header() http.Header  { return p.header }
+func (p *plainResponseWriter) WriteHeader(code int) { p.code = code }
 func (p *plainResponseWriter) Write(b []byte) (int, error) {
 	if p.code == 0 {
 		p.code = http.StatusOK
 	}
 	return p.body.Write(b)
 }
-
 
 // TestHandleDownloadStream_NoSupport covers the fallback when the
 // ResponseWriter supports neither Hijacker nor Flusher.

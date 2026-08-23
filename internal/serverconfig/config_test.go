@@ -325,3 +325,135 @@ func TestAgentsIdentityValidation(t *testing.T) {
 		t.Fatalf("default agents config should validate: %v", err)
 	}
 }
+
+func TestAccessValidation(t *testing.T) {
+	t.Setenv("ZTP_SESSION_SECRET_T", "0123456789abcdef0123456789abcdef")
+	t.Setenv("ZTP_GOOG_ID", "client-id")
+	t.Setenv("ZTP_GOOG_SECRET", "client-secret")
+
+	base := func() Config {
+		c := Defaults()
+		c.TLS = TLSConfig{Mode: TLSModeNone}
+		c.Listen = ListenConfig{HTTP: ":80"}
+		c.Agents = AgentsConfig{Listen: ":8443", CertFile: "c", KeyFile: "k", CAFile: "ca"}
+		return c
+	}
+
+	good := base()
+	good.Access = AccessConfig{
+		Enabled: true,
+		Session: SessionConfig{SecretEnv: "ZTP_SESSION_SECRET_T"},
+		ServiceTokens: []ServiceToken{
+			{Name: "ci", Hash: "sha256:" + strings.Repeat("ab", 32), Groups: []string{"ci"}},
+		},
+		DefaultAction: "deny",
+		Rules: []AccessRule{
+			{Name: "public", When: AccessMatch{Hosts: []string{"www.example.com"}}, Action: "allow"},
+			{Name: "internal", When: AccessMatch{Hosts: []string{"*.internal.example.com"}}, Action: "allow",
+				Require: &AccessRequire{Groups: []string{"staff"},
+					SourceCIDRs: []string{"10.0.0.0/8"}}},
+		},
+	}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid access config rejected: %v", err)
+	}
+	if len(good.Access.Session.Secret()) < 32 {
+		t.Fatal("Validate must resolve the session secret")
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"missing secret env name", func(c *Config) { c.Access.Session.SecretEnv = "" }},
+		{"unset secret env", func(c *Config) { c.Access.Session.SecretEnv = "ZTP_DOES_NOT_EXIST" }},
+		{"bad default action", func(c *Config) { c.Access.DefaultAction = "maybe" }},
+		{"plaintext token hash", func(c *Config) { c.Access.ServiceTokens[0].Hash = "hunter2" }},
+		{"duplicate token name", func(c *Config) {
+			c.Access.ServiceTokens = append(c.Access.ServiceTokens, c.Access.ServiceTokens[0])
+		}},
+		{"identity providers rejected until OIDC ships", func(c *Config) {
+			c.Access.IdentityProviders = []IdentityProvider{{Name: "google", Type: "oidc",
+				Issuer: "https://accounts.google.com", ClientIDEnv: "ZTP_GOOG_ID", ClientSecretEnv: "ZTP_GOOG_SECRET"}}
+		}},
+		{"identity_provider require rejected until OIDC ships", func(c *Config) {
+			c.Access.Rules[1].Require.IdentityProvider = "google"
+		}},
+		{"empty require fails closed at validation", func(c *Config) {
+			c.Access.Rules[1].Require = &AccessRequire{}
+		}},
+		{"emails rejected until OIDC ships", func(c *Config) {
+			c.Access.Rules[1].Require.Emails = []string{"ceo@example.com"}
+		}},
+		{"emails_domain rejected until OIDC ships", func(c *Config) {
+			c.Access.Rules[1].Require.EmailsDomain = []string{"example.com"}
+		}},
+		{"blank group in require", func(c *Config) {
+			c.Access.Rules[1].Require.Groups = []string{"staff", ""}
+		}},
+		{"blank group on token", func(c *Config) {
+			c.Access.ServiceTokens[0].Groups = []string{""}
+		}},
+		{"rule without name", func(c *Config) { c.Access.Rules[0].Name = "" }},
+		{"duplicate rule name", func(c *Config) { c.Access.Rules[1].Name = "public" }},
+		{"bad rule action", func(c *Config) { c.Access.Rules[0].Action = "block" }},
+		{"require on deny rule", func(c *Config) {
+			c.Access.Rules[0].Action = "deny"
+			c.Access.Rules[0].Require = &AccessRequire{Authenticated: true}
+		}},
+		{"bad cidr", func(c *Config) { c.Access.Rules[1].Require.SourceCIDRs = []string{"nope"} }},
+		{"bad email domain", func(c *Config) { c.Access.Rules[1].Require.EmailsDomain = []string{"@example.com"} }},
+	}
+	for _, tc := range cases {
+		cfg := good
+		cfg.Access.ServiceTokens = append([]ServiceToken(nil), good.Access.ServiceTokens...)
+		cfg.Access.Rules = append([]AccessRule(nil), good.Access.Rules...)
+		req := *good.Access.Rules[1].Require
+		cfg.Access.Rules[1].Require = &req
+		tc.mutate(&cfg)
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s: expected validation error", tc.name)
+		}
+	}
+
+	// Short secret rejected.
+	t.Setenv("ZTP_SHORT", "tooshort")
+	short := base()
+	short.Access = AccessConfig{Enabled: true, Session: SessionConfig{SecretEnv: "ZTP_SHORT"}}
+	if err := short.Validate(); err == nil {
+		t.Error("short session secret must be rejected")
+	}
+
+	// Disabled block is dormant — not validated.
+	off := base()
+	off.Access = AccessConfig{Enabled: false, ServiceTokens: []ServiceToken{{Name: "x", Hash: "garbage"}}}
+	if err := off.Validate(); err != nil {
+		t.Fatalf("disabled access block should not be validated: %v", err)
+	}
+}
+
+// The hostile-review scenario: a misspelled require key must fail the
+// load, never silently produce an empty (fail-open) predicate.
+func TestStrictParsingRejectsMisspelledKeys(t *testing.T) {
+	t.Setenv("ZTP_S", "0123456789abcdef0123456789abcdef")
+	_, err := Parse([]byte(`
+listen: {http: ":80"}
+tls: {mode: none}
+agents: {listen: ":8443", cert_file: c, key_file: k, ca_file: ca}
+access:
+  enabled: true
+  session: {secret_env: ZTP_S}
+  default_action: deny
+  rules:
+    - name: admin
+      when: {hosts: ["admin.example.com"]}
+      action: allow
+      require: {group: ["admins"]}   # typo: group vs groups
+`))
+	if err == nil {
+		t.Fatal("misspelled require key must fail the parse")
+	}
+	if !strings.Contains(err.Error(), "group") && !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error should name the unknown field: %v", err)
+	}
+}

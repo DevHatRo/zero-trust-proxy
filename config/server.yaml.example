@@ -124,3 +124,27 @@ security:
         action: deny
         when:
           hosts: ["admin.example.com"]
+
+# Identity-based access policy — evaluated on every request before it
+# is dispatched to an agent (see docs/server/access-policy.md).
+# Secrets are env-referenced, never inline. rules/service_tokens
+# hot-reload on SIGHUP; enabled/session/identity_providers are
+# restart-only.
+access:
+  enabled: false
+  # session:
+  #   secret_env: ZTP_SESSION_SECRET   # >= 32 bytes
+  #   ttl: 8h
+  # service_tokens:
+  #   - name: ci-deploy
+  #     hash: "sha256:<64 hex of sha256(token)>"
+  #     groups: ["ci"]
+  # default_action: deny               # no rule matched -> deny
+  # rules:
+  #   - name: public-www
+  #     when: { hosts: ["www.example.com"] }
+  #     action: allow
+  #   - name: ci-uploads
+  #     when: { hosts: ["api.example.com"], paths: ["/upload/*"] }
+  #     action: allow
+  #     require: { groups: ["ci"] }
