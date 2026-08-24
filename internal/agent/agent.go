@@ -366,6 +366,7 @@ func convertCommonToTypes(config *common.ServiceConfig) *types.ServiceConfig {
 		Protocol:  config.Protocol,
 		WebSocket: config.WebSocket,
 		Timeout:   config.Timeout,
+		PolicyRef: config.PolicyRef,
 	}
 }
 
@@ -1878,6 +1879,7 @@ func (a *Agent) convertToCommonServiceConfig(service *ServiceConfig, hostname st
 			Protocol:  service.Protocol,
 			WebSocket: service.WebSocket,
 			Timeout:   service.Timeout,
+			PolicyRef: service.AccessPolicy,
 		},
 	}
 }

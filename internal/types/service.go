@@ -24,6 +24,12 @@ type ServiceConfig struct {
 	// TLSOffload, when true, makes the server terminate client TLS and
 	// forward cleartext to the agent. Default false = passthrough.
 	TLSOffload bool          `json:"tls_offload,omitempty" yaml:"tls_offload,omitempty"`
+	// PolicyRef names a server-defined access rule the agent asks to be
+	// applied to this service's host. Advisory only: the server honours
+	// it exclusively when access.allow_agent_policy is true, and even
+	// then only to fill a gap where no server rule already matched.
+	// Never authorization-authoritative on its own.
+	PolicyRef  string        `json:"policy_ref,omitempty" yaml:"policy_ref,omitempty"`
 }
 
 // ValidationError represents a configuration validation error

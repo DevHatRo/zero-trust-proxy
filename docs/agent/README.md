@@ -81,6 +81,7 @@ services:
 | `timeout` | no | Per-service request-timeout override (0 = server's `router.request_timeout`) |
 | `load_balancing.policy` | no | `round_robin`, `weighted_round_robin`, `least_conn`, `ip_hash` |
 | `routes` | no | Route policies (match + handler chain); default is a `/*` → `reverse_proxy` catch-all |
+| `access_policy` | no | Names a server-defined access rule to apply to this service's host. Advisory: honoured only when the server sets `access.allow_agent_policy: true`, and even then only where no server rule already matched and the named rule carries an identity requirement — it can never grant unauthenticated access. See [docs/server/access-policy.md](../server/access-policy.md). |
 
 ## Routes and Middleware
 

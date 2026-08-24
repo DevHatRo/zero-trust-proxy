@@ -67,7 +67,11 @@ type ServiceConfig struct {
 	LoadBalancing  *LoadBalancingConfig  `yaml:"load_balancing,omitempty" json:"load_balancing,omitempty"`
 	Routes         []RouteConfig         `yaml:"routes,omitempty" json:"routes,omitempty"`
 	TLS            *TLSConfig            `yaml:"tls,omitempty" json:"tls,omitempty"`
-	Security       *SecurityConfig       `yaml:"security,omitempty" json:"security,omitempty"`
+	// AccessPolicy names a server-defined access rule to apply to this
+	// service's host. It is only honoured when the server sets
+	// access.allow_agent_policy: true; otherwise server-side rules are
+	// authoritative (the default). See docs/server/access-policy.md.
+	AccessPolicy   string                `yaml:"access_policy,omitempty" json:"access_policy,omitempty"`
 	Monitoring     *MonitoringConfig     `yaml:"monitoring,omitempty" json:"monitoring,omitempty"`
 	TrafficShaping *TrafficShapingConfig `yaml:"traffic_shaping,omitempty"`
 }
@@ -125,25 +129,6 @@ type TLSConfig struct {
 	Ciphers      []string `yaml:"ciphers,omitempty"`
 	ClientAuth   string   `yaml:"client_auth,omitempty"`
 	ClientCAFile string   `yaml:"client_ca_file,omitempty"`
-}
-
-// SecurityConfig represents security middleware settings
-type SecurityConfig struct {
-	CORS *CORSConfig `yaml:"cors,omitempty"`
-	Auth *AuthConfig `yaml:"auth,omitempty"`
-}
-
-// CORSConfig represents CORS configuration
-type CORSConfig struct {
-	Origins []string `yaml:"origins,omitempty"`
-	Methods []string `yaml:"methods,omitempty"`
-	Headers []string `yaml:"headers,omitempty"`
-}
-
-// AuthConfig represents authentication configuration
-type AuthConfig struct {
-	Type   string                 `yaml:"type"`
-	Config map[string]interface{} `yaml:"config,omitempty"`
 }
 
 // MonitoringConfig represents monitoring and observability settings

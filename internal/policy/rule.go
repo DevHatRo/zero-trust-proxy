@@ -105,6 +105,14 @@ func (r *compiledRule) matches(host, path, method string) bool {
 			return false
 		}
 	}
+	return r.matchesPathMethod(path, method)
+}
+
+// matchesPathMethod checks the path and method clauses only, ignoring the
+// host clause. Used by the agent policy_ref gap-fill, where the agent's
+// own host substitutes for the referenced rule's host scope — but its
+// path/method scope must still be honoured.
+func (r *compiledRule) matchesPathMethod(path, method string) bool {
 	if len(r.paths) > 0 {
 		ok := false
 		for _, p := range r.paths {

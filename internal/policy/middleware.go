@@ -39,7 +39,7 @@ func (e *Engine) Wrap(next http.Handler) http.Handler {
 		// Method uppercased: rule keys are normalized at compile time and
 		// Go's request parser accepts any-token, any-case methods — a
 		// lowercase "post" must not slip past a methods-scoped rule.
-		verdict := snap.evaluate(host, path, strings.ToUpper(r.Method), remoteIP(r), id)
+		verdict := e.decide(snap, host, path, strings.ToUpper(r.Method), remoteIP(r), id)
 
 		switch verdict.Decision {
 		case Allow:

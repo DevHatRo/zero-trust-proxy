@@ -787,13 +787,7 @@ func TestConfigRoundTrip(t *testing.T) {
 					Policy:              "round_robin",
 					HealthCheckRequired: true,
 				},
-				Security: &SecurityConfig{
-					CORS: &CORSConfig{
-						Origins: []string{"https://example.com"},
-						Methods: []string{"GET", "POST"},
-						Headers: []string{"Content-Type"},
-					},
-				},
+				AccessPolicy: "internal-apps",
 			},
 		},
 		LogLevel: "DEBUG",
@@ -829,6 +823,10 @@ func TestConfigRoundTrip(t *testing.T) {
 		if loadedService.LoadBalancing.Policy != originalService.LoadBalancing.Policy {
 			t.Errorf("Load balancing policy mismatch: got %s, want %s",
 				loadedService.LoadBalancing.Policy, originalService.LoadBalancing.Policy)
+		}
+		if loadedService.AccessPolicy != originalService.AccessPolicy {
+			t.Errorf("AccessPolicy mismatch: got %q, want %q",
+				loadedService.AccessPolicy, originalService.AccessPolicy)
 		}
 	}
 }
