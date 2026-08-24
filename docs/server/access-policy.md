@@ -4,9 +4,9 @@ The `access:` block makes an identity-based decision on **every**
 inbound request, at the proxy, before the request is dispatched to an
 agent. Identity comes from a **service token** (machines: CI, cron,
 API clients) or a **signed session cookie** (humans — minted by the
-**email one-time-code login** below; an OIDC flow via
-`identity_providers` ships in a later increment). Decisions are driven
-by an ordered rule set.
+browser login flow: **email one-time code** and/or **OIDC / SSO** via
+`identity_providers`, both below). Decisions are driven by an ordered
+rule set.
 
 Disabled by default; an absent block changes nothing. The middleware
 runs after the edge firewall and rate limiter (cheap rejects first)
@@ -50,11 +50,11 @@ access:
       require: { source_cidrs: ["203.0.113.0/24"] }
 ```
 
-**Not available yet — rejected at validation until the OIDC login flow
-ships**: `identity_providers` and the `identity_provider` require
-clause. The `emails` / `emails_domain` clauses require a login flow
-that can establish an email identity: enable **email OTP** (below) to
-use them; without it they are rejected as dead config.
+The `emails` / `emails_domain` / `identity_provider` clauses require a
+login flow that can establish a human identity: configure **email OTP**
+or an **OIDC provider** (both below). Without any login flow they are
+rejected at validation as dead config, and `require.identity_provider`
+must name a configured `identity_providers` entry.
 
 ## Email one-time-code login (email OTP)
 
@@ -115,6 +115,44 @@ Clients present it as `Authorization: Bearer <token>` or
 `X-ZTP-Token: <token>`. Rotation: add the new hash, deploy, remove the
 old one. Verification is constant-time over the whole token table.
 
+## OIDC / SSO login (`identity_providers`)
+
+Configure one or more OpenID Connect providers (Google, Okta, Azure AD,
+Auth0, Keycloak, …). Each protected host presents a **Sign in with
+&lt;name&gt;** button; the browser runs a standard **authorization-code
+flow with PKCE**, and a verified ID token mints the session cookie. The
+implementation is dependency-free (discovery + JWKS are hand-rolled).
+
+```yaml
+identity_providers:
+  - name: google
+    issuer: https://accounts.google.com     # discovery base
+    client_id: "${ZTP_GOOGLE_CLIENT_ID}"
+    client_secret: "${ZTP_GOOGLE_CLIENT_SECRET}"
+    scopes: [openid, email, profile]         # openid always included
+    groups_claim: groups                     # ID-token claim for groups
+```
+
+- **Redirect URI**: register `https://<host>/.ztp/oauth/callback` with
+  the provider for every host the flow runs on (the callback lands on
+  the same host that started it, so the session cookie is set there).
+  A single sign-in host, or a wildcard registration, keeps this simple.
+- **Security**: `state` (CSRF), `nonce` (ID-token replay), and PKCE
+  `S256` are all enforced. The per-attempt flow state lives only in a
+  signed, `SameSite=Lax`, short-lived cookie — no server-side login
+  store. The ID token is verified end to end: RS256 signature against
+  the provider's JWKS (cached, refreshed on key rotation), `iss`,
+  `aud == client_id`, `exp`, and `nonce`.
+- **Identity**: `sub` becomes the session subject, `email` (only if
+  `email_verified`) and the `groups_claim` array populate the
+  `emails` / `emails_domain` / `groups` clauses. `require.identity_provider`
+  pins a rule to a specific provider by name.
+- Only the confidential auth-code flow and RSA-signed ID tokens are
+  supported. Discovery and JWKS are cached for one hour.
+
+Email OTP and OIDC can be enabled together — the login page then offers
+both, and a rule's clauses decide which identities it accepts.
+
 ## Evaluation semantics
 
 For the first rule whose `when` matches (hosts: exact/`*`/`*.suffix`;
@@ -126,7 +164,7 @@ clauses AND-ed):
 | `action: deny` | 403 |
 | `action: allow`, no `require` | allowed (public) |
 | `require` satisfied | allowed |
-| `require` fails, caller anonymous, predicate is identity-based | authentication demanded — browsers are redirected to the email-OTP login (or, if `email_otp` is disabled, get an explanatory `401` page); APIs get `401` + `WWW-Authenticate` |
+| `require` fails, caller anonymous, predicate is identity-based | authentication demanded — browsers are redirected to the login chooser (`/.ztp/login`) when any login flow is configured, else get an explanatory `401` page; APIs get `401` + `WWW-Authenticate` |
 | `require` fails otherwise | 403 — re-authenticating would not help |
 | no rule matched | `default_action` |
 
@@ -146,12 +184,14 @@ Notable subtleties:
 
 ## The `/.ztp/` namespace
 
-`/.ztp/*` is proxy-owned: `/.ztp/logout` clears the session, and (when
-`email_otp` is enabled) `/.ztp/login`, `/.ztp/otp/request`, and
-`/.ztp/otp/verify` drive the one-time-code flow; the OIDC callback
-lands here later. A backend can never expose paths under it: the access
-middleware handles the namespace when enabled, and the router
-independently 404s it as defence-in-depth when disabled.
+`/.ztp/*` is proxy-owned: `/.ztp/logout` clears the session,
+`/.ztp/login` is the login chooser, `/.ztp/otp/request` + `/.ztp/otp/verify`
+drive the one-time-code flow (when `email_otp` is enabled), and
+`/.ztp/oauth/login` + `/.ztp/oauth/callback` drive the OIDC auth-code
+flow (when `identity_providers` are configured). A backend can never
+expose paths under it: the access middleware handles the namespace when
+enabled, and the router independently 404s it as defence-in-depth when
+disabled.
 
 ## Secrets
 
@@ -176,3 +216,6 @@ OTP store/sender are built once at startup.
 | `ztp_access_allowed_total` | requests allowed through |
 | `ztp_access_denied_total{rule}` | denials, labeled by rule (`_default` for the default action) |
 | `ztp_access_auth_required_total` | anonymous requests answered with an auth demand |
+| `ztp_access_auth_redirect_total` | browsers redirected to an OIDC provider |
+| `ztp_access_oidc_login_total` | successful OIDC logins |
+| `ztp_access_oidc_error_total` | OIDC discovery / exchange / verification failures |

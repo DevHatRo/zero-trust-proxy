@@ -145,17 +145,53 @@ type ServiceToken struct {
 	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
 }
 
-// IdentityProvider is an OIDC provider. Credentials support "${VAR}"
-// env expansion. The login flow ships in a later increment; until it
-// does, validation rejects a non-empty provider list so the config
-// never claims a capability the proxy cannot deliver.
+// IdentityProvider is an OIDC provider for the browser auth-code login
+// flow. ClientID/ClientSecret support "${VAR}" env expansion (resolved
+// at validation). GroupsClaim names the ID-token claim carrying the
+// caller's groups (default "groups").
 type IdentityProvider struct {
 	Name         string   `yaml:"name" json:"name"`
-	Type         string   `yaml:"type" json:"type"` // oidc
+	Type         string   `yaml:"type,omitempty" json:"type,omitempty"` // oidc (default)
 	Issuer       string   `yaml:"issuer" json:"issuer"`
 	ClientID     string   `yaml:"client_id" json:"client_id"`
 	ClientSecret string   `yaml:"client_secret" json:"client_secret"`
 	Scopes       []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+	GroupsClaim  string   `yaml:"groups_claim,omitempty" json:"groups_claim,omitempty"`
+
+	clientID     string // resolved (env-expanded) during Validate
+	clientSecret string // resolved (env-expanded) during Validate
+}
+
+// ResolvedClientID / ResolvedClientSecret return the env-expanded
+// credentials (populated by Validate).
+func (p *IdentityProvider) ResolvedClientID() string     { return p.clientID }
+func (p *IdentityProvider) ResolvedClientSecret() string { return p.clientSecret }
+
+// EffectiveScopes returns the configured scopes, always including
+// "openid" (required by OIDC) and defaulting to email/profile.
+func (p *IdentityProvider) EffectiveScopes() []string {
+	if len(p.Scopes) == 0 {
+		return []string{"openid", "email", "profile"}
+	}
+	hasOpenID := false
+	for _, s := range p.Scopes {
+		if s == "openid" {
+			hasOpenID = true
+			break
+		}
+	}
+	if hasOpenID {
+		return p.Scopes
+	}
+	return append([]string{"openid"}, p.Scopes...)
+}
+
+// EffectiveGroupsClaim returns the configured groups claim or "groups".
+func (p *IdentityProvider) EffectiveGroupsClaim() string {
+	if p.GroupsClaim == "" {
+		return "groups"
+	}
+	return p.GroupsClaim
 }
 
 // AccessRule is one ordered policy rule: match conditions, an action,

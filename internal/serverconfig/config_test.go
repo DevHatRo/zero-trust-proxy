@@ -372,20 +372,28 @@ func TestAccessValidation(t *testing.T) {
 		{"duplicate token name", func(c *Config) {
 			c.Access.ServiceTokens = append(c.Access.ServiceTokens, c.Access.ServiceTokens[0])
 		}},
-		{"identity providers rejected until OIDC ships", func(c *Config) {
+		{"identity provider without issuer", func(c *Config) {
 			c.Access.IdentityProviders = []IdentityProvider{{Name: "google", Type: "oidc",
-				Issuer: "https://accounts.google.com", ClientID: "${ZTP_GOOG_ID}", ClientSecret: "${ZTP_GOOG_SECRET}"}}
+				ClientID: "${ZTP_GOOG_ID}", ClientSecret: "${ZTP_GOOG_SECRET}"}}
 		}},
-		{"identity_provider require rejected until OIDC ships", func(c *Config) {
-			c.Access.Rules[1].Require.IdentityProvider = "google"
+		{"identity provider with http issuer", func(c *Config) {
+			c.Access.IdentityProviders = []IdentityProvider{{Name: "google", Type: "oidc",
+				Issuer: "http://accounts.google.com", ClientID: "${ZTP_GOOG_ID}", ClientSecret: "${ZTP_GOOG_SECRET}"}}
+		}},
+		{"identity provider with non-oidc type", func(c *Config) {
+			c.Access.IdentityProviders = []IdentityProvider{{Name: "saml", Type: "saml",
+				Issuer: "https://idp.example.com", ClientID: "${ZTP_GOOG_ID}", ClientSecret: "${ZTP_GOOG_SECRET}"}}
+		}},
+		{"identity_provider require names unknown provider", func(c *Config) {
+			c.Access.Rules[1].Require.IdentityProvider = "ghost"
 		}},
 		{"empty require fails closed at validation", func(c *Config) {
 			c.Access.Rules[1].Require = &AccessRequire{}
 		}},
-		{"emails rejected until OIDC ships", func(c *Config) {
+		{"emails without a login flow", func(c *Config) {
 			c.Access.Rules[1].Require.Emails = []string{"ceo@example.com"}
 		}},
-		{"emails_domain rejected until OIDC ships", func(c *Config) {
+		{"emails_domain without a login flow", func(c *Config) {
 			c.Access.Rules[1].Require.EmailsDomain = []string{"example.com"}
 		}},
 		{"blank group in require", func(c *Config) {
@@ -414,6 +422,38 @@ func TestAccessValidation(t *testing.T) {
 		if err := cfg.Validate(); err == nil {
 			t.Errorf("%s: expected validation error", tc.name)
 		}
+	}
+
+	// A configured OIDC provider unlocks the identity_provider / emails
+	// clauses and resolves credentials from the environment.
+	withOIDC := base()
+	withOIDC.Access = AccessConfig{
+		Enabled: true,
+		Session: SessionConfig{Secret: "${ZTP_SESSION_SECRET_T}"},
+		IdentityProviders: []IdentityProvider{{Name: "google", Type: "oidc",
+			Issuer: "https://accounts.google.com", ClientID: "${ZTP_GOOG_ID}", ClientSecret: "${ZTP_GOOG_SECRET}"}},
+		DefaultAction: "deny",
+		Rules: []AccessRule{
+			{Name: "corp", When: AccessMatch{Hosts: []string{"app.example.com"}}, Action: "allow",
+				Require: &AccessRequire{IdentityProvider: "google", EmailsDomain: []string{"example.com"}}},
+		},
+	}
+	if err := withOIDC.Validate(); err != nil {
+		t.Fatalf("valid OIDC provider config rejected: %v", err)
+	}
+	if got := withOIDC.Access.IdentityProviders[0].ResolvedClientID(); got != "client-id" {
+		t.Errorf("client_id env not resolved, got %q", got)
+	}
+	if got := withOIDC.Access.IdentityProviders[0].ResolvedClientSecret(); got != "client-secret" {
+		t.Errorf("client_secret env not resolved, got %q", got)
+	}
+
+	// Duplicate provider names rejected.
+	dup := withOIDC
+	dup.Access.IdentityProviders = append([]IdentityProvider(nil), withOIDC.Access.IdentityProviders...)
+	dup.Access.IdentityProviders = append(dup.Access.IdentityProviders, withOIDC.Access.IdentityProviders[0])
+	if err := dup.Validate(); err == nil {
+		t.Error("duplicate provider names must be rejected")
 	}
 
 	// Short secret rejected.

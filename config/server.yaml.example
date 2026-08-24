@@ -141,6 +141,15 @@ access:
   #   code_ttl: 10m                    # code lifetime (default 10m)
   #   smtp: { host: smtp.example.com, username: auth, password: "${ZTP_SMTP_PASSWORD}" }
   #   # brevo: { api_key: "${ZTP_BREVO_API_KEY}" }   # alternative sender
+  # identity_providers:                # OIDC / SSO login (auth-code + PKCE)
+  #   - name: google                   # shown on the sign-in button
+  #     issuer: https://accounts.google.com
+  #     client_id: "${ZTP_GOOGLE_CLIENT_ID}"
+  #     client_secret: "${ZTP_GOOGLE_CLIENT_SECRET}"
+  #     scopes: [openid, email, profile]   # openid is always included
+  #     # groups_claim: groups            # ID-token claim carrying groups
+  #   # Register this redirect URI with the provider, per protected host:
+  #   #   https://<host>/.ztp/oauth/callback
   # service_tokens:
   #   - name: ci-deploy
   #     hash: "sha256:<64 hex of sha256(token)>"

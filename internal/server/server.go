@@ -117,6 +117,21 @@ func New(cfg *serverconfig.Config) (*Server, error) {
 					s.metrics.otpFailed.Inc()
 				}
 			},
+			AuthRedirect: func() {
+				if s.metrics != nil {
+					s.metrics.authRedirect.Inc()
+				}
+			},
+			OIDCLogin: func() {
+				if s.metrics != nil {
+					s.metrics.oidcLogin.Inc()
+				}
+			},
+			OIDCError: func() {
+				if s.metrics != nil {
+					s.metrics.oidcError.Inc()
+				}
+			},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("access: %w", err)

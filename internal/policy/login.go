@@ -135,15 +135,27 @@ func (e *Engine) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, http.StatusMethodNotAllowed, "Method Not Allowed")
 		return
 	}
-	rd := sanitizeReturnPath(r.URL.Query().Get("rd"))
-	token, err := newLoginToken()
-	if err != nil {
-		log.Error("access: login token: %v", err)
-		writeStatus(w, http.StatusInternalServerError, "Internal Server Error")
-		return
+	e.renderChooser(w, sanitizeReturnPath(r.URL.Query().Get("rd")), "")
+}
+
+// renderChooser renders the login chooser (provider buttons and/or the
+// email form). Whenever the email form is shown it provisions a fresh
+// OTP transaction — cookie + mirrored csrf token — so the form is always
+// submittable, including on the OIDC-failure fallback paths. An empty
+// errMsg renders a 200; a non-empty one renders the same page as a 400.
+func (e *Engine) renderChooser(w http.ResponseWriter, rd, errMsg string) {
+	v := loginView{Step: "email", Return: rd, OTP: e.otp != nil, Providers: e.providerLinks(rd), Error: errMsg}
+	if e.otp != nil {
+		token, err := newLoginToken()
+		if err != nil {
+			log.Error("access: login token: %v", err)
+			writeStatus(w, http.StatusInternalServerError, "Internal Server Error")
+			return
+		}
+		setLoginTxn(w, token)
+		v.CSRF = token
 	}
-	setLoginTxn(w, token)
-	renderLoginPage(w, loginView{Step: "email", Return: rd, CSRF: token})
+	renderLoginPage(w, v)
 }
 
 // restartLogin bounces a POST whose transaction cookie is missing,
@@ -243,11 +255,19 @@ func (e *Engine) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 
 // loginView feeds the two-step login template.
 type loginView struct {
-	Step   string // "email" | "code"
-	Email  string
-	Return string
-	Error  string
-	CSRF   string // transaction token, mirrored into the form
+	Step      string // "email" | "code"
+	Email     string
+	Return    string
+	Error     string
+	CSRF      string         // transaction token, mirrored into the form
+	OTP       bool           // show the email one-time-code form
+	Providers []providerLink // OIDC sign-in buttons
+}
+
+// providerLink is one OIDC sign-in button.
+type providerLink struct {
+	Name string
+	URL  string
 }
 
 func renderLoginPage(w http.ResponseWriter, v loginView) {
@@ -287,6 +307,11 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
     border: 1px solid #d3d8de; border-radius: 8px; }
   button { width: 100%; padding: 10px; font-size: 15px; font-weight: 600; color: #fff;
     background: #2563eb; border: 0; border-radius: 8px; cursor: pointer; }
+  .btn.provider { display: block; box-sizing: border-box; text-align: center; text-decoration: none;
+    padding: 10px; margin-bottom: 10px; font-size: 15px; font-weight: 600; color: #1d2430;
+    background: #fff; border: 1px solid #d3d8de; border-radius: 8px; }
+  .divider { text-align: center; color: #9aa1ac; font-size: 13px; margin: 10px 0; }
+  @media (prefers-color-scheme: dark) { .btn.provider { background: #14171b; color: #e6e8eb; border-color: #2c313a; } }
   .err { color: #dc2626; font-size: 14px; margin-bottom: 12px; }
 </style>
 </head>
@@ -294,14 +319,20 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
   <div class="card">
   {{if eq .Step "email"}}
     <h1>Sign in</h1>
-    <p>Enter your email address and we&#39;ll send you a one-time code.</p>
     {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+    {{range .Providers}}
+      <a class="btn provider" href="{{.URL}}">Sign in with {{.Name}}</a>
+    {{end}}
+    {{if and .Providers .OTP}}<div class="divider">or</div>{{end}}
+    {{if .OTP}}
+    <p>Enter your email address and we&#39;ll send you a one-time code.</p>
     <form method="post" action="/.ztp/otp/request">
       <input type="hidden" name="rd" value="{{.Return}}">
       <input type="hidden" name="csrf" value="{{.CSRF}}">
       <input type="email" name="email" placeholder="you@example.com" required autofocus autocomplete="email">
       <button type="submit">Send code</button>
     </form>
+    {{end}}
   {{else}}
     <h1>Check your email</h1>
     <p>If <strong>{{.Email}}</strong> is authorized, a sign-in code is on its way. Enter it below.</p>
