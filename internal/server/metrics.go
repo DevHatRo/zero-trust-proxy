@@ -35,6 +35,9 @@ type metrics struct {
 	otpSent          prometheus.Counter
 	otpVerified      prometheus.Counter
 	otpFailed        prometheus.Counter
+	authRedirect     prometheus.Counter
+	oidcLogin        prometheus.Counter
+	oidcError        prometheus.Counter
 	reg              *prometheus.Registry
 	handler          http.Handler
 }
@@ -118,6 +121,18 @@ func newMetrics() *metrics {
 		Name: "ztp_access_otp_failed_total",
 		Help: "Rejected one-time-code verification attempts.",
 	})
+	authRedirect := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ztp_access_auth_redirect_total",
+		Help: "Browsers redirected to an OIDC identity provider.",
+	})
+	oidcLogin := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ztp_access_oidc_login_total",
+		Help: "Successful OIDC logins.",
+	})
+	oidcError := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ztp_access_oidc_error_total",
+		Help: "OIDC discovery, token-exchange, or ID-token verification failures.",
+	})
 
 	buildInfo := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ztp_build_info",
@@ -130,7 +145,8 @@ func newMetrics() *metrics {
 
 	reg.MustRegister(requestsTotal, requestDuration, agentsRegistered, wsSessions, agentServices,
 		rlRejected, rlBuckets, fwDenied, fwOversize, idMismatch, regRejected,
-		accessAllowed, accessDenied, accessAuthReq, otpSent, otpVerified, otpFailed, buildInfo)
+		accessAllowed, accessDenied, accessAuthReq, otpSent, otpVerified, otpFailed,
+		authRedirect, oidcLogin, oidcError, buildInfo)
 
 	m := &metrics{
 		requestsTotal:    requestsTotal,
@@ -150,6 +166,9 @@ func newMetrics() *metrics {
 		otpSent:          otpSent,
 		otpVerified:      otpVerified,
 		otpFailed:        otpFailed,
+		authRedirect:     authRedirect,
+		oidcLogin:        oidcLogin,
+		oidcError:        oidcError,
 		reg:              reg,
 	}
 	m.handler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})

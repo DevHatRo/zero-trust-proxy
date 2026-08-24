@@ -113,12 +113,35 @@ func (a *AccessConfig) validate() error {
 		}
 	}
 
-	// The OIDC login flow is not implemented yet. Accepting a provider
-	// block now would validate credentials for a capability that does
-	// nothing — the exact silently-dead-config failure this project
-	// refuses to ship. Rejected until the flow lands.
-	if len(a.IdentityProviders) > 0 {
-		return fmt.Errorf("access.identity_providers: OIDC login is not implemented yet; remove the block (it ships in a later release)")
+	providerNames := make(map[string]bool, len(a.IdentityProviders))
+	for i := range a.IdentityProviders {
+		p := &a.IdentityProviders[i]
+		where := fmt.Sprintf("access.identity_providers[%d]", i)
+		if p.Name == "" {
+			return fmt.Errorf("%s: name required", where)
+		}
+		if providerNames[p.Name] {
+			return fmt.Errorf("%s: duplicate provider name %q", where, p.Name)
+		}
+		providerNames[p.Name] = true
+		if p.Type != "" && p.Type != "oidc" {
+			return fmt.Errorf("%s (%s): only type \"oidc\" is supported, got %q", where, p.Name, p.Type)
+		}
+		if !strings.HasPrefix(p.Issuer, "https://") && !strings.HasPrefix(p.Issuer, "http://") {
+			return fmt.Errorf("%s (%s): issuer must be an https:// URL", where, p.Name)
+		}
+		cid, err := ExpandSecret(p.ClientID)
+		if err != nil {
+			return fmt.Errorf("%s (%s): client_id: %w", where, p.Name, err)
+		}
+		csec, err := ExpandSecret(p.ClientSecret)
+		if err != nil {
+			return fmt.Errorf("%s (%s): client_secret: %w", where, p.Name, err)
+		}
+		if cid == "" || csec == "" {
+			return fmt.Errorf("%s (%s): client_id and client_secret are required", where, p.Name)
+		}
+		p.clientID, p.clientSecret = cid, csec
 	}
 
 	if a.EmailOTP.Enabled {
@@ -126,6 +149,10 @@ func (a *AccessConfig) validate() error {
 			return err
 		}
 	}
+
+	// A login flow that populates Identity.Email/Provider exists once
+	// either email OTP or at least one OIDC provider is configured.
+	hasLogin := a.EmailOTP.Enabled || len(a.IdentityProviders) > 0
 
 	ruleNames := make(map[string]bool, len(a.Rules))
 	for i, r := range a.Rules {
@@ -161,15 +188,14 @@ func (a *AccessConfig) validate() error {
 				len(r.Require.EmailsDomain) == 0 && r.Require.IdentityProvider == "" && len(r.Require.SourceCIDRs) == 0 {
 				return fmt.Errorf("%s (%s): require must specify at least one clause (authenticated, groups, emails, emails_domain, identity_provider, source_cidrs) — an empty require would allow everyone", where, r.Name)
 			}
-			if r.Require.IdentityProvider != "" {
-				return fmt.Errorf("%s (%s): require.identity_provider needs OIDC login, which is not implemented yet", where, r.Name)
+			if r.Require.IdentityProvider != "" && !providerNames[r.Require.IdentityProvider] {
+				return fmt.Errorf("%s (%s): require.identity_provider %q is not a configured access.identity_providers name", where, r.Name, r.Require.IdentityProvider)
 			}
 			// emails / emails_domain need a login flow that populates
-			// Identity.Email. Email OTP provides one; without it (and
-			// with OIDC still unimplemented) the clauses would be
-			// permanently unsatisfiable — dead config, rejected.
-			if (len(r.Require.Emails) > 0 || len(r.Require.EmailsDomain) > 0) && !a.EmailOTP.Enabled {
-				return fmt.Errorf("%s (%s): require.emails / require.emails_domain need a login flow — enable access.email_otp (or wait for OIDC)", where, r.Name)
+			// Identity.Email (email OTP or OIDC). Without one the clauses
+			// would be permanently unsatisfiable — dead config, rejected.
+			if (len(r.Require.Emails) > 0 || len(r.Require.EmailsDomain) > 0) && !hasLogin {
+				return fmt.Errorf("%s (%s): require.emails / require.emails_domain need a login flow — enable access.email_otp or configure access.identity_providers", where, r.Name)
 			}
 			for _, g := range r.Require.Groups {
 				if g == "" {

@@ -44,7 +44,8 @@ type snapshot struct {
 type Engine struct {
 	snap    atomic.Pointer[snapshot]
 	session *SessionManager
-	otp     *otpManager // nil when email_otp is disabled
+	otp     *otpManager  // nil when email_otp is disabled
+	oidc    *oidcManager // nil when no identity_providers are configured
 	hooks   Hooks
 }
 
@@ -56,6 +57,9 @@ type Hooks struct {
 	OTPSent      func()
 	OTPVerified  func()
 	OTPFailed    func()
+	AuthRedirect func() // browser bounced to an IdP
+	OIDCLogin    func() // successful OIDC login
+	OIDCError    func() // OIDC discovery/exchange/verify failure
 }
 
 // New compiles the access config into an Engine. Callers pass a
@@ -74,6 +78,9 @@ func New(cfg serverconfig.AccessConfig, hooks Hooks) (*Engine, error) {
 			cfg.EmailOTP.From,
 			cfg.EmailOTP.EffectiveSubject(),
 		)
+	}
+	if len(cfg.IdentityProviders) > 0 {
+		e.oidc = newOIDCManager(cfg.IdentityProviders)
 	}
 	if err := e.install(cfg); err != nil {
 		return nil, err
