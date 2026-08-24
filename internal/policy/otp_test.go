@@ -583,6 +583,68 @@ func TestOTPCrossSiteVerifyRejected(t *testing.T) {
 	}
 }
 
+// blockingSender occupies a delivery slot until released, so a test can
+// saturate the concurrency pool deterministically.
+type blockingSender struct {
+	release <-chan struct{}
+	started chan<- struct{}
+}
+
+func (b *blockingSender) SendCode(_ context.Context, _, _ string) error {
+	b.started <- struct{}{}
+	<-b.release
+	return nil
+}
+
+// Regression (re-review finding A): when the delivery pool is saturated
+// a dropped request must NOT consume the caller's send budget — the slot
+// is reserved before the code is issued.
+func TestOTPSaturatedPoolDoesNotChargeSendBudget(t *testing.T) {
+	e, _ := otpEngine(t)
+	release := make(chan struct{})
+	started := make(chan struct{}, otpDeliverConcurrency)
+	e.otp.sender = &blockingSender{release: release, started: started}
+
+	// Fill every delivery slot with an in-flight, blocked send.
+	for i := 0; i < otpDeliverConcurrency; i++ {
+		e.otp.issueAndDeliver(fmt.Sprintf("filler%d@example.com", i), nil)
+	}
+	for i := 0; i < otpDeliverConcurrency; i++ {
+		<-started
+	}
+
+	// A further request is dropped; its address must never be charged.
+	e.otp.issueAndDeliver("victim@example.com", nil)
+	e.otp.store.mu.Lock()
+	_, charged := e.otp.store.entries["victim@example.com"]
+	e.otp.store.mu.Unlock()
+	if charged {
+		t.Fatal("dropped request must not consume the send budget")
+	}
+
+	close(release)
+	e.otp.wait()
+}
+
+// Regression (re-review finding C): only GET starts a login transaction,
+// so a forced cross-site POST cannot rotate the txn cookie.
+func TestLoginRejectsNonGET(t *testing.T) {
+	e, _ := otpEngine(t)
+	h := e.Wrap(okHandler(nil))
+	req := httptest.NewRequest("POST", "http://x.home.example.com/.ztp/login", nil)
+	req.RemoteAddr = "9.9.9.9:1"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /login: got %d, want 405", rr.Code)
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == loginTxnCookie {
+			t.Fatal("POST /login must not issue a transaction cookie")
+		}
+	}
+}
+
 // The login endpoints 404 when OTP is disabled.
 func TestOTPEndpointsAbsentWhenDisabled(t *testing.T) {
 	e := newTestEngine(t, nil) // no EmailOTP block

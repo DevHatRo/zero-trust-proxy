@@ -128,7 +128,13 @@ func (s *snapshot) emailEligible(email string, srcIP net.IP) bool {
 
 // handleLogin renders the email form and starts a transaction: a fresh
 // token in a Strict cookie, mirrored into the form for double-submit.
+// GET only — a forced cross-site POST must not be able to rotate (and
+// so invalidate) an in-progress login's transaction cookie.
 func (e *Engine) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeStatus(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+		return
+	}
 	rd := sanitizeReturnPath(r.URL.Query().Get("rd"))
 	token, err := newLoginToken()
 	if err != nil {
@@ -169,11 +175,7 @@ func (e *Engine) handleOTPRequest(w http.ResponseWriter, r *http.Request) {
 	// page renders identically either way, and delivery is dispatched
 	// off this goroutine so response time never depends on eligibility.
 	if e.snap.Load().emailEligible(email, remoteIP(r)) {
-		if code, ok := e.otp.store.issue(email); ok {
-			e.otp.dispatch(email, code, e.hooks.OTPSent)
-		} else {
-			log.Warn("access: otp send rate limit for %s", redactEmail(email))
-		}
+		e.otp.issueAndDeliver(email, e.hooks.OTPSent)
 	} else {
 		log.Debug("access: otp requested for ineligible address %s", redactEmail(email))
 	}
@@ -206,7 +208,7 @@ func (e *Engine) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := e.session.Mint(&Identity{
+	sessionToken, err := e.session.Mint(&Identity{
 		Source:   SourceSession,
 		Subject:  email,
 		Email:    email,
@@ -217,7 +219,7 @@ func (e *Engine) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
-	e.session.SetCookie(w, token)
+	e.session.SetCookie(w, sessionToken)
 	// Retire the transaction so its token cannot be replayed.
 	http.SetCookie(w, &http.Cookie{Name: loginTxnCookie, Value: "", Path: ZTPPrefix,
 		MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})

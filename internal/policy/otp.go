@@ -193,16 +193,27 @@ func newOTPManager(store *otpStore, sender CodeSender, from, subject string) *ot
 // sendTimeout bounds one outbound mail delivery.
 const otpSendTimeout = 15 * time.Second
 
-// dispatch delivers a code off the request goroutine so the HTTP
-// response time does not depend on eligibility or on how slow the mail
-// server is — closing the enumeration/timing oracle. Delivery is bounded
-// by sem; if every slot is busy the code is dropped (logged) rather than
-// pinning a goroutine, and onSent (a metric hook) fires only on success.
-func (m *otpManager) dispatch(email, code string, onSent func()) {
+// issueAndDeliver issues a code for an eligible address and delivers it
+// off the request goroutine, so response time depends on neither
+// eligibility nor mail-server latency — closing the enumeration/timing
+// oracle. Delivery is bounded by sem; onSent (a metric hook) fires only
+// on success.
+//
+// A delivery slot is reserved *before* the code is issued so a saturated
+// pool does not charge the caller's send budget for a code that would be
+// dropped — otherwise an overloaded proxy would silently burn a user's
+// 3-per-window slots on codes they never receive.
+func (m *otpManager) issueAndDeliver(email string, onSent func()) {
 	select {
 	case m.sem <- struct{}{}:
 	default:
-		log.Warn("access: otp delivery capacity reached; dropped code for %s", redactEmail(email))
+		log.Warn("access: otp delivery capacity reached; dropped request for %s", redactEmail(email))
+		return
+	}
+	code, ok := m.store.issue(email)
+	if !ok {
+		<-m.sem // nothing to deliver — release the slot, do not charge a send
+		log.Warn("access: otp send rate limit for %s", redactEmail(email))
 		return
 	}
 	m.wg.Add(1)
