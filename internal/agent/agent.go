@@ -1291,13 +1291,16 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 
 	log.Info("🎉 WebSocket upgrade successful with backend %s", backendAddr)
 
-	// Send the 101 response to client
-	a.sendRawHTTPResponse(msg.ID, response)
-
-	// Store the backend connection for frame relay and start the ordered
-	// client→backend writer for this session.
+	// Register the backend connection and start the ordered client→backend
+	// writer BEFORE the client sees the 101. The server begins relaying
+	// client frames the moment it forwards the 101, and clients like Home
+	// Assistant send their first frame (auth) immediately — registering
+	// after the 101 would drop that frame and stall the session.
 	a.wsManager.AddConnection(msg.ID, backendConn)
 	a.startWSWriter(msg.ID, backendConn)
+
+	// Now hand the 101 to the client.
+	a.sendRawHTTPResponse(msg.ID, response)
 	totalConnections := a.wsManager.GetConnectionCount()
 
 	log.Info("🔗 WebSocket connection established: ID=%s, Backend=%s, Total=%d",
