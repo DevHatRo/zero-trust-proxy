@@ -261,6 +261,15 @@ type Agent struct {
 	config          *AgentConfig
 	// WebSocket connections tracking with health monitoring
 	wsManager *common.WebSocketManager
+	// wsQueues holds a per-session ordered writer for client→backend
+	// WebSocket frames, keyed by message ID. Frames MUST reach the backend
+	// in the exact order the client sent them — protocols like Home
+	// Assistant's /api/websocket close the socket on a reordered handshake
+	// (auth before auth_ok, etc.), which makes the browser reconnect-loop —
+	// so frames are serialized through a single writer goroutine per
+	// session instead of a goroutine per frame.
+	wsQueues   map[string]*wsFrameQueue
+	wsQueuesMu sync.Mutex
 	// Connection state management
 	connectionBroken chan struct{} // Signals when main connection is broken
 	connectionMu     sync.RWMutex
@@ -297,6 +306,8 @@ func NewAgent(id, serverAddress string, tlsConfig *tls.Config, validator types.S
 		reconnectMu:         sync.Mutex{},
 		hotReloadManager:    common.NewHotReloadManager(),
 		validator:           validator,
+		wsManager:           common.NewWebSocketManager(),
+		wsQueues:            make(map[string]*wsFrameQueue),
 		uploadChans:         make(map[string]chan *common.Message),
 		tcpConns:            make(map[string]net.Conn),
 		stopCh:              make(chan struct{}),
@@ -321,6 +332,7 @@ func NewAgentWithConfig(config *AgentConfig, tlsConfig *tls.Config, validator ty
 		serviceRespCh:       make(chan *common.Message, 500),
 		channelPressure:     make(map[string]int),
 		wsManager:           common.NewWebSocketManager(),
+		wsQueues:            make(map[string]*wsFrameQueue),
 		pressureMu:          sync.RWMutex{},
 		connectionBroken:    make(chan struct{}, 1),
 		connectionMu:        sync.RWMutex{},
@@ -618,11 +630,13 @@ func (a *Agent) handleMessages() {
 				log.Error("❌ Failed to send pong response: %v", err)
 			}
 		case "websocket_frame":
-			// Handle WebSocket frame from client to backend
-			go a.handleWebSocketFrame(&msg)
+			// Enqueue in-order (do NOT spawn a goroutine per frame — that
+			// races writes to the backend and corrupts frame ordering).
+			a.enqueueWebSocketFrame(&msg)
 		case "websocket_disconnect":
-			// Handle notification that client disconnected from server
-			go a.handleWebSocketDisconnect(&msg)
+			// Server says the client went away: tear the backend session
+			// down. No need to notify the server back — it initiated this.
+			a.teardownWebSocket(msg.ID, false)
 		case "http_upload_start":
 			// Server is streaming a large upload to us. Register a chunk
 			// channel before spawning the handler so that chunks that arrive
@@ -1280,8 +1294,10 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 	// Send the 101 response to client
 	a.sendRawHTTPResponse(msg.ID, response)
 
-	// Store the backend connection for frame relay
+	// Store the backend connection for frame relay and start the ordered
+	// client→backend writer for this session.
 	a.wsManager.AddConnection(msg.ID, backendConn)
+	a.startWSWriter(msg.ID, backendConn)
 	totalConnections := a.wsManager.GetConnectionCount()
 
 	log.Info("🔗 WebSocket connection established: ID=%s, Backend=%s, Total=%d",
@@ -1290,18 +1306,16 @@ func (a *Agent) handleWebSocketConnection(msg *common.Message, service *common.S
 	// Start bidirectional relay between server and backend
 	done := make(chan bool, 2)
 
-	// Client to Backend relay is now handled by handleWebSocketFrame method
-	// when the server sends us "websocket_frame" messages
+	// Client→backend frames are delivered in order by the per-session
+	// writer started via startWSWriter (see enqueueWebSocketFrame).
 
 	// Backend to Client relay - read from backend and send to client
 	go func() {
 		defer func() {
-			// Clean up the stored connection
-			a.wsManager.RemoveConnection(msg.ID)
-			totalConnections := a.wsManager.GetConnectionCount()
-
-			log.Info("🔌 WebSocket relay ended: ID=%s, Backend=%s, Remaining=%d",
-				msg.ID[:8]+"...", backendAddr, totalConnections)
+			// Backend closed (or relay ended): tear down and tell the server
+			// to close the client socket so it is never orphaned.
+			a.teardownWebSocket(msg.ID, true)
+			log.Info("🔌 WebSocket relay ended: ID=%s, Backend=%s", msg.ID[:8]+"...", backendAddr)
 			done <- true
 		}()
 		log.Info("🔄 Starting backend→client relay: ID=%s, Backend=%s", msg.ID[:8]+"...", backendAddr)
@@ -1615,79 +1629,114 @@ func (a *Agent) sendRawHTTPResponse(messageID, response string) {
 	}
 }
 
-// handleWebSocketFrame handles incoming WebSocket frames from the client and forwards them to the backend
-func (a *Agent) handleWebSocketFrame(msg *common.Message) {
+// wsSendQueueDepth bounds a session's pending client→backend frames.
+// A healthy local backend drains this near-instantly; if it fills, the
+// backend cannot keep up and the session is torn down rather than
+// blocking the shared mTLS read loop (head-of-line blocking).
+const wsSendQueueDepth = 512
+
+// wsBackendWriteTimeout bounds one backend frame write so a stuck backend
+// (socket buffer full, not reading) cannot pin the writer goroutine.
+const wsBackendWriteTimeout = 15 * time.Second
+
+// wsFrameQueue is a per-session ordered writer for client→backend frames.
+type wsFrameQueue struct {
+	ch        chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func (q *wsFrameQueue) stop() { q.closeOnce.Do(func() { close(q.done) }) }
+
+// startWSWriter registers an ordered writer for the session and runs its
+// goroutine, which drains frames FIFO and writes them to backendConn.
+func (a *Agent) startWSWriter(msgID string, backendConn net.Conn) {
+	q := &wsFrameQueue{ch: make(chan []byte, wsSendQueueDepth), done: make(chan struct{})}
+	a.wsQueuesMu.Lock()
+	a.wsQueues[msgID] = q
+	a.wsQueuesMu.Unlock()
+
+	go func() {
+		for {
+			select {
+			case <-q.done:
+				return
+			case frame := <-q.ch:
+				_ = backendConn.SetWriteDeadline(time.Now().Add(wsBackendWriteTimeout))
+				if _, err := writeAllConn(backendConn, frame); err != nil {
+					log.Error("❌ WebSocket backend write failed (ID=%s): %v", msgID[:min(8, len(msgID))]+"...", err)
+					a.teardownWebSocket(msgID, true) // backend dead → tell the server to drop the client
+					return
+				}
+			}
+		}
+	}()
+}
+
+// enqueueWebSocketFrame appends a client frame to its session's ordered
+// writer. Runs inline on the mTLS read loop, so it must not block: a full
+// queue means the backend is not draining, and the session is torn down.
+func (a *Agent) enqueueWebSocketFrame(msg *common.Message) {
 	if msg.HTTP == nil || len(msg.HTTP.Body) == 0 {
 		return
 	}
-
-	// Find the backend connection for this WebSocket session
-	wsConn, exists := a.wsManager.GetConnection(msg.ID)
-
-	if !exists {
-		log.Debug("🔍 WebSocket frame dropped - connection not found: ID=%s", msg.ID[:8]+"...")
+	a.wsQueuesMu.Lock()
+	q := a.wsQueues[msg.ID]
+	a.wsQueuesMu.Unlock()
+	if q == nil {
+		log.Debug("🔍 WebSocket frame dropped - no session: ID=%s", msg.ID[:min(8, len(msg.ID))]+"...")
 		return
 	}
+	a.wsManager.UpdateActivity(msg.ID)
 
-	// Validate connection is still active
-	if wsConn == nil || wsConn.GetConn() == nil {
-		log.Warn("⚠️  WebSocket frame dropped - nil connection: ID=%s", msg.ID[:8]+"...")
-		a.wsManager.RemoveConnection(msg.ID)
-		return
-	}
-
-	// Update activity timestamp
-	wsConn.UpdateActivity()
-
-	// NO TIMEOUT - Use approach with health monitoring instead
-	// Major providers don't set write timeouts on WebSocket connections
-
-	// Forward the frame data to the backend atomically
-	totalWritten := 0
-	data := msg.HTTP.Body
-	frameSize := len(data)
-
-	for totalWritten < len(data) {
-		n, err := wsConn.GetConn().Write(data[totalWritten:])
-		if err != nil {
-			log.Error("❌ Failed to write WebSocket frame to backend (ID=%s): %v", msg.ID[:8]+"...", err)
-			// Connection is broken, clean it up
-			a.wsManager.RemoveConnection(msg.ID)
-			totalConnections := a.wsManager.GetConnectionCount()
-			log.Info("🗑️  Removed broken WebSocket connection: ID=%s, Remaining=%d", msg.ID[:8]+"...", totalConnections)
-			return
-		}
-		totalWritten += n
-	}
-
-	// Log frame forwarding with less verbosity for small frames
-	if frameSize > 100 || frameSize == 2 { // Log large frames or likely ping/pong frames
-		log.Debug("📤 Client→Backend frame: %d bytes (ID=%s)", frameSize, msg.ID[:8]+"...")
-	}
-
-	// Generic client authentication frame analysis - works for any service
-	if frameSize > 50 && strings.Contains(string(data[:min(frameSize, 200)]), "access_token") {
-		log.Info("🔑 Client sending authentication token")
-	} else if frameSize > 20 && strings.Contains(string(data[:min(frameSize, 100)]), "type") {
-		frameStr := string(data[:min(frameSize, 100)])
-		if strings.Contains(frameStr, "auth") {
-			log.Debug("🔐 Client authentication frame detected")
-		} else if strings.Contains(frameStr, "subscribe") {
-			log.Debug("📡 Client subscribing to events")
-		}
+	frame := make([]byte, len(msg.HTTP.Body))
+	copy(frame, msg.HTTP.Body)
+	select {
+	case q.ch <- frame:
+	case <-q.done:
+		// Session already torn down; drop.
+	default:
+		log.Warn("⚠️  WebSocket send queue full, closing session ID=%s (backend not draining)", msg.ID[:min(8, len(msg.ID))]+"...")
+		a.teardownWebSocket(msg.ID, true)
 	}
 }
 
-// handleWebSocketDisconnect handles notification from server that client disconnected
-func (a *Agent) handleWebSocketDisconnect(msg *common.Message) {
-	log.Info("📞 Server notified client disconnected: ID=%s", msg.ID[:8]+"...")
+// teardownWebSocket tears a session down exactly once: stops the writer,
+// closes the backend connection, and (when notifyServer) tells the server
+// to close the matching client socket so it is never orphaned. Idempotent
+// via the map delete under lock.
+func (a *Agent) teardownWebSocket(msgID string, notifyServer bool) {
+	a.wsQueuesMu.Lock()
+	q, first := a.wsQueues[msgID]
+	if first {
+		delete(a.wsQueues, msgID)
+	}
+	a.wsQueuesMu.Unlock()
+	if q != nil {
+		q.stop() // stop the ordered writer
+	}
+	a.wsManager.RemoveConnection(msgID) // idempotent; closes the backend conn
+	// first == a queue existed: this is the first teardown of a real
+	// relayed session, so notify the server (once) and log.
+	if first && notifyServer {
+		_ = a.SendMessage(&common.Message{Type: "websocket_disconnect", ID: msgID})
+	}
+	if first {
+		log.Info("🧹 WebSocket session torn down: ID=%s, Remaining=%d", msgID[:min(8, len(msgID))]+"...", a.wsManager.GetConnectionCount())
+	}
+}
 
-	// Find and cleanup the backend connection
-	a.wsManager.RemoveConnection(msg.ID)
-	totalConnections := a.wsManager.GetConnectionCount()
-
-	log.Info("🧹 Cleaned up backend WebSocket connection: ID=%s, Remaining=%d",
-		msg.ID[:8]+"...", totalConnections)
+// writeAllConn writes the full buffer, looping over short writes.
+func writeAllConn(conn net.Conn, data []byte) (int, error) {
+	total := 0
+	for total < len(data) {
+		n, err := conn.Write(data[total:])
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
 }
 
 // handleTCPConnect dials the backend for a tcp_connect message and relays
@@ -2817,6 +2866,14 @@ func (a *Agent) isConnectionBroken() bool {
 // cleanupAllWebSocketConnections closes all active WebSocket connections
 func (a *Agent) cleanupAllWebSocketConnections() {
 	a.wsManager.CloseAll()
+	// Stop every ordered writer so no session goroutine leaks when the
+	// main connection breaks.
+	a.wsQueuesMu.Lock()
+	for id, q := range a.wsQueues {
+		q.stop()
+		delete(a.wsQueues, id)
+	}
+	a.wsQueuesMu.Unlock()
 }
 
 // setReconnectInProgress safely sets the reconnection in progress state

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -412,85 +413,67 @@ func TestSendRawHTTPResponse_StatusOnly(t *testing.T) {
 	}
 }
 
-// --- handleWebSocketFrame ---
+// --- WebSocket frame ordering / delivery ---
 
-func TestHandleWebSocketFrame_NilHTTP(t *testing.T) {
+func TestEnqueueWebSocketFrame_NilEmptyOrUnknown(t *testing.T) {
 	a := newTestAgent()
-	a.wsManager = common.NewWebSocketManager()
-	// nil HTTP → returns early, no panic.
-	a.handleWebSocketFrame(&common.Message{ID: "00000000000000000000000000000001"})
+	// nil HTTP, empty body, and unknown session all drop silently.
+	a.enqueueWebSocketFrame(&common.Message{ID: "00000000000000000000000000000001"})
+	a.enqueueWebSocketFrame(&common.Message{ID: "00000000000000000000000000000002", HTTP: &common.HTTPData{Body: []byte{}}})
+	a.enqueueWebSocketFrame(&common.Message{ID: "no-such-session", HTTP: &common.HTTPData{Body: []byte("frame"), IsWebSocket: true}})
 }
 
-func TestHandleWebSocketFrame_EmptyBody(t *testing.T) {
+// The core fix: frames must reach the backend in exactly the order the
+// client sent them, never reordered or interleaved.
+func TestWSWriter_ForwardsFramesInOrder(t *testing.T) {
 	a := newTestAgent()
-	a.wsManager = common.NewWebSocketManager()
-	a.handleWebSocketFrame(&common.Message{
-		ID:   "00000000000000000000000000000002",
-		HTTP: &common.HTTPData{Body: []byte{}},
-	})
-}
-
-func TestHandleWebSocketFrame_ConnNotFound(t *testing.T) {
-	a := newTestAgent()
-	a.wsManager = common.NewWebSocketManager()
-	// ID not registered → silently dropped (logging only).
-	a.handleWebSocketFrame(&common.Message{
-		ID:   "00000000000000000000000000000003",
-		HTTP: &common.HTTPData{Body: []byte("frame"), IsWebSocket: true},
-	})
-}
-
-func TestHandleWebSocketFrame_ForwardsToBackend(t *testing.T) {
-	a := newTestAgent()
-	a.wsManager = common.NewWebSocketManager()
-
 	wsClient, wsServer := net.Pipe()
 	t.Cleanup(func() { _ = wsClient.Close(); _ = wsServer.Close() })
-	a.wsManager.AddConnection("ws-fwd-0000000000000001", wsServer)
 
-	done := make(chan struct{})
+	const id = "ws-order-000000000000000001"
+	a.wsManager.AddConnection(id, wsServer)
+	a.startWSWriter(id, wsServer)
+
+	frames := []string{"auth", "subscribe", "ping-1", "ping-2", "ping-3"}
 	go func() {
-		defer close(done)
-		a.handleWebSocketFrame(&common.Message{
-			ID: "ws-fwd-0000000000000001",
-			HTTP: &common.HTTPData{
-				Body:        []byte("hello-ws"),
-				IsWebSocket: true,
-			},
-		})
+		for _, f := range frames {
+			a.enqueueWebSocketFrame(&common.Message{ID: id, HTTP: &common.HTTPData{Body: []byte(f), IsWebSocket: true}})
+		}
 	}()
 
-	_ = wsClient.SetReadDeadline(time.Now().Add(2 * time.Second))
+	want := []byte(strings.Join(frames, ""))
+	got := make([]byte, 0, len(want))
 	buf := make([]byte, 64)
-	n, err := wsClient.Read(buf)
-	if err != nil {
-		t.Fatalf("read from backend: %v", err)
+	_ = wsClient.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for len(got) < len(want) {
+		n, err := wsClient.Read(buf)
+		if err != nil {
+			t.Fatalf("read from backend: %v", err)
+		}
+		got = append(got, buf[:n]...)
 	}
-	if string(buf[:n]) != "hello-ws" {
-		t.Fatalf("got %q, want hello-ws", buf[:n])
+	if string(got) != string(want) {
+		t.Fatalf("frames out of order/corrupted:\n got %q\nwant %q", got, want)
 	}
-	<-done
+	a.teardownWebSocket(id, false)
 }
 
-// --- handleWebSocketDisconnect ---
-
-func TestHandleWebSocketDisconnect(t *testing.T) {
+func TestTeardownWebSocket_IsIdempotent(t *testing.T) {
 	a := newTestAgent()
-	a.wsManager = common.NewWebSocketManager()
-
 	wsClient, wsServer := net.Pipe()
 	t.Cleanup(func() { _ = wsClient.Close(); _ = wsServer.Close() })
-	a.wsManager.AddConnection("disc-00000000000000001", wsServer)
 
+	const id = "disc-00000000000000001"
+	a.wsManager.AddConnection(id, wsServer)
+	a.startWSWriter(id, wsServer)
 	if a.wsManager.GetConnectionCount() != 1 {
-		t.Fatal("expected 1 ws connection before disconnect")
+		t.Fatal("expected 1 ws connection before teardown")
 	}
-
-	a.handleWebSocketDisconnect(&common.Message{ID: "disc-00000000000000001"})
-
+	a.teardownWebSocket(id, false)
 	if a.wsManager.GetConnectionCount() != 0 {
-		t.Fatal("expected 0 ws connections after disconnect")
+		t.Fatal("expected 0 ws connections after teardown")
 	}
+	a.teardownWebSocket(id, false) // second call is a no-op, must not panic
 }
 
 // --- checkUpstreamHealth ---
