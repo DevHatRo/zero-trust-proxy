@@ -626,6 +626,42 @@ func TestOTPSaturatedPoolDoesNotChargeSendBudget(t *testing.T) {
 	e.otp.wait()
 }
 
+// Regression (re-review finding 1): the OTPFailed metric counts genuine
+// wrong-code submissions only, not malformed forms (empty code).
+func TestOTPFailedMetricOnlyOnWrongCode(t *testing.T) {
+	cfg := testConfig(t, func(c *serverconfig.AccessConfig) {
+		c.EmailOTP = serverconfig.EmailOTPConfig{
+			Enabled: true, From: "auth@example.com",
+			Brevo: &serverconfig.BrevoConfig{APIKey: "unused-in-test"},
+		}
+		c.Rules = []serverconfig.AccessRule{{
+			Name: "media", When: serverconfig.AccessMatch{Hosts: []string{"*.home.example.com"}},
+			Action: "allow", Require: &serverconfig.AccessRequire{Emails: []string{"vuko@example.com"}}}}
+	})
+	var failed int32
+	e, err := New(cfg, Hooks{OTPFailed: func() { atomic.AddInt32(&failed, 1) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.otp.sender = &captureSender{}
+	h := e.Wrap(okHandler(nil))
+	txn, token := startLogin(t, h, "http://x.home.example.com/.ztp/login?rd=/")
+
+	// Empty code: form-level failure, must NOT count.
+	postForm(t, h, "http://x.home.example.com/.ztp/otp/verify", txn, token,
+		url.Values{"email": {"vuko@example.com"}, "code": {""}, "rd": {"/"}})
+	if n := atomic.LoadInt32(&failed); n != 0 {
+		t.Fatalf("empty code must not increment otp_failed, got %d", n)
+	}
+
+	// Wrong code: genuine verification failure, must count once.
+	postForm(t, h, "http://x.home.example.com/.ztp/otp/verify", txn, token,
+		url.Values{"email": {"vuko@example.com"}, "code": {"000000"}, "rd": {"/"}})
+	if n := atomic.LoadInt32(&failed); n != 1 {
+		t.Fatalf("wrong code must increment otp_failed once, got %d", n)
+	}
+}
+
 // Regression (re-review finding C): only GET starts a login transaction,
 // so a forced cross-site POST cannot rotate the txn cookie.
 func TestLoginRejectsNonGET(t *testing.T) {

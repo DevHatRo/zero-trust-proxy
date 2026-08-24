@@ -199,7 +199,15 @@ func (e *Engine) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 	email, okEmail := validEmail(strings.TrimSpace(r.PostFormValue("email")))
 	code := strings.TrimSpace(r.PostFormValue("code"))
 
-	if !okEmail || code == "" || !e.otp.store.verify(email, code) {
+	// A malformed form (unparseable email, empty code) is not a
+	// verification attempt: re-render without touching OTPFailed, which
+	// tracks genuine wrong-code submissions for brute-force detection.
+	if !okEmail || code == "" {
+		renderLoginPage(w, loginView{Step: "code", Return: rd, Email: email, CSRF: token,
+			Error: "Enter the code we emailed you."})
+		return
+	}
+	if !e.otp.store.verify(email, code) {
 		if e.hooks.OTPFailed != nil {
 			e.hooks.OTPFailed()
 		}

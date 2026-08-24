@@ -145,15 +145,24 @@ func (s *otpStore) maybeSweep(now time.Time) {
 // digits 0–5 ~4% likelier than 6–9.
 func randomCode() (string, error) {
 	out := make([]byte, otpCodeDigits)
-	var b [1]byte
+	// Draw random bytes in one batch (with headroom for the rare
+	// rejection) and refill only if rejections exhaust it — typically a
+	// single syscall for the whole code.
+	var buf [otpCodeDigits * 2]byte
+	pos, n := 0, 0
 	for i := 0; i < otpCodeDigits; {
-		if _, err := rand.Read(b[:]); err != nil {
-			return "", err
+		if pos >= n {
+			if _, err := rand.Read(buf[:]); err != nil {
+				return "", err
+			}
+			pos, n = 0, len(buf)
 		}
-		if b[0] >= 250 {
+		v := buf[pos]
+		pos++
+		if v >= 250 {
 			continue
 		}
-		out[i] = '0' + b[0]%10
+		out[i] = '0' + v%10
 		i++
 	}
 	return string(out), nil

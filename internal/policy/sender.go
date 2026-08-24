@@ -41,7 +41,9 @@ func newCodeSender(cfg serverconfig.EmailOTPConfig) CodeSender {
 		subject:  cfg.EffectiveSubject(),
 		ttl:      cfg.EffectiveCodeTTL(),
 		endpoint: brevoEndpoint,
-		client:   &http.Client{Timeout: 10 * time.Second},
+		// No client-level Timeout: the per-send context (otpSendTimeout)
+		// is the single delivery deadline, matching the SMTP path.
+		client: &http.Client{},
 	}
 }
 
