@@ -288,6 +288,12 @@ func TestVerifyIDTokenChecks(t *testing.T) {
 		t.Fatalf("groups not mapped: %v", id.Groups)
 	}
 
+	// Multi-audience token WITH a matching azp is accepted.
+	multi := idp.sign(map[string]any{"nonce": "N1", "aud": []string{"cid", "other"}, "azp": "cid"})
+	if _, err := p.verifyIDToken(ctx, multi, "N1"); err != nil {
+		t.Fatalf("multi-aud token with correct azp rejected: %v", err)
+	}
+
 	cases := []struct {
 		name  string
 		tok   string
@@ -297,6 +303,9 @@ func TestVerifyIDTokenChecks(t *testing.T) {
 		{"expired", idp.sign(map[string]any{"nonce": "N1", "exp": now.Add(-time.Minute).Unix()}), "N1"},
 		{"wrong audience", idp.sign(map[string]any{"nonce": "N1", "aud": "someone-else"}), "N1"},
 		{"wrong issuer", idp.sign(map[string]any{"nonce": "N1", "iss": "https://evil.example"}), "N1"},
+		// Multi-audience token without a matching azp (OIDC 3.1.3.7).
+		{"multi-aud no azp", idp.sign(map[string]any{"nonce": "N1", "aud": []string{"cid", "other"}}), "N1"},
+		{"multi-aud wrong azp", idp.sign(map[string]any{"nonce": "N1", "aud": []string{"cid", "other"}, "azp": "other"}), "N1"},
 	}
 	for _, tc := range cases {
 		if _, err := p.verifyIDToken(ctx, tc.tok, tc.nonce); err == nil {
@@ -323,12 +332,15 @@ func TestVerifyIDTokenDropsUnverifiedEmail(t *testing.T) {
 	p := &oidcProvider{name: "mock", issuer: idp.url, clientID: "cid",
 		client: idp.client(), now: func() time.Time { return now }, groupsClaim: "groups"}
 
-	tok := idp.sign(map[string]any{"nonce": "N1", "email_verified": false})
-	id, err := p.verifyIDToken(context.Background(), tok, "N1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id.Email != "" {
-		t.Fatalf("unverified email must be dropped, got %q", id.Email)
+	// Explicit false and an absent claim (null) both drop the email.
+	for _, ev := range []any{false, nil} {
+		tok := idp.sign(map[string]any{"nonce": "N1", "email_verified": ev})
+		id, err := p.verifyIDToken(context.Background(), tok, "N1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id.Email != "" {
+			t.Fatalf("email_verified=%v: email must be dropped, got %q", ev, id.Email)
+		}
 	}
 }

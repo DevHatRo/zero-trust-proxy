@@ -239,6 +239,7 @@ type oidcClaims struct {
 	Iss           string          `json:"iss"`
 	Sub           string          `json:"sub"`
 	Aud           json.RawMessage `json:"aud"`
+	Azp           string          `json:"azp"`
 	Exp           int64           `json:"exp"`
 	Iat           int64           `json:"iat"`
 	Nonce         string          `json:"nonce"`
@@ -334,8 +335,14 @@ func (p *oidcProvider) verifyIDToken(ctx context.Context, raw, nonce string) (*I
 	if strings.TrimRight(c.Iss, "/") != p.issuer {
 		return nil, fmt.Errorf("id_token: issuer mismatch")
 	}
-	if !audienceContains(c.Aud, p.clientID) {
+	auds := parseAudiences(c.Aud)
+	if !containsString(auds, p.clientID) {
 		return nil, fmt.Errorf("id_token: audience mismatch")
+	}
+	// OIDC Core 3.1.3.7: with more than one audience, azp must be present
+	// and identify this client.
+	if len(auds) > 1 && c.Azp != p.clientID {
+		return nil, fmt.Errorf("id_token: azp mismatch on multi-audience token")
 	}
 	now := p.now().Unix()
 	if c.Exp <= now {
@@ -351,10 +358,12 @@ func (p *oidcProvider) verifyIDToken(ctx context.Context, raw, nonce string) (*I
 		return nil, fmt.Errorf("id_token: missing sub")
 	}
 
-	email := c.Email
-	if c.EmailVerified != nil && !*c.EmailVerified {
-		// Unverified email cannot satisfy an emails/emails_domain rule.
-		email = ""
+	// Trust the email for authorization only when the IdP explicitly
+	// asserts it verified. Absent or false → drop it, so it cannot
+	// satisfy an emails/emails_domain rule.
+	email := ""
+	if c.EmailVerified != nil && *c.EmailVerified {
+		email = c.Email
 	}
 	return &Identity{
 		Source:   SourceSession,
@@ -372,22 +381,27 @@ var oidcRSAHashes = map[string]crypto.Hash{
 	"RS512": crypto.SHA512,
 }
 
-// audienceContains reports whether the aud claim (string or array)
-// includes the client ID.
-func audienceContains(raw json.RawMessage, clientID string) bool {
+// parseAudiences decodes the aud claim, which OIDC allows to be either a
+// single string or an array of strings.
+func parseAudiences(raw json.RawMessage) []string {
 	if len(raw) == 0 {
-		return false
+		return nil
 	}
 	var one string
 	if json.Unmarshal(raw, &one) == nil {
-		return one == clientID
+		return []string{one}
 	}
 	var many []string
 	if json.Unmarshal(raw, &many) == nil {
-		for _, a := range many {
-			if a == clientID {
-				return true
-			}
+		return many
+	}
+	return nil
+}
+
+func containsString(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
 		}
 	}
 	return false

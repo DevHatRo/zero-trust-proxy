@@ -127,7 +127,11 @@ func (a *AccessConfig) validate() error {
 		if p.Type != "" && p.Type != "oidc" {
 			return fmt.Errorf("%s (%s): only type \"oidc\" is supported, got %q", where, p.Name, p.Type)
 		}
-		if !strings.HasPrefix(p.Issuer, "https://") && !strings.HasPrefix(p.Issuer, "http://") {
+		// https only: the discovery doc, JWKS, and token endpoint are all
+		// fetched over the issuer's scheme, and ID-token integrity rests
+		// entirely on the JWKS. A plaintext issuer would let an on-path
+		// attacker forge keys and tokens.
+		if !strings.HasPrefix(p.Issuer, "https://") {
 			return fmt.Errorf("%s (%s): issuer must be an https:// URL", where, p.Name)
 		}
 		cid, err := ExpandSecret(p.ClientID)
