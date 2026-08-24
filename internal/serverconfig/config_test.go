@@ -376,6 +376,10 @@ func TestAccessValidation(t *testing.T) {
 			c.Access.IdentityProviders = []IdentityProvider{{Name: "google", Type: "oidc",
 				ClientID: "${ZTP_GOOG_ID}", ClientSecret: "${ZTP_GOOG_SECRET}"}}
 		}},
+		{"identity provider with http issuer", func(c *Config) {
+			c.Access.IdentityProviders = []IdentityProvider{{Name: "google", Type: "oidc",
+				Issuer: "http://accounts.google.com", ClientID: "${ZTP_GOOG_ID}", ClientSecret: "${ZTP_GOOG_SECRET}"}}
+		}},
 		{"identity provider with non-oidc type", func(c *Config) {
 			c.Access.IdentityProviders = []IdentityProvider{{Name: "saml", Type: "saml",
 				Issuer: "https://idp.example.com", ClientID: "${ZTP_GOOG_ID}", ClientSecret: "${ZTP_GOOG_SECRET}"}}

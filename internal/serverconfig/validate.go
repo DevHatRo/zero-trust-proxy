@@ -127,10 +127,11 @@ func (a *AccessConfig) validate() error {
 		if p.Type != "" && p.Type != "oidc" {
 			return fmt.Errorf("%s (%s): only type \"oidc\" is supported, got %q", where, p.Name, p.Type)
 		}
-		// https only: the discovery doc, JWKS, and token endpoint are all
-		// fetched over the issuer's scheme, and ID-token integrity rests
-		// entirely on the JWKS. A plaintext issuer would let an on-path
-		// attacker forge keys and tokens.
+		// https only: the discovery document is fetched over the issuer
+		// scheme and the JWKS/token endpoints are taken from it, so the
+		// whole trust chain — and thus ID-token integrity — hangs off the
+		// issuer being fetched securely. A plaintext issuer would let an
+		// on-path attacker forge the discovery doc, keys, and tokens.
 		if !strings.HasPrefix(p.Issuer, "https://") {
 			return fmt.Errorf("%s (%s): issuer must be an https:// URL", where, p.Name)
 		}
