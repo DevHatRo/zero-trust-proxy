@@ -38,12 +38,13 @@ type snapshot struct {
 	defaultAllow bool
 }
 
-// Engine evaluates requests. The session manager is fixed at startup
-// (session config is restart-only); rules and tokens live in the
-// snapshot.
+// Engine evaluates requests. The session manager and OTP flow are
+// fixed at startup (their config is restart-only); rules and tokens
+// live in the snapshot.
 type Engine struct {
 	snap    atomic.Pointer[snapshot]
 	session *SessionManager
+	otp     *otpManager // nil when email_otp is disabled
 	hooks   Hooks
 }
 
@@ -52,6 +53,9 @@ type Hooks struct {
 	Allowed      func(rule string)
 	Denied       func(rule string)
 	AuthRequired func()
+	OTPSent      func()
+	OTPVerified  func()
+	OTPFailed    func()
 }
 
 // New compiles the access config into an Engine. Callers pass a
@@ -63,6 +67,14 @@ func New(cfg serverconfig.AccessConfig, hooks Hooks) (*Engine, error) {
 		cfg.Session.EffectiveCookieName(),
 		cfg.Session.EffectiveTTL(),
 	)
+	if cfg.EmailOTP.Enabled {
+		e.otp = newOTPManager(
+			newOTPStore(cfg.EmailOTP.EffectiveCodeTTL()),
+			newCodeSender(cfg.EmailOTP),
+			cfg.EmailOTP.From,
+			cfg.EmailOTP.EffectiveSubject(),
+		)
+	}
 	if err := e.install(cfg); err != nil {
 		return nil, err
 	}

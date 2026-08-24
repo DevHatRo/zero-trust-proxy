@@ -50,12 +50,57 @@ access:
 ```
 
 **Not available yet — rejected at validation until the OIDC login flow
-ships**: `identity_providers`, and the `identity_provider`, `emails`,
-and `emails_domain` require clauses. They all depend on browser login,
-which is the next increment; accepting them today would produce config
-that silently can never match (or, worse, rules no human could ever
-satisfy). The validator names the limitation explicitly rather than
-letting the config lie.
+ships**: `identity_providers` and the `identity_provider` require
+clause. The `emails` / `emails_domain` clauses require a login flow
+that can establish an email identity: enable **email OTP** (below) to
+use them; without it they are rejected as dead config.
+
+## Email one-time-code login (email OTP)
+
+Cloudflare-style "one-time PIN": a browser hitting an email-scoped
+rule enters their address, receives a short-lived 6-digit code, and
+exchanging it mints the session cookie. No identity provider or app
+registration needed. Exactly one mail sender must be configured —
+plain SMTP or the [Brevo](https://www.brevo.com) transactional API:
+
+```yaml
+access:
+  email_otp:
+    enabled: true
+    from: "auth@example.com"
+    code_ttl: 10m                     # default
+    # Sender option A — SMTP submission (STARTTLS):
+    smtp:
+      host: smtp.fastmail.com
+      port: 587                       # default
+      username: auth@example.com
+      password: "${ZTP_SMTP_PASSWORD}"
+    # Sender option B — Brevo API (mutually exclusive with smtp):
+    # brevo:
+    #   api_key: "${ZTP_BREVO_API_KEY}"
+
+  rules:
+    - name: media-apps
+      when: { hosts: ["*.home.example.com"] }
+      action: allow
+      require: { emails: ["you@example.com"] }   # or emails_domain
+```
+
+Flow and safeguards:
+
+- Anonymous browsers on an email-scoped rule are redirected to
+  `/.ztp/login` (the original path survives the round-trip as a
+  sanitized **relative** return path — no open redirect).
+- A code is **only sent when the address could satisfy at least one
+  rule**, but the response is byte-identical either way — no account
+  enumeration, and the proxy cannot be used to mail-bomb strangers.
+- Codes are stored hashed, compared in constant time, **single-use**,
+  expire after `code_ttl`, allow 5 verification attempts, and issuance
+  is limited to 3 sends per address per 10 minutes.
+- Successful verification mints a session with `provider:
+  "email_otp"` and the verified email; `/.ztp/logout` ends it.
+- Sessions last `session.ttl` (default 8h) — sign in once per device,
+  not per request.
 
 Generate a token + hash pair:
 

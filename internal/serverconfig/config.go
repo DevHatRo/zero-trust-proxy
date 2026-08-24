@@ -30,9 +30,76 @@ type AccessConfig struct {
 	IdentityProviders []IdentityProvider `yaml:"identity_providers,omitempty" json:"identity_providers,omitempty"`
 	// DefaultAction applies when no rule matches: allow | deny.
 	// Defaults to deny when the layer is enabled (zero trust).
-	DefaultAction string       `yaml:"default_action,omitempty" json:"default_action,omitempty"`
-	Rules         []AccessRule `yaml:"rules,omitempty" json:"rules,omitempty"`
+	DefaultAction string         `yaml:"default_action,omitempty" json:"default_action,omitempty"`
+	EmailOTP      EmailOTPConfig `yaml:"email_otp,omitempty" json:"email_otp,omitempty"`
+	Rules         []AccessRule   `yaml:"rules,omitempty" json:"rules,omitempty"`
 }
+
+// EmailOTPConfig enables Cloudflare-style one-time-code login: a
+// browser hitting an email-scoped rule enters their address, receives
+// a short-lived code (only if the address could satisfy a rule — no
+// enumeration), and exchanging it mints a session cookie. Exactly one
+// sender must be configured: smtp or brevo. Enabling it also unlocks
+// the emails/emails_domain require clauses.
+type EmailOTPConfig struct {
+	Enabled bool          `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	From    string        `yaml:"from,omitempty" json:"from,omitempty"`         // sender address
+	Subject string        `yaml:"subject,omitempty" json:"subject,omitempty"`   // default "Your sign-in code"
+	CodeTTL time.Duration `yaml:"code_ttl,omitempty" json:"code_ttl,omitempty"` // default 10m
+	SMTP    *SMTPConfig   `yaml:"smtp,omitempty" json:"smtp,omitempty"`
+	Brevo   *BrevoConfig  `yaml:"brevo,omitempty" json:"brevo,omitempty"`
+}
+
+// EffectiveCodeTTL returns the configured code lifetime or the 10m default.
+func (e *EmailOTPConfig) EffectiveCodeTTL() time.Duration {
+	if e.CodeTTL <= 0 {
+		return 10 * time.Minute
+	}
+	return e.CodeTTL
+}
+
+// EffectiveSubject returns the mail subject or its default.
+func (e *EmailOTPConfig) EffectiveSubject() string {
+	if e.Subject == "" {
+		return "Your sign-in code"
+	}
+	return e.Subject
+}
+
+// SMTPConfig sends codes over SMTP (STARTTLS on the standard
+// submission port). Password supports "${VAR}" env expansion.
+type SMTPConfig struct {
+	Host     string `yaml:"host" json:"host"`
+	Port     int    `yaml:"port,omitempty" json:"port,omitempty"` // default 587
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+
+	password string // resolved during Validate
+}
+
+// ResolvedPassword returns the env-expanded SMTP password (populated
+// by Validate).
+func (s *SMTPConfig) ResolvedPassword() string { return s.password }
+
+// EffectivePort returns the configured port or the 587 default.
+func (s *SMTPConfig) EffectivePort() int {
+	if s.Port <= 0 {
+		return 587
+	}
+	return s.Port
+}
+
+// BrevoConfig sends codes through the Brevo (Sendinblue) transactional
+// API. APIKey supports "${VAR}" env expansion.
+type BrevoConfig struct {
+	APIKey string `yaml:"api_key" json:"api_key"`
+
+	apiKey string // resolved during Validate
+}
+
+// ResolvedAPIKey returns the env-expanded Brevo API key (populated by
+// Validate).
+func (b *BrevoConfig) ResolvedAPIKey() string { return b.apiKey }
 
 // SessionConfig signs the browser session cookie. Secret is either an
 // inline value or an environment reference in the form "${VAR}"

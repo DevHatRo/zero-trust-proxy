@@ -102,6 +102,21 @@ func New(cfg *serverconfig.Config) (*Server, error) {
 					s.metrics.accessAuthReq.Inc()
 				}
 			},
+			OTPSent: func() {
+				if s.metrics != nil {
+					s.metrics.otpSent.Inc()
+				}
+			},
+			OTPVerified: func() {
+				if s.metrics != nil {
+					s.metrics.otpVerified.Inc()
+				}
+			},
+			OTPFailed: func() {
+				if s.metrics != nil {
+					s.metrics.otpFailed.Inc()
+				}
+			},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("access: %w", err)

@@ -32,6 +32,9 @@ type metrics struct {
 	accessAllowed    prometheus.Counter
 	accessDenied     *prometheus.CounterVec
 	accessAuthReq    prometheus.Counter
+	otpSent          prometheus.Counter
+	otpVerified      prometheus.Counter
+	otpFailed        prometheus.Counter
 	reg              *prometheus.Registry
 	handler          http.Handler
 }
@@ -103,6 +106,19 @@ func newMetrics() *metrics {
 		Help: "Anonymous requests answered with an authentication demand (302/401).",
 	})
 
+	otpSent := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ztp_access_otp_sent_total",
+		Help: "One-time sign-in codes delivered.",
+	})
+	otpVerified := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ztp_access_otp_verified_total",
+		Help: "Successful one-time-code logins.",
+	})
+	otpFailed := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ztp_access_otp_failed_total",
+		Help: "Rejected one-time-code verification attempts.",
+	})
+
 	buildInfo := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ztp_build_info",
 		Help: "Build metadata. Always 1.",
@@ -114,7 +130,7 @@ func newMetrics() *metrics {
 
 	reg.MustRegister(requestsTotal, requestDuration, agentsRegistered, wsSessions, agentServices,
 		rlRejected, rlBuckets, fwDenied, fwOversize, idMismatch, regRejected,
-		accessAllowed, accessDenied, accessAuthReq, buildInfo)
+		accessAllowed, accessDenied, accessAuthReq, otpSent, otpVerified, otpFailed, buildInfo)
 
 	m := &metrics{
 		requestsTotal:    requestsTotal,
@@ -131,6 +147,9 @@ func newMetrics() *metrics {
 		accessAllowed:    accessAllowed,
 		accessDenied:     accessDenied,
 		accessAuthReq:    accessAuthReq,
+		otpSent:          otpSent,
+		otpVerified:      otpVerified,
+		otpFailed:        otpFailed,
 		reg:              reg,
 	}
 	m.handler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})

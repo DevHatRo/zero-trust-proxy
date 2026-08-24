@@ -73,7 +73,7 @@ kill -HUP $(pgrep zero-trust-proxy)
 | `tls.acme.storage_dir` | **no — restart required** |
 | `security.rate_limit.enabled`, `security.firewall.enabled` | **no — restart required** (middleware is only inserted at startup) |
 | `agents.identity`, `agents.acl` | **no — restart required** (compiled into the listener; connected agents keep their compiled ACL) |
-| `access.enabled`, `access.session`, `access.identity_providers` | **no — restart required** (live sessions are signed with the current secret) |
+| `access.enabled`, `access.session`, `access.identity_providers`, `access.email_otp` | **no — restart required** (live sessions are signed with the current secret; the OTP sender is built at startup) |
 
 The reload path validates the new config first; if validation fails or
 a restart-only field changed, the SIGHUP is logged and ignored — the

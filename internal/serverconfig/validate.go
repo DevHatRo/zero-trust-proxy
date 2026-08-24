@@ -121,6 +121,12 @@ func (a *AccessConfig) validate() error {
 		return fmt.Errorf("access.identity_providers: OIDC login is not implemented yet; remove the block (it ships in a later release)")
 	}
 
+	if a.EmailOTP.Enabled {
+		if err := a.EmailOTP.validate(); err != nil {
+			return err
+		}
+	}
+
 	ruleNames := make(map[string]bool, len(a.Rules))
 	for i, r := range a.Rules {
 		where := fmt.Sprintf("access.rules[%d]", i)
@@ -158,11 +164,12 @@ func (a *AccessConfig) validate() error {
 			if r.Require.IdentityProvider != "" {
 				return fmt.Errorf("%s (%s): require.identity_provider needs OIDC login, which is not implemented yet", where, r.Name)
 			}
-			// emails / emails_domain share the OIDC dependency: only the
-			// login flow populates Identity.Email, so accepting them now
-			// would make the rule permanently unsatisfiable (dead config).
-			if len(r.Require.Emails) > 0 || len(r.Require.EmailsDomain) > 0 {
-				return fmt.Errorf("%s (%s): require.emails / require.emails_domain need OIDC login, which is not implemented yet — use groups with service tokens until then", where, r.Name)
+			// emails / emails_domain need a login flow that populates
+			// Identity.Email. Email OTP provides one; without it (and
+			// with OIDC still unimplemented) the clauses would be
+			// permanently unsatisfiable — dead config, rejected.
+			if (len(r.Require.Emails) > 0 || len(r.Require.EmailsDomain) > 0) && !a.EmailOTP.Enabled {
+				return fmt.Errorf("%s (%s): require.emails / require.emails_domain need a login flow — enable access.email_otp (or wait for OIDC)", where, r.Name)
 			}
 			for _, g := range r.Require.Groups {
 				if g == "" {
@@ -380,6 +387,44 @@ func (a *AgentsConfig) validate() error {
 		if _, err := LoadCRLSerials(a.Revocation.CRLFile); err != nil {
 			return fmt.Errorf("agents.revocation.crl_file: %w", err)
 		}
+	}
+	return nil
+}
+
+// validate checks the email-OTP block (only called when enabled) and
+// resolves env-referenced sender credentials.
+func (e *EmailOTPConfig) validate() error {
+	if e.From == "" || !strings.Contains(e.From, "@") {
+		return fmt.Errorf("access.email_otp.from: a valid sender address is required")
+	}
+	if e.CodeTTL < 0 {
+		return fmt.Errorf("access.email_otp.code_ttl must be >= 0")
+	}
+	switch {
+	case e.SMTP == nil && e.Brevo == nil:
+		return fmt.Errorf("access.email_otp: configure exactly one sender (smtp or brevo)")
+	case e.SMTP != nil && e.Brevo != nil:
+		return fmt.Errorf("access.email_otp: smtp and brevo are mutually exclusive")
+	case e.SMTP != nil:
+		if e.SMTP.Host == "" {
+			return fmt.Errorf("access.email_otp.smtp.host required")
+		}
+		if e.SMTP.Password != "" {
+			pw, err := ExpandSecret(e.SMTP.Password)
+			if err != nil {
+				return fmt.Errorf("access.email_otp.smtp.password: %w", err)
+			}
+			e.SMTP.password = pw
+		}
+	default: // brevo
+		if e.Brevo.APIKey == "" {
+			return fmt.Errorf("access.email_otp.brevo.api_key required")
+		}
+		key, err := ExpandSecret(e.Brevo.APIKey)
+		if err != nil {
+			return fmt.Errorf("access.email_otp.brevo.api_key: %w", err)
+		}
+		e.Brevo.apiKey = key
 	}
 	return nil
 }

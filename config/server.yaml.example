@@ -134,6 +134,11 @@ access:
   enabled: false
   # session:
   #   secret: "${ZTP_SESSION_SECRET}"   # env-expanded; >= 32 bytes
+  # email_otp:                         # one-time-code login (docs/server/access-policy.md)
+  #   enabled: true
+  #   from: "auth@example.com"
+  #   smtp: { host: smtp.example.com, username: auth, password: "${ZTP_SMTP_PASSWORD}" }
+  #   # brevo: { api_key: "${ZTP_BREVO_API_KEY}" }   # alternative sender
   #   ttl: 8h
   # service_tokens:
   #   - name: ci-deploy
