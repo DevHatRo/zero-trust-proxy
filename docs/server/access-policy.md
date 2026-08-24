@@ -4,8 +4,9 @@ The `access:` block makes an identity-based decision on **every**
 inbound request, at the proxy, before the request is dispatched to an
 agent. Identity comes from a **service token** (machines: CI, cron,
 API clients) or a **signed session cookie** (humans — minted by the
-OIDC login flow, which ships in the next increment). Decisions are
-driven by an ordered rule set.
+**email one-time-code login** below; an OIDC flow via
+`identity_providers` ships in a later increment). Decisions are driven
+by an ordered rule set.
 
 Disabled by default; an absent block changes nothing. The middleware
 runs after the edge firewall and rate limiter (cheap rejects first)
@@ -50,12 +51,57 @@ access:
 ```
 
 **Not available yet — rejected at validation until the OIDC login flow
-ships**: `identity_providers`, and the `identity_provider`, `emails`,
-and `emails_domain` require clauses. They all depend on browser login,
-which is the next increment; accepting them today would produce config
-that silently can never match (or, worse, rules no human could ever
-satisfy). The validator names the limitation explicitly rather than
-letting the config lie.
+ships**: `identity_providers` and the `identity_provider` require
+clause. The `emails` / `emails_domain` clauses require a login flow
+that can establish an email identity: enable **email OTP** (below) to
+use them; without it they are rejected as dead config.
+
+## Email one-time-code login (email OTP)
+
+Cloudflare-style "one-time PIN": a browser hitting an email-scoped
+rule enters their address, receives a short-lived 6-digit code, and
+exchanging it mints the session cookie. No identity provider or app
+registration needed. Exactly one mail sender must be configured —
+plain SMTP or the [Brevo](https://www.brevo.com) transactional API:
+
+```yaml
+access:
+  email_otp:
+    enabled: true
+    from: "auth@example.com"
+    code_ttl: 10m                     # default
+    # Sender option A — SMTP submission (STARTTLS):
+    smtp:
+      host: smtp.fastmail.com
+      port: 587                       # default
+      username: auth@example.com
+      password: "${ZTP_SMTP_PASSWORD}"
+    # Sender option B — Brevo API (mutually exclusive with smtp):
+    # brevo:
+    #   api_key: "${ZTP_BREVO_API_KEY}"
+
+  rules:
+    - name: media-apps
+      when: { hosts: ["*.home.example.com"] }
+      action: allow
+      require: { emails: ["you@example.com"] }   # or emails_domain
+```
+
+Flow and safeguards:
+
+- Anonymous browsers on an email-scoped rule are redirected to
+  `/.ztp/login` (the original path survives the round-trip as a
+  sanitized **relative** return path — no open redirect).
+- A code is **only sent when the address could satisfy at least one
+  rule**, but the response is byte-identical either way — no account
+  enumeration, and the proxy cannot be used to mail-bomb strangers.
+- Codes are stored hashed, compared in constant time, **single-use**,
+  expire after `code_ttl`, allow 5 verification attempts, and issuance
+  is limited to 3 sends per address per 10 minutes.
+- Successful verification mints a session with `provider:
+  "email_otp"` and the verified email; `/.ztp/logout` ends it.
+- Sessions last `session.ttl` (default 8h) — sign in once per device,
+  not per request.
 
 Generate a token + hash pair:
 
@@ -80,7 +126,7 @@ clauses AND-ed):
 | `action: deny` | 403 |
 | `action: allow`, no `require` | allowed (public) |
 | `require` satisfied | allowed |
-| `require` fails, caller anonymous, predicate is identity-based | authentication demanded — in this release browsers receive an explanatory `401` page (no login flow exists yet); APIs get `401` + `WWW-Authenticate` |
+| `require` fails, caller anonymous, predicate is identity-based | authentication demanded — browsers are redirected to the email-OTP login (or, if `email_otp` is disabled, get an explanatory `401` page); APIs get `401` + `WWW-Authenticate` |
 | `require` fails otherwise | 403 — re-authenticating would not help |
 | no rule matched | `default_action` |
 
@@ -100,10 +146,12 @@ Notable subtleties:
 
 ## The `/.ztp/` namespace
 
-`/.ztp/*` is proxy-owned (`/.ztp/logout` clears the session; the OIDC
-callback lands there next). A backend can never expose paths under it:
-the access middleware handles the namespace when enabled, and the
-router independently 404s it as defence-in-depth when disabled.
+`/.ztp/*` is proxy-owned: `/.ztp/logout` clears the session, and (when
+`email_otp` is enabled) `/.ztp/login`, `/.ztp/otp/request`, and
+`/.ztp/otp/verify` drive the one-time-code flow; the OIDC callback
+lands here later. A backend can never expose paths under it: the access
+middleware handles the namespace when enabled, and the router
+independently 404s it as defence-in-depth when disabled.
 
 ## Secrets
 
@@ -117,8 +165,9 @@ secret invalidates all live sessions.
 ## Hot reload
 
 `rules` and `service_tokens` hot-reload on SIGHUP (atomic snapshot
-swap). `enabled`, `session`, and `identity_providers` are restart-only
-— live cookies are signed with the current secret.
+swap). `enabled`, `session`, `email_otp`, and `identity_providers` are
+restart-only — live cookies are signed with the current secret, and the
+OTP store/sender are built once at startup.
 
 ## Metrics
 

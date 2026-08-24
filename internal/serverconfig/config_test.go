@@ -494,3 +494,71 @@ func TestExpandSecretDistinguishesUnsetFromEmpty(t *testing.T) {
 		t.Fatalf("embedded form must stay literal, got %q", v)
 	}
 }
+
+func TestEmailOTPValidation(t *testing.T) {
+	t.Setenv("ZTP_S2", "0123456789abcdef0123456789abcdef")
+	t.Setenv("ZTP_BREVO_KEY", "xkeysib-test")
+	base := func() Config {
+		c := Defaults()
+		c.TLS = TLSConfig{Mode: TLSModeNone}
+		c.Listen = ListenConfig{HTTP: ":80"}
+		c.Agents = AgentsConfig{Listen: ":8443", CertFile: "c", KeyFile: "k", CAFile: "ca"}
+		c.Access = AccessConfig{
+			Enabled: true,
+			Session: SessionConfig{Secret: "${ZTP_S2}"},
+			EmailOTP: EmailOTPConfig{
+				Enabled: true,
+				From:    "auth@example.com",
+				Brevo:   &BrevoConfig{APIKey: "${ZTP_BREVO_KEY}"},
+			},
+			Rules: []AccessRule{
+				{Name: "media", When: AccessMatch{Hosts: []string{"*.home.example.com"}}, Action: "allow",
+					Require: &AccessRequire{Emails: []string{"me@example.com"}, EmailsDomain: []string{"example.com"}}},
+			},
+		}
+		return c
+	}
+
+	good := base()
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid otp config rejected: %v", err)
+	}
+	if good.Access.EmailOTP.Brevo.ResolvedAPIKey() != "xkeysib-test" {
+		t.Fatal("brevo api key must be env-expanded")
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"missing from", func(c *Config) { c.Access.EmailOTP.From = "" }},
+		{"from without @", func(c *Config) { c.Access.EmailOTP.From = "not-an-address" }},
+		{"no sender", func(c *Config) { c.Access.EmailOTP.Brevo = nil }},
+		{"both senders", func(c *Config) { c.Access.EmailOTP.SMTP = &SMTPConfig{Host: "smtp.example.com"} }},
+		{"smtp without host", func(c *Config) {
+			c.Access.EmailOTP.Brevo = nil
+			c.Access.EmailOTP.SMTP = &SMTPConfig{}
+		}},
+		{"brevo key env unset", func(c *Config) { c.Access.EmailOTP.Brevo = &BrevoConfig{APIKey: "${ZTP_NOPE_KEY}"} }},
+		{"emails clause without any login flow", func(c *Config) { c.Access.EmailOTP.Enabled = false }},
+	}
+	for _, tc := range cases {
+		cfg := base()
+		tc.mutate(&cfg)
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s: expected validation error", tc.name)
+		}
+	}
+
+	// SMTP variant with env-expanded password validates.
+	t.Setenv("ZTP_SMTP_PW", "hunter2-but-long")
+	smtp := base()
+	smtp.Access.EmailOTP.Brevo = nil
+	smtp.Access.EmailOTP.SMTP = &SMTPConfig{Host: "smtp.example.com", Username: "auth", Password: "${ZTP_SMTP_PW}"}
+	if err := smtp.Validate(); err != nil {
+		t.Fatalf("smtp variant rejected: %v", err)
+	}
+	if smtp.Access.EmailOTP.SMTP.ResolvedPassword() != "hunter2-but-long" || smtp.Access.EmailOTP.SMTP.EffectivePort() != 587 {
+		t.Fatal("smtp password/port resolution wrong")
+	}
+}

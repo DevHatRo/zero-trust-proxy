@@ -161,6 +161,7 @@ Setting `metrics.addr` enables a Prometheus text-format exporter at
 | `ztp_access_allowed_total` | counter | requests allowed by the access-policy layer |
 | `ztp_access_denied_total{rule}` | counter | requests denied by the access-policy layer |
 | `ztp_access_auth_required_total` | counter | anonymous requests answered with an authentication demand |
+| `ztp_access_otp_{sent,verified,failed}_total` | counters | email one-time-code logins: codes delivered / successful logins / rejected attempts |
 | `ztp_agent_identity_mismatch_total` | counter | agent register ID ≠ client-cert identity (also counted in `bind_to: none` observe mode) |
 | `ztp_agent_register_rejected_total{reason}` | counter | agent registrations rejected (`version` / `identity` / `acl`) |
 | `ztp_build_info{version}` | gauge | binary version info (always 1) |

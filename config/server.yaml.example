@@ -134,7 +134,13 @@ access:
   enabled: false
   # session:
   #   secret: "${ZTP_SESSION_SECRET}"   # env-expanded; >= 32 bytes
-  #   ttl: 8h
+  #   ttl: 8h                           # session lifetime (default 12h)
+  # email_otp:                         # one-time-code login (docs/server/access-policy.md)
+  #   enabled: true
+  #   from: "auth@example.com"
+  #   code_ttl: 10m                    # code lifetime (default 10m)
+  #   smtp: { host: smtp.example.com, username: auth, password: "${ZTP_SMTP_PASSWORD}" }
+  #   # brevo: { api_key: "${ZTP_BREVO_API_KEY}" }   # alternative sender
   # service_tokens:
   #   - name: ci-deploy
   #     hash: "sha256:<64 hex of sha256(token)>"

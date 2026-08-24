@@ -84,6 +84,24 @@ func (e *Engine) serveZTP(w http.ResponseWriter, r *http.Request, path string) {
 	case ZTPPrefix + "logout":
 		e.session.ClearCookie(w)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
+	case ZTPPrefix + "login":
+		if e.otp == nil {
+			writeStatus(w, http.StatusNotFound, "Not Found")
+			return
+		}
+		e.handleLogin(w, r)
+	case ZTPPrefix + "otp/request":
+		if e.otp == nil {
+			writeStatus(w, http.StatusNotFound, "Not Found")
+			return
+		}
+		e.handleOTPRequest(w, r)
+	case ZTPPrefix + "otp/verify":
+		if e.otp == nil {
+			writeStatus(w, http.StatusNotFound, "Not Found")
+			return
+		}
+		e.handleOTPVerify(w, r)
 	default:
 		writeStatus(w, http.StatusNotFound, "Not Found")
 	}
@@ -157,9 +175,14 @@ func (e *Engine) requireAuth(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	// Browser flow: the OIDC login redirect lands here in a later
-	// increment. Without a configured provider there is nowhere to
-	// send the user, so say that instead of looping.
+	// Browser with email OTP configured: into the login flow, carrying
+	// the original destination as a sanitized relative path.
+	if e.otp != nil {
+		http.Redirect(w, r, loginRedirectURL(r), http.StatusFound)
+		return
+	}
+	// No login flow configured (OIDC lands in a later increment):
+	// nowhere to send the user, so say that instead of looping.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusUnauthorized)
 	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>401 · Authentication Required</title></head><body style="font:16px/1.5 -apple-system,sans-serif;max-width:40em;margin:4em auto;padding:0 1em"><h1>Authentication required</h1><p>This service requires you to sign in, but no identity provider is configured on the proxy yet. Contact the operator, or use a service token.</p></body></html>`))
