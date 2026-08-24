@@ -135,8 +135,16 @@ func (e *Engine) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, http.StatusMethodNotAllowed, "Method Not Allowed")
 		return
 	}
-	rd := sanitizeReturnPath(r.URL.Query().Get("rd"))
-	v := loginView{Step: "email", Return: rd, OTP: e.otp != nil, Providers: e.providerLinks(rd)}
+	e.renderChooser(w, sanitizeReturnPath(r.URL.Query().Get("rd")), "")
+}
+
+// renderChooser renders the login chooser (provider buttons and/or the
+// email form). Whenever the email form is shown it provisions a fresh
+// OTP transaction — cookie + mirrored csrf token — so the form is always
+// submittable, including on the OIDC-failure fallback paths. An empty
+// errMsg renders a 200; a non-empty one renders the same page as a 400.
+func (e *Engine) renderChooser(w http.ResponseWriter, rd, errMsg string) {
+	v := loginView{Step: "email", Return: rd, OTP: e.otp != nil, Providers: e.providerLinks(rd), Error: errMsg}
 	if e.otp != nil {
 		token, err := newLoginToken()
 		if err != nil {

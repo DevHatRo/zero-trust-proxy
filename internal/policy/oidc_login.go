@@ -66,8 +66,7 @@ func (e *Engine) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		if e.hooks.OIDCError != nil {
 			e.hooks.OIDCError()
 		}
-		renderLoginPage(w, loginView{Step: "email", Return: rd, OTP: e.otp != nil,
-			Providers: e.providerLinks(rd), Error: "Sign-in is temporarily unavailable. Try again shortly."})
+		e.renderChooser(w, rd, "Sign-in is temporarily unavailable. Try again shortly.")
 		return
 	}
 
@@ -142,10 +141,10 @@ func (e *Engine) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, rd, http.StatusSeeOther) // #nosec G710
 }
 
-// oidcFail renders the login chooser with an error message.
+// oidcFail renders the login chooser with an error message, keeping the
+// OTP form usable (fresh transaction) as a fallback.
 func (e *Engine) oidcFail(w http.ResponseWriter, rd, msg string) {
-	renderLoginPage(w, loginView{Step: "email", Return: rd, OTP: e.otp != nil,
-		Providers: e.providerLinks(rd), Error: msg})
+	e.renderChooser(w, rd, msg)
 }
 
 // providerLinks builds the chooser buttons for every configured IdP.

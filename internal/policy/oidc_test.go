@@ -264,6 +264,49 @@ func TestOIDCCallbackRejectsBadState(t *testing.T) {
 	}
 }
 
+// When OIDC discovery fails, the fallback chooser must still provision a
+// working OTP transaction (cookie + csrf) so email login remains usable.
+func TestOIDCLoginFailureFallbackKeepsOTPUsable(t *testing.T) {
+	e, sender := otpEngine(t) // engine with email OTP + an emails rule
+	// Attach a provider whose discovery endpoint always errors.
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	e.oidc = &oidcManager{
+		providers: map[string]*oidcProvider{"dead": {
+			name: "dead", issuer: bad.URL, clientID: "x", clientSecret: "y",
+			scopes: []string{"openid"}, groupsClaim: "groups",
+			client: bad.Client(), now: time.Now,
+		}},
+		order: []string{"dead"},
+	}
+	h := e.Wrap(okHandler(nil))
+
+	rr := send(t, h, "GET", "http://x.home.example.com/.ztp/oauth/login?provider=dead&rd=/", "9.9.9.9", nil)
+	var txn *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == loginTxnCookie {
+			txn = c
+		}
+	}
+	token := hiddenField(rr.Body.String(), "csrf")
+	if txn == nil || token == "" {
+		t.Fatalf("fallback must provision the OTP transaction: cookie=%v token=%q", txn != nil, token)
+	}
+
+	// An OTP request using that transaction must pass CSRF and issue a code.
+	got := postForm(t, h, "http://x.home.example.com/.ztp/otp/request", txn, token,
+		url.Values{"email": {"vuko@example.com"}, "rd": {"/"}})
+	e.otp.wait()
+	if got.Code != 200 || !strings.Contains(got.Body.String(), "Check your email") {
+		t.Fatalf("OTP after OIDC-failure fallback: %d body=%s", got.Code, got.Body.String())
+	}
+	if len(sender.to) != 1 || sender.to[0] != "vuko@example.com" {
+		t.Fatalf("code should have been sent to the eligible address, got %v", sender.to)
+	}
+}
+
 // --- ID-token verification -----------------------------------------------
 
 func TestVerifyIDTokenChecks(t *testing.T) {
