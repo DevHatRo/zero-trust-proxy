@@ -26,7 +26,7 @@ type Hooks struct {
 // rlOverride is one compiled rate-limit override: first hostname match
 // wins, its own Limiter applies.
 type rlOverride struct {
-	hosts []hostGlob
+	hosts []HostPattern
 	key   string
 	lim   *Limiter
 }
@@ -53,7 +53,7 @@ func compileRateLimit(cfg serverconfig.RateLimitConfig) (*rateLimitSet, error) {
 		}
 		ov := rlOverride{key: keyOrDefault(o.Key), lim: lim}
 		for _, h := range o.Hosts {
-			ov.hosts = append(ov.hosts, compileHostGlob(h))
+			ov.hosts = append(ov.hosts, CompileHostPattern(h))
 		}
 		set.overrides = append(set.overrides, ov)
 	}
@@ -217,7 +217,10 @@ func (e *Engine) WrapWAF(next http.Handler) http.Handler {
 		}
 		host := hostOnly(r.Host)
 		path := CleanPath(r.URL.Path)
-		if denied, rule := fw.decision(host, path, r.Method, remoteIP(r)); denied {
+		// Method uppercased to match the compile-time-normalized rule
+		// keys — HTTP methods are case-sensitive tokens and "post" would
+		// otherwise bypass a methods-scoped deny rule.
+		if denied, rule := fw.decision(host, path, strings.ToUpper(r.Method), remoteIP(r)); denied {
 			if e.hooks.FirewallDeny != nil {
 				e.hooks.FirewallDeny(rule)
 			}

@@ -15,6 +15,107 @@ type Config struct {
 	Logging  LoggingConfig  `yaml:"logging" json:"logging"`
 	Metrics  MetricsConfig  `yaml:"metrics" json:"metrics"`
 	Security SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
+	Access   AccessConfig   `yaml:"access,omitempty" json:"access,omitempty"`
+}
+
+// AccessConfig is the identity-based access-policy layer: every inbound
+// request is evaluated against the ordered rule set before it is
+// dispatched to an agent. Identity comes from a service token
+// (machine) or a signed session cookie (human, minted by the OIDC
+// flow). Disabled by default — an absent block changes nothing.
+type AccessConfig struct {
+	Enabled           bool               `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Session           SessionConfig      `yaml:"session,omitempty" json:"session,omitempty"`
+	ServiceTokens     []ServiceToken     `yaml:"service_tokens,omitempty" json:"service_tokens,omitempty"`
+	IdentityProviders []IdentityProvider `yaml:"identity_providers,omitempty" json:"identity_providers,omitempty"`
+	// DefaultAction applies when no rule matches: allow | deny.
+	// Defaults to deny when the layer is enabled (zero trust).
+	DefaultAction string       `yaml:"default_action,omitempty" json:"default_action,omitempty"`
+	Rules         []AccessRule `yaml:"rules,omitempty" json:"rules,omitempty"`
+}
+
+// SessionConfig signs the browser session cookie. Secret is either an
+// inline value or an environment reference in the form "${VAR}"
+// (recommended, keeps the secret out of the YAML file); resolved at
+// validation time.
+type SessionConfig struct {
+	Secret     string        `yaml:"secret,omitempty" json:"secret,omitempty"`
+	CookieName string        `yaml:"cookie_name,omitempty" json:"cookie_name,omitempty"` // default ztp_session
+	TTL        time.Duration `yaml:"ttl,omitempty" json:"ttl,omitempty"`                 // default 8h
+
+	secret []byte // resolved (env-expanded) during Validate; never serialized
+}
+
+// ResolvedSecret returns the session-signing secret after env
+// expansion (populated by Validate). Empty until validation has run.
+func (s *SessionConfig) ResolvedSecret() []byte { return s.secret }
+
+// EffectiveCookieName returns the configured cookie name or the default.
+func (s *SessionConfig) EffectiveCookieName() string {
+	if s.CookieName == "" {
+		return "ztp_session"
+	}
+	return s.CookieName
+}
+
+// EffectiveTTL returns the configured session lifetime or the default 8h.
+func (s *SessionConfig) EffectiveTTL() time.Duration {
+	if s.TTL <= 0 {
+		return 8 * time.Hour
+	}
+	return s.TTL
+}
+
+// ServiceToken is a machine identity: the SHA-256 of the bearer secret
+// (never the secret itself) plus the groups it grants.
+type ServiceToken struct {
+	Name   string   `yaml:"name" json:"name"`
+	Hash   string   `yaml:"hash" json:"hash"` // "sha256:<64 hex>"
+	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
+}
+
+// IdentityProvider is an OIDC provider. Credentials support "${VAR}"
+// env expansion. The login flow ships in a later increment; until it
+// does, validation rejects a non-empty provider list so the config
+// never claims a capability the proxy cannot deliver.
+type IdentityProvider struct {
+	Name         string   `yaml:"name" json:"name"`
+	Type         string   `yaml:"type" json:"type"` // oidc
+	Issuer       string   `yaml:"issuer" json:"issuer"`
+	ClientID     string   `yaml:"client_id" json:"client_id"`
+	ClientSecret string   `yaml:"client_secret" json:"client_secret"`
+	Scopes       []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+}
+
+// AccessRule is one ordered policy rule: match conditions, an action,
+// and an optional identity requirement. Rules are evaluated top-down;
+// first match wins.
+type AccessRule struct {
+	Name    string         `yaml:"name" json:"name"`
+	When    AccessMatch    `yaml:"when,omitempty" json:"when,omitempty"`
+	Action  string         `yaml:"action" json:"action"` // allow | deny
+	Require *AccessRequire `yaml:"require,omitempty" json:"require,omitempty"`
+}
+
+// AccessMatch selects which requests a rule applies to. Hosts use the
+// edge glob style (exact, "*", "*.suffix"); paths use exact / "…*"
+// prefix / "…/*" subtree, matched after percent-decoding and
+// dot-segment collapse.
+type AccessMatch struct {
+	Hosts   []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`
+	Paths   []string `yaml:"paths,omitempty" json:"paths,omitempty"`
+	Methods []string `yaml:"methods,omitempty" json:"methods,omitempty"`
+}
+
+// AccessRequire is the identity predicate an allow rule may demand.
+// All specified clauses must hold (AND); list values are any-of (OR).
+type AccessRequire struct {
+	Authenticated    bool     `yaml:"authenticated,omitempty" json:"authenticated,omitempty"`
+	Groups           []string `yaml:"groups,omitempty" json:"groups,omitempty"`
+	Emails           []string `yaml:"emails,omitempty" json:"emails,omitempty"`
+	EmailsDomain     []string `yaml:"emails_domain,omitempty" json:"emails_domain,omitempty"`
+	IdentityProvider string   `yaml:"identity_provider,omitempty" json:"identity_provider,omitempty"`
+	SourceCIDRs      []string `yaml:"source_cidrs,omitempty" json:"source_cidrs,omitempty"`
 }
 
 // SecurityConfig groups the pre-dispatch edge protections: a firewall

@@ -19,6 +19,7 @@ import (
 //   - manual / sni cert files (re-read from disk; atomic-pointer swap
 //     so live connections aren't dropped)
 //   - security rules and limits (atomic swap; rate-limit buckets reset)
+//   - access.rules / access.service_tokens (atomic snapshot swap)
 //   - agents.revocation (denied serials + CRL re-read; applies to new
 //     handshakes)
 //
@@ -30,6 +31,9 @@ import (
 //   - agents.identity / agents.acl (compiled into the listener at
 //     provision; already-connected agents keep their compiled ACL)
 //   - security.*.enabled (the middleware is only inserted at startup)
+//   - access.enabled / access.session / access.identity_providers
+//     (live sessions are signed with the current secret; in-flight
+//     login flows hold state cookies)
 func (s *Server) Reload(newCfg *serverconfig.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,6 +59,12 @@ func (s *Server) Reload(newCfg *serverconfig.Config) error {
 		return fmt.Errorf("reload revocation: %w", err)
 	}
 
+	if s.access != nil {
+		if err := s.access.Reload(newCfg.Access); err != nil {
+			return fmt.Errorf("reload access: %w", err)
+		}
+	}
+
 	s.router.RequestTimeout = newCfg.Router.RequestTimeout
 	s.cfg = newCfg
 	return nil
@@ -78,6 +88,12 @@ func diffRestartOnly(old, new *serverconfig.Config) error {
 		return fmt.Errorf("agents.identity change requires restart")
 	case !reflect.DeepEqual(old.Agents.ACL, new.Agents.ACL):
 		return fmt.Errorf("agents.acl change requires restart")
+	case old.Access.Enabled != new.Access.Enabled:
+		return fmt.Errorf("access.enabled change requires restart")
+	case !reflect.DeepEqual(old.Access.Session, new.Access.Session):
+		return fmt.Errorf("access.session change requires restart")
+	case !reflect.DeepEqual(old.Access.IdentityProviders, new.Access.IdentityProviders):
+		return fmt.Errorf("access.identity_providers change requires restart")
 	}
 	return nil
 }

@@ -15,6 +15,7 @@ agent mTLS control plane.
 | `cmd/zero-trust-proxy` | Entrypoint |
 | `internal/server` | Lifecycle: TLS, listeners, redirector, HTTP/3, metrics, access log, known-hosts cache, signal handling |
 | `internal/security` | Edge firewall (ordered allow/deny rules, request-size cap) + rate limiter, applied before agent dispatch |
+| `internal/policy` | Access-policy layer (`access:` config): service tokens, signed sessions, ordered identity rules — see [access-policy.md](access-policy.md) |
 | `internal/serverconfig` | YAML config schema, loader, validator |
 | `modules/ztagents` | mTLS listener, agent registry, WebSocket session tracking |
 | `modules/ztrouter` | `http.Handler`: per-request agent lookup and mTLS multiplexing; branded error pages |
@@ -39,6 +40,12 @@ go build -o bin/zero-trust-proxy ./cmd/zero-trust-proxy
 ```
 
 ## Configuration
+
+> **Strict parsing.** Unknown or misspelled keys anywhere in
+> `server.yaml` fail the load with an error naming the field — a typo
+> in a security-relevant block (`group:` for `groups:`) must never
+> silently become an empty, fail-open value. If an upgrade rejects a
+> config that previously started, delete the named leftover key.
 
 ```yaml
 listen:
@@ -151,6 +158,9 @@ Setting `metrics.addr` enables a Prometheus text-format exporter at
 | `ztp_ratelimit_buckets` | gauge | live rate-limit buckets across all limiters |
 | `ztp_firewall_denied_total{rule}` | counter | requests denied by a firewall rule |
 | `ztp_firewall_oversize_total` | counter | requests rejected for exceeding `max_request_bytes` |
+| `ztp_access_allowed_total` | counter | requests allowed by the access-policy layer |
+| `ztp_access_denied_total{rule}` | counter | requests denied by the access-policy layer |
+| `ztp_access_auth_required_total` | counter | anonymous requests answered with an authentication demand |
 | `ztp_agent_identity_mismatch_total` | counter | agent register ID ≠ client-cert identity (also counted in `bind_to: none` observe mode) |
 | `ztp_agent_register_rejected_total{reason}` | counter | agent registrations rejected (`version` / `identity` / `acl`) |
 | `ztp_build_info{version}` | gauge | binary version info (always 1) |

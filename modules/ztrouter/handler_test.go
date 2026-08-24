@@ -444,3 +444,32 @@ func TestRequestURL_PreservesEncodedSlash(t *testing.T) {
 		})
 	}
 }
+
+// The /.ztp/ namespace is proxy-owned: it must 404 before any agent
+// lookup, even when the access layer is disabled (defence-in-depth —
+// a backend must never be able to serve paths under it).
+func TestZTPNamespaceNeverProxied(t *testing.T) {
+	h := &Handler{} // nil app: reaching the lookup would panic
+	for _, path := range []string{"/.ztp/oauth/callback", "/.ztp/logout", "/.ztp/anything"} {
+		req := httptest.NewRequest(http.MethodGet, "http://app.example.com"+path, nil)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("%s: status=%d, want 404", path, rr.Code)
+		}
+	}
+}
+
+// Dot-segment forms of /.ztp/ paths must hit the guard too — upstreams
+// resolve "/foo/../.ztp/x" to the reserved namespace.
+func TestZTPNamespaceDotSegmentsNeverProxied(t *testing.T) {
+	h := &Handler{} // nil app: reaching the lookup would panic
+	for _, path := range []string{"/foo/../.ztp/logout", "/./.ztp/x", "/a/../../.ztp/oauth/callback", "/.ztp"} {
+		req := httptest.NewRequest(http.MethodGet, "http://app.example.com"+path, nil)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("%s: status=%d, want 404", path, rr.Code)
+		}
+	}
+}

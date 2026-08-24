@@ -29,8 +29,162 @@ func (c *Config) Validate() error {
 	if err := c.Security.validate(); err != nil {
 		return err
 	}
+	if err := c.Access.validate(); err != nil {
+		return err
+	}
 	if c.Listen.HTTPS != "" && c.TLS.Mode == TLSModeNone {
 		return fmt.Errorf("listen.https=%q requires tls.mode != none", c.Listen.HTTPS)
+	}
+	return nil
+}
+
+// tokenHashRe matches the required service-token hash form.
+var tokenHashRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// envRefRe matches a whole-value environment reference: "${VAR}".
+var envRefRe = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+
+// ExpandSecret resolves a secret-bearing config value: a "${VAR}" form
+// reads the environment (recommended — keeps the secret out of YAML);
+// anything else is taken literally. An env reference to an unset or
+// empty variable is an error, never an empty secret — the two cases
+// are reported distinctly so the operator fixes the right thing.
+func ExpandSecret(v string) (string, error) {
+	m := envRefRe.FindStringSubmatch(v)
+	if m == nil {
+		return v, nil
+	}
+	resolved, ok := os.LookupEnv(m[1])
+	if !ok {
+		return "", fmt.Errorf("environment variable %s is not set", m[1])
+	}
+	if resolved == "" {
+		return "", fmt.Errorf("environment variable %s is set but empty", m[1])
+	}
+	return resolved, nil
+}
+
+// validate checks the access block and resolves env-referenced secrets
+// (session secret, provider credentials). A disabled block is not
+// validated — dormant config is allowed, and enabling it is
+// restart-only so the validation runs before it ever takes effect.
+func (a *AccessConfig) validate() error {
+	if !a.Enabled {
+		return nil
+	}
+
+	switch a.DefaultAction {
+	case "", "allow", "deny":
+	default:
+		return fmt.Errorf("access.default_action=%q: must be allow|deny", a.DefaultAction)
+	}
+
+	// Session secret: required whenever the layer is enabled — the
+	// cookie path must never run unsigned.
+	if a.Session.Secret == "" {
+		return fmt.Errorf("access.session.secret required when access is enabled (inline or \"${VAR}\")")
+	}
+	secret, err := ExpandSecret(a.Session.Secret)
+	if err != nil {
+		return fmt.Errorf("access.session.secret: %w", err)
+	}
+	if len(secret) < 32 {
+		return fmt.Errorf("access.session.secret must be at least 32 bytes (got %d)", len(secret))
+	}
+	a.Session.secret = []byte(secret)
+
+	tokenNames := make(map[string]bool, len(a.ServiceTokens))
+	for i, t := range a.ServiceTokens {
+		where := fmt.Sprintf("access.service_tokens[%d]", i)
+		if t.Name == "" {
+			return fmt.Errorf("%s: name required", where)
+		}
+		if tokenNames[t.Name] {
+			return fmt.Errorf("%s: duplicate token name %q", where, t.Name)
+		}
+		tokenNames[t.Name] = true
+		if !tokenHashRe.MatchString(t.Hash) {
+			return fmt.Errorf("%s (%s): hash must be \"sha256:<64 lowercase hex>\"", where, t.Name)
+		}
+		for _, g := range t.Groups {
+			if g == "" {
+				return fmt.Errorf("%s (%s): empty group name", where, t.Name)
+			}
+		}
+	}
+
+	// The OIDC login flow is not implemented yet. Accepting a provider
+	// block now would validate credentials for a capability that does
+	// nothing — the exact silently-dead-config failure this project
+	// refuses to ship. Rejected until the flow lands.
+	if len(a.IdentityProviders) > 0 {
+		return fmt.Errorf("access.identity_providers: OIDC login is not implemented yet; remove the block (it ships in a later release)")
+	}
+
+	ruleNames := make(map[string]bool, len(a.Rules))
+	for i, r := range a.Rules {
+		where := fmt.Sprintf("access.rules[%d]", i)
+		if r.Name == "" {
+			return fmt.Errorf("%s: name required (labels metrics and logs)", where)
+		}
+		if ruleNames[r.Name] {
+			return fmt.Errorf("%s: duplicate rule name %q", where, r.Name)
+		}
+		ruleNames[r.Name] = true
+		if r.Action != "allow" && r.Action != "deny" {
+			return fmt.Errorf("%s (%s): action must be allow|deny, got %q", where, r.Name, r.Action)
+		}
+		for _, h := range r.When.Hosts {
+			if h == "" {
+				return fmt.Errorf("%s (%s): empty host pattern", where, r.Name)
+			}
+		}
+		for _, p := range r.When.Paths {
+			if p == "" {
+				return fmt.Errorf("%s (%s): empty path pattern", where, r.Name)
+			}
+		}
+		if r.Require != nil {
+			if r.Action == "deny" {
+				return fmt.Errorf("%s (%s): require is meaningless on a deny rule", where, r.Name)
+			}
+			// An empty require block (or one whose only keys were
+			// misspelled and rejected by strict parsing elsewhere) would
+			// evaluate as "no requirement" — fail-open. Refuse it.
+			if !r.Require.Authenticated && len(r.Require.Groups) == 0 && len(r.Require.Emails) == 0 &&
+				len(r.Require.EmailsDomain) == 0 && r.Require.IdentityProvider == "" && len(r.Require.SourceCIDRs) == 0 {
+				return fmt.Errorf("%s (%s): require must specify at least one clause (authenticated, groups, emails, emails_domain, identity_provider, source_cidrs) — an empty require would allow everyone", where, r.Name)
+			}
+			if r.Require.IdentityProvider != "" {
+				return fmt.Errorf("%s (%s): require.identity_provider needs OIDC login, which is not implemented yet", where, r.Name)
+			}
+			// emails / emails_domain share the OIDC dependency: only the
+			// login flow populates Identity.Email, so accepting them now
+			// would make the rule permanently unsatisfiable (dead config).
+			if len(r.Require.Emails) > 0 || len(r.Require.EmailsDomain) > 0 {
+				return fmt.Errorf("%s (%s): require.emails / require.emails_domain need OIDC login, which is not implemented yet — use groups with service tokens until then", where, r.Name)
+			}
+			for _, g := range r.Require.Groups {
+				if g == "" {
+					return fmt.Errorf("%s (%s): empty group in require.groups", where, r.Name)
+				}
+			}
+			for _, e := range r.Require.Emails {
+				if e == "" || !strings.Contains(e, "@") {
+					return fmt.Errorf("%s (%s): invalid email %q in require.emails", where, r.Name, e)
+				}
+			}
+			for _, c := range r.Require.SourceCIDRs {
+				if _, _, err := net.ParseCIDR(c); err != nil {
+					return fmt.Errorf("%s (%s): invalid CIDR %q", where, r.Name, c)
+				}
+			}
+			for _, d := range r.Require.EmailsDomain {
+				if d == "" || strings.ContainsAny(d, "@ ") {
+					return fmt.Errorf("%s (%s): invalid email domain %q", where, r.Name, d)
+				}
+			}
+		}
 	}
 	return nil
 }

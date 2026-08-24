@@ -29,6 +29,9 @@ type metrics struct {
 	fwOversize       prometheus.Counter
 	idMismatch       prometheus.Counter
 	regRejected      *prometheus.CounterVec
+	accessAllowed    prometheus.Counter
+	accessDenied     *prometheus.CounterVec
+	accessAuthReq    prometheus.Counter
 	reg              *prometheus.Registry
 	handler          http.Handler
 }
@@ -87,6 +90,19 @@ func newMetrics() *metrics {
 		Help: "Agent registrations rejected at the control plane.",
 	}, []string{"reason"}) // version | identity | acl
 
+	accessAllowed := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ztp_access_allowed_total",
+		Help: "Requests allowed by the access-policy layer.",
+	})
+	accessDenied := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ztp_access_denied_total",
+		Help: "Requests denied by the access-policy layer.",
+	}, []string{"rule"}) // rule name, or "_default" for the default action
+	accessAuthReq := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ztp_access_auth_required_total",
+		Help: "Anonymous requests answered with an authentication demand (302/401).",
+	})
+
 	buildInfo := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ztp_build_info",
 		Help: "Build metadata. Always 1.",
@@ -97,7 +113,8 @@ func newMetrics() *metrics {
 	}).Set(1)
 
 	reg.MustRegister(requestsTotal, requestDuration, agentsRegistered, wsSessions, agentServices,
-		rlRejected, rlBuckets, fwDenied, fwOversize, idMismatch, regRejected, buildInfo)
+		rlRejected, rlBuckets, fwDenied, fwOversize, idMismatch, regRejected,
+		accessAllowed, accessDenied, accessAuthReq, buildInfo)
 
 	m := &metrics{
 		requestsTotal:    requestsTotal,
@@ -111,6 +128,9 @@ func newMetrics() *metrics {
 		fwOversize:       fwOversize,
 		idMismatch:       idMismatch,
 		regRejected:      regRejected,
+		accessAllowed:    accessAllowed,
+		accessDenied:     accessDenied,
+		accessAuthReq:    accessAuthReq,
 		reg:              reg,
 	}
 	m.handler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})

@@ -34,27 +34,31 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r)
 
 		entry := struct {
-			TS         string `json:"ts"`
-			Method     string `json:"method"`
-			Host       string `json:"host"`
-			Path       string `json:"path"`
-			Status     int    `json:"status"`
-			Bytes      int64  `json:"bytes"`
-			DurationMS int64  `json:"duration_ms"`
-			AgentID    string `json:"agent_id,omitempty"`
-			RequestID  string `json:"request_id,omitempty"`
-			ClientIP   string `json:"client_ip,omitempty"`
+			TS             string `json:"ts"`
+			Method         string `json:"method"`
+			Host           string `json:"host"`
+			Path           string `json:"path"`
+			Status         int    `json:"status"`
+			Bytes          int64  `json:"bytes"`
+			DurationMS     int64  `json:"duration_ms"`
+			AgentID        string `json:"agent_id,omitempty"`
+			RequestID      string `json:"request_id,omitempty"`
+			ClientIP       string `json:"client_ip,omitempty"`
+			Identity       string `json:"identity,omitempty"`
+			IdentitySource string `json:"identity_source,omitempty"`
 		}{
-			TS:         start.UTC().Format(time.RFC3339Nano),
-			Method:     r.Method,
-			Host:       r.Host,
-			Path:       r.URL.RequestURI(),
-			Status:     rw.status,
-			Bytes:      rw.bytes,
-			DurationMS: time.Since(start).Milliseconds(),
-			AgentID:    ri.AgentID,
-			RequestID:  ri.RequestID,
-			ClientIP:   clientIP(r.RemoteAddr),
+			TS:             start.UTC().Format(time.RFC3339Nano),
+			Method:         r.Method,
+			Host:           r.Host,
+			Path:           r.URL.RequestURI(),
+			Status:         rw.status,
+			Bytes:          rw.bytes,
+			DurationMS:     time.Since(start).Milliseconds(),
+			AgentID:        ri.AgentID,
+			RequestID:      ri.RequestID,
+			ClientIP:       clientIP(r.RemoteAddr),
+			Identity:       ri.Identity,
+			IdentitySource: ri.IdentitySource,
 		}
 		b, err := json.Marshal(entry)
 		if err != nil {
