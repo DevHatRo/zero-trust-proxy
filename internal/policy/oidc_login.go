@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -66,7 +67,7 @@ func (e *Engine) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		if e.hooks.OIDCError != nil {
 			e.hooks.OIDCError()
 		}
-		e.renderChooser(w, rd, "Sign-in is temporarily unavailable. Try again shortly.")
+		e.renderChooser(w, hostOnly(r.Host), rd, "Sign-in is temporarily unavailable. Try again shortly.")
 		return
 	}
 
@@ -95,23 +96,23 @@ func (e *Engine) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	if errParam := r.URL.Query().Get("error"); errParam != "" {
 		log.Warn("access: oidc provider %q returned error=%q", flow.Provider, errParam)
-		e.oidcFail(w, rd, "Sign-in was cancelled or refused.")
+		e.oidcFail(w, r, rd, "Sign-in was cancelled or refused.")
 		return
 	}
 	state := r.URL.Query().Get("state")
 	if state == "" || subtle.ConstantTimeCompare([]byte(state), []byte(flow.State)) != 1 {
 		log.Warn("access: oidc state mismatch")
-		e.oidcFail(w, rd, "Your sign-in session expired. Please try again.")
+		e.oidcFail(w, r, rd, "Your sign-in session expired. Please try again.")
 		return
 	}
 	code := r.URL.Query().Get("code")
 	if code == "" {
-		e.oidcFail(w, rd, "Your sign-in session expired. Please try again.")
+		e.oidcFail(w, r, rd, "Your sign-in session expired. Please try again.")
 		return
 	}
 	p, ok := e.oidc.provider(flow.Provider)
 	if !ok {
-		e.oidcFail(w, rd, "Your sign-in session expired. Please try again.")
+		e.oidcFail(w, r, rd, "Your sign-in session expired. Please try again.")
 		return
 	}
 
@@ -122,7 +123,7 @@ func (e *Engine) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		if e.hooks.OIDCError != nil {
 			e.hooks.OIDCError()
 		}
-		e.oidcFail(w, rd, "Sign-in failed. Please try again.")
+		e.oidcFail(w, r, rd, "Sign-in failed. Please try again.")
 		return
 	}
 
@@ -143,8 +144,8 @@ func (e *Engine) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 // oidcFail renders the login chooser with an error message, keeping the
 // OTP form usable (fresh transaction) as a fallback.
-func (e *Engine) oidcFail(w http.ResponseWriter, rd, msg string) {
-	e.renderChooser(w, rd, msg)
+func (e *Engine) oidcFail(w http.ResponseWriter, r *http.Request, rd, msg string) {
+	e.renderChooser(w, hostOnly(r.Host), rd, msg)
 }
 
 // providerLinks builds the chooser buttons for every configured IdP.
@@ -155,11 +156,30 @@ func (e *Engine) providerLinks(rd string) []providerLink {
 	links := make([]providerLink, 0, len(e.oidc.order))
 	for _, name := range e.oidc.order {
 		links = append(links, providerLink{
-			Name: name,
-			URL:  "/.ztp/oauth/login?provider=" + url.QueryEscape(name) + "&rd=" + url.QueryEscape(rd),
+			Name:  name,
+			Label: displayName(name),
+			Icon:  providerIcon(name),
+			URL:   "/.ztp/oauth/login?provider=" + url.QueryEscape(name) + "&rd=" + url.QueryEscape(rd),
 		})
 	}
 	return links
+}
+
+// displayName title-cases a provider's config name for the button label.
+func displayName(name string) string {
+	if name == "" {
+		return "SSO"
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
+}
+
+// providerIcon selects the button glyph: a branded Google mark for a
+// Google provider, otherwise a generic SSO key.
+func providerIcon(name string) string {
+	if strings.Contains(strings.ToLower(name), "google") {
+		return "google"
+	}
+	return "sso"
 }
 
 // oidcRedirectURI is the callback URL for this request's host. It must
