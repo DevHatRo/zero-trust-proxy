@@ -73,6 +73,10 @@ type SMTPConfig struct {
 	Port     int    `yaml:"port,omitempty" json:"port,omitempty"` // default 587
 	Username string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+	// AllowInsecure permits delivery when the server offers no STARTTLS.
+	// Off by default — otherwise the code crosses the network in the
+	// clear. Enable only for a trusted local relay.
+	AllowInsecure bool `yaml:"allow_insecure,omitempty" json:"allow_insecure,omitempty"`
 
 	password string // resolved during Validate
 }

@@ -4,8 +4,9 @@ The `access:` block makes an identity-based decision on **every**
 inbound request, at the proxy, before the request is dispatched to an
 agent. Identity comes from a **service token** (machines: CI, cron,
 API clients) or a **signed session cookie** (humans — minted by the
-OIDC login flow, which ships in the next increment). Decisions are
-driven by an ordered rule set.
+**email one-time-code login** below; an OIDC flow via
+`identity_providers` ships in a later increment). Decisions are driven
+by an ordered rule set.
 
 Disabled by default; an absent block changes nothing. The middleware
 runs after the edge firewall and rate limiter (cheap rejects first)
@@ -125,7 +126,7 @@ clauses AND-ed):
 | `action: deny` | 403 |
 | `action: allow`, no `require` | allowed (public) |
 | `require` satisfied | allowed |
-| `require` fails, caller anonymous, predicate is identity-based | authentication demanded — in this release browsers receive an explanatory `401` page (no login flow exists yet); APIs get `401` + `WWW-Authenticate` |
+| `require` fails, caller anonymous, predicate is identity-based | authentication demanded — browsers are redirected to the email-OTP login (or, if `email_otp` is disabled, get an explanatory `401` page); APIs get `401` + `WWW-Authenticate` |
 | `require` fails otherwise | 403 — re-authenticating would not help |
 | no rule matched | `default_action` |
 
@@ -145,10 +146,12 @@ Notable subtleties:
 
 ## The `/.ztp/` namespace
 
-`/.ztp/*` is proxy-owned (`/.ztp/logout` clears the session; the OIDC
-callback lands there next). A backend can never expose paths under it:
-the access middleware handles the namespace when enabled, and the
-router independently 404s it as defence-in-depth when disabled.
+`/.ztp/*` is proxy-owned: `/.ztp/logout` clears the session, and (when
+`email_otp` is enabled) `/.ztp/login`, `/.ztp/otp/request`, and
+`/.ztp/otp/verify` drive the one-time-code flow; the OIDC callback
+lands here later. A backend can never expose paths under it: the access
+middleware handles the namespace when enabled, and the router
+independently 404s it as defence-in-depth when disabled.
 
 ## Secrets
 
@@ -162,8 +165,9 @@ secret invalidates all live sessions.
 ## Hot reload
 
 `rules` and `service_tokens` hot-reload on SIGHUP (atomic snapshot
-swap). `enabled`, `session`, and `identity_providers` are restart-only
-— live cookies are signed with the current secret.
+swap). `enabled`, `session`, `email_otp`, and `identity_providers` are
+restart-only — live cookies are signed with the current secret, and the
+OTP store/sender are built once at startup.
 
 ## Metrics
 

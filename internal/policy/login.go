@@ -1,6 +1,9 @@
 package policy
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"html/template"
 	"net"
@@ -8,6 +11,7 @@ import (
 	"net/mail"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Browser login flow for email OTP, under the proxy-owned /.ztp/
@@ -20,6 +24,54 @@ import (
 // The response to a request is identical whether or not the address is
 // eligible or rate-limited — no account enumeration and no send-rate
 // oracle. Only eligible addresses actually cause mail to be sent.
+//
+// GET /.ztp/login mints a per-browser transaction token, dropped as a
+// SameSite=Strict cookie and echoed in a hidden form field; both POSTs
+// require the two to match. A cross-site form cannot carry the Strict
+// cookie, so it cannot verify a code into a victim's browser (login
+// CSRF / session fixation).
+
+const (
+	loginTxnCookie = "ztp_login_txn"
+	loginTxnTTL    = 15 * time.Minute
+)
+
+// newLoginToken returns a fresh random transaction token.
+func newLoginToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
+}
+
+// setLoginTxn drops the transaction cookie: Strict so it never rides a
+// cross-site request, HttpOnly, scoped to the /.ztp/ namespace.
+func setLoginTxn(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     loginTxnCookie,
+		Value:    token,
+		Path:     ZTPPrefix,
+		MaxAge:   int(loginTxnTTL.Seconds()),
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+// validLoginTxn reports whether the request carries a transaction cookie
+// whose value matches the posted csrf field (constant-time).
+func validLoginTxn(r *http.Request) bool {
+	c, err := r.Cookie(loginTxnCookie)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	posted := r.PostFormValue("csrf")
+	if posted == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(posted)) == 1
+}
 
 // sanitizeReturnPath restricts the post-login redirect to a local
 // path: no absolute URLs, no scheme-relative ("//host") forms, no
@@ -74,10 +126,25 @@ func (s *snapshot) emailEligible(email string, srcIP net.IP) bool {
 	return false
 }
 
-// handleLogin renders the email form.
+// handleLogin renders the email form and starts a transaction: a fresh
+// token in a Strict cookie, mirrored into the form for double-submit.
 func (e *Engine) handleLogin(w http.ResponseWriter, r *http.Request) {
 	rd := sanitizeReturnPath(r.URL.Query().Get("rd"))
-	renderLoginPage(w, loginView{Step: "email", Return: rd})
+	token, err := newLoginToken()
+	if err != nil {
+		log.Error("access: login token: %v", err)
+		writeStatus(w, http.StatusInternalServerError, "Internal Server Error")
+		return
+	}
+	setLoginTxn(w, token)
+	renderLoginPage(w, loginView{Step: "email", Return: rd, CSRF: token})
+}
+
+// restartLogin bounces a POST whose transaction cookie is missing,
+// expired, or forged back to a fresh /.ztp/login — no code is issued or
+// verified without a browser-bound transaction. rd is preserved.
+func restartLogin(w http.ResponseWriter, r *http.Request, rd string) {
+	http.Redirect(w, r, "/.ztp/login?rd="+url.QueryEscape(rd), http.StatusSeeOther)
 }
 
 // handleOTPRequest issues and delivers a code.
@@ -87,9 +154,14 @@ func (e *Engine) handleOTPRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rd := sanitizeReturnPath(r.PostFormValue("rd"))
+	if !validLoginTxn(r) {
+		restartLogin(w, r, rd)
+		return
+	}
+	token := r.PostFormValue("csrf") // validated above; carried to the code form
 	email, ok := validEmail(strings.TrimSpace(r.PostFormValue("email")))
 	if !ok {
-		renderLoginPage(w, loginView{Step: "email", Return: rd, Error: "Enter a valid email address."})
+		renderLoginPage(w, loginView{Step: "email", Return: rd, CSRF: token, Error: "Enter a valid email address."})
 		return
 	}
 
@@ -100,12 +172,12 @@ func (e *Engine) handleOTPRequest(w http.ResponseWriter, r *http.Request) {
 		if code, ok := e.otp.store.issue(email); ok {
 			e.otp.dispatch(email, code, e.hooks.OTPSent)
 		} else {
-			log.Warn("access: otp send rate limit for %s", email)
+			log.Warn("access: otp send rate limit for %s", redactEmail(email))
 		}
 	} else {
-		log.Debug("access: otp requested for ineligible address %s", email)
+		log.Debug("access: otp requested for ineligible address %s", redactEmail(email))
 	}
-	renderLoginPage(w, loginView{Step: "code", Return: rd, Email: email})
+	renderLoginPage(w, loginView{Step: "code", Return: rd, Email: email, CSRF: token})
 }
 
 // handleOTPVerify exchanges a code for a session.
@@ -115,6 +187,13 @@ func (e *Engine) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rd := sanitizeReturnPath(r.PostFormValue("rd"))
+	if !validLoginTxn(r) {
+		// Missing/forged transaction: never mint a session — this is the
+		// cross-site verification path. Restart cleanly.
+		restartLogin(w, r, rd)
+		return
+	}
+	token := r.PostFormValue("csrf")
 	email, okEmail := validEmail(strings.TrimSpace(r.PostFormValue("email")))
 	code := strings.TrimSpace(r.PostFormValue("code"))
 
@@ -122,7 +201,7 @@ func (e *Engine) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 		if e.hooks.OTPFailed != nil {
 			e.hooks.OTPFailed()
 		}
-		renderLoginPage(w, loginView{Step: "code", Return: rd, Email: email,
+		renderLoginPage(w, loginView{Step: "code", Return: rd, Email: email, CSRF: token,
 			Error: "That code is not valid or has expired. Request a new one if needed."})
 		return
 	}
@@ -139,6 +218,9 @@ func (e *Engine) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e.session.SetCookie(w, token)
+	// Retire the transaction so its token cannot be replayed.
+	http.SetCookie(w, &http.Cookie{Name: loginTxnCookie, Value: "", Path: ZTPPrefix,
+		MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	if e.hooks.OTPVerified != nil {
 		e.hooks.OTPVerified()
 	}
@@ -155,6 +237,7 @@ type loginView struct {
 	Email  string
 	Return string
 	Error  string
+	CSRF   string // transaction token, mirrored into the form
 }
 
 func renderLoginPage(w http.ResponseWriter, v loginView) {
@@ -205,6 +288,7 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
     {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
     <form method="post" action="/.ztp/otp/request">
       <input type="hidden" name="rd" value="{{.Return}}">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
       <input type="email" name="email" placeholder="you@example.com" required autofocus autocomplete="email">
       <button type="submit">Send code</button>
     </form>
@@ -214,6 +298,7 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
     {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
     <form method="post" action="/.ztp/otp/verify">
       <input type="hidden" name="rd" value="{{.Return}}">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
       <input type="hidden" name="email" value="{{.Email}}">
       <input type="text" name="code" placeholder="123456" required autofocus inputmode="numeric" autocomplete="one-time-code" maxlength="6">
       <button type="submit">Sign in</button>

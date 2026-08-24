@@ -1,13 +1,18 @@
 package policy
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,6 +128,95 @@ func TestBrevoSender(t *testing.T) {
 	}
 }
 
+// serveMockSMTP speaks just enough SMTP to reach DATA, optionally
+// advertising STARTTLS, and bumps received when a message body arrives.
+func serveMockSMTP(conn net.Conn, advertiseSTARTTLS bool, received *int32) {
+	defer func() { _ = conn.Close() }()
+	w := bufio.NewWriter(conn)
+	r := bufio.NewReader(conn)
+	line := func(s string) { fmt.Fprint(w, s+"\r\n"); _ = w.Flush() }
+	line("220 mock ESMTP")
+	for {
+		in, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		cmd := strings.ToUpper(strings.TrimSpace(in))
+		switch {
+		case strings.HasPrefix(cmd, "EHLO"):
+			if advertiseSTARTTLS {
+				line("250-mock")
+				line("250 STARTTLS")
+			} else {
+				line("250 mock")
+			}
+		case cmd == "DATA":
+			line("354 go ahead")
+			for {
+				d, err := r.ReadString('\n')
+				if err != nil {
+					return
+				}
+				if d == ".\r\n" {
+					break
+				}
+			}
+			atomic.AddInt32(received, 1)
+			line("250 OK")
+		case cmd == "QUIT":
+			line("221 bye")
+			return
+		default: // HELO/MAIL/RCPT/…
+			line("250 OK")
+		}
+	}
+}
+
+func startMockSMTP(t *testing.T, advertiseSTARTTLS bool) (host string, port int, received *int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var got int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveMockSMTP(conn, advertiseSTARTTLS, &got)
+		}
+	}()
+	h, p, _ := net.SplitHostPort(ln.Addr().String())
+	n, _ := strconv.Atoi(p)
+	return h, n, &got
+}
+
+// Regression (finding 7): a server without STARTTLS is refused by
+// default (no code crosses the wire), and only proceeds under the
+// explicit allow_insecure opt-out.
+func TestSMTPRequiresSTARTTLS(t *testing.T) {
+	host, port, got := startMockSMTP(t, false)
+	s := &smtpSender{host: host, port: port, from: "auth@example.com", subject: "x", ttl: time.Minute}
+
+	if err := s.SendCode(context.Background(), "u@example.com", "123456"); err == nil {
+		t.Fatal("delivery to a non-STARTTLS server must fail by default")
+	}
+	if atomic.LoadInt32(got) != 0 {
+		t.Fatal("code body must not be transmitted in cleartext")
+	}
+
+	s.allowInsecure = true
+	if err := s.SendCode(context.Background(), "u@example.com", "123456"); err != nil {
+		t.Fatalf("with allow_insecure the send should proceed: %v", err)
+	}
+	if atomic.LoadInt32(got) != 1 {
+		t.Fatal("message should be delivered once allow_insecure is set")
+	}
+}
+
 func TestBuildMailMessage(t *testing.T) {
 	msg := string(buildMailMessage("auth@example.com", "user@example.com", "Your sign-in code", "body line\nsecond"))
 	for _, want := range []string{"From: auth@example.com\r\n", "To: user@example.com\r\n", "Subject: ", "body line\r\nsecond"} {
@@ -206,11 +300,58 @@ func otpEngine(t *testing.T) (*Engine, *captureSender) {
 	return e, sender
 }
 
-func postForm(t *testing.T, h http.Handler, target string, form url.Values) *httptest.ResponseRecorder {
+// startLogin performs GET /.ztp/login and returns the transaction
+// cookie and the csrf token embedded in the form — the pair both POSTs
+// now require.
+func startLogin(t *testing.T, h http.Handler, rawurl string) (*http.Cookie, string) {
 	t.Helper()
+	req := httptest.NewRequest("GET", rawurl, nil)
+	req.RemoteAddr = "9.9.9.9:1"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	var c *http.Cookie
+	for _, ck := range rr.Result().Cookies() {
+		if ck.Name == loginTxnCookie {
+			c = ck
+		}
+	}
+	if c == nil {
+		t.Fatalf("no %s cookie from %s (status %d)", loginTxnCookie, rawurl, rr.Code)
+	}
+	token := hiddenField(rr.Body.String(), "csrf")
+	if token == "" {
+		t.Fatal("no csrf token in login form")
+	}
+	return c, token
+}
+
+// hiddenField pulls a hidden input's value out of the rendered form.
+func hiddenField(body, name string) string {
+	marker := `name="` + name + `" value="`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := body[i+len(marker):]
+	if j := strings.IndexByte(rest, '"'); j >= 0 {
+		return rest[:j]
+	}
+	return ""
+}
+
+// postForm posts target with the given transaction cookie and csrf
+// token attached (pass nil/"" to simulate a cross-site submission).
+func postForm(t *testing.T, h http.Handler, target string, txn *http.Cookie, token string, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	if token != "" {
+		form.Set("csrf", token)
+	}
 	req := httptest.NewRequest("POST", target, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.RemoteAddr = "9.9.9.9:1"
+	if txn != nil {
+		req.AddCookie(txn)
+	}
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr
@@ -232,8 +373,9 @@ func TestOTPFullLoginFlow(t *testing.T) {
 		t.Fatal("backend reached before login")
 	}
 
-	// 2. Request a code for the eligible address.
-	rr = postForm(t, h, "http://sonarr.home.example.com/.ztp/otp/request",
+	// 2. Request a code for the eligible address (through a transaction).
+	txn, token := startLogin(t, h, "http://sonarr.home.example.com/.ztp/login?rd=/series")
+	rr = postForm(t, h, "http://sonarr.home.example.com/.ztp/otp/request", txn, token,
 		url.Values{"email": {"vuko@example.com"}, "rd": {"/series"}})
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "Check your email") {
 		t.Fatalf("request step: %d", rr.Code)
@@ -245,7 +387,7 @@ func TestOTPFullLoginFlow(t *testing.T) {
 	}
 
 	// 3. Verify the code → session cookie + redirect to the original path.
-	rr = postForm(t, h, "http://sonarr.home.example.com/.ztp/otp/verify",
+	rr = postForm(t, h, "http://sonarr.home.example.com/.ztp/otp/verify", txn, token,
 		url.Values{"email": {"vuko@example.com"}, "code": {code}, "rd": {"/series"}})
 	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/series" {
 		t.Fatalf("verify step: %d loc=%q", rr.Code, rr.Header().Get("Location"))
@@ -269,7 +411,7 @@ func TestOTPFullLoginFlow(t *testing.T) {
 	}
 
 	// 5. Wrong code fails and counts, without leaking anything.
-	rr = postForm(t, h, "http://sonarr.home.example.com/.ztp/otp/verify",
+	rr = postForm(t, h, "http://sonarr.home.example.com/.ztp/otp/verify", txn, token,
 		url.Values{"email": {"vuko@example.com"}, "code": {"000000"}, "rd": {"/"}})
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("wrong code: %d, want 400", rr.Code)
@@ -281,9 +423,10 @@ func TestOTPNoEnumerationNoMailForIneligible(t *testing.T) {
 	e, sender := otpEngine(t)
 	h := e.Wrap(okHandler(nil))
 
-	eligible := postForm(t, h, "http://x.home.example.com/.ztp/otp/request",
+	txn, token := startLogin(t, h, "http://x.home.example.com/.ztp/login?rd=/")
+	eligible := postForm(t, h, "http://x.home.example.com/.ztp/otp/request", txn, token,
 		url.Values{"email": {"vuko@example.com"}, "rd": {"/"}})
-	ineligible := postForm(t, h, "http://x.home.example.com/.ztp/otp/request",
+	ineligible := postForm(t, h, "http://x.home.example.com/.ztp/otp/request", txn, token,
 		url.Values{"email": {"attacker@evil.com"}, "rd": {"/"}})
 	e.otp.wait() // let any dispatched delivery finish before asserting
 
@@ -364,11 +507,14 @@ func TestOTPEligibilityRespectsANDedClauses(t *testing.T) {
 	e.otp.sender = sender
 	h := e.Wrap(okHandler(nil))
 
+	txn, token := startLogin(t, h, "http://x.home.example.com/.ztp/login?rd=/")
 	requestFrom := func(addr string) {
+		form := url.Values{"email": {"ceo@corp.example"}, "rd": {"/"}, "csrf": {token}}
 		req := httptest.NewRequest("POST", "http://x.home.example.com/.ztp/otp/request",
-			strings.NewReader(url.Values{"email": {"ceo@corp.example"}, "rd": {"/"}}.Encode()))
+			strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.RemoteAddr = addr
+		req.AddCookie(txn)
 		h.ServeHTTP(httptest.NewRecorder(), req)
 		e.otp.wait()
 	}
@@ -397,6 +543,43 @@ func TestSMTPSenderHonorsContext(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("SendCode ignored the context: took %s", elapsed)
+	}
+}
+
+// Regression (finding 9): a cross-site verify POST — the attacker's
+// form carries a valid code but the SameSite=Strict transaction cookie
+// does not ride along — must not mint a session.
+func TestOTPCrossSiteVerifyRejected(t *testing.T) {
+	e, sender := otpEngine(t)
+	h := e.Wrap(okHandler(nil))
+
+	txn, token := startLogin(t, h, "http://x.home.example.com/.ztp/login?rd=/")
+	postForm(t, h, "http://x.home.example.com/.ztp/otp/request", txn, token,
+		url.Values{"email": {"vuko@example.com"}, "rd": {"/"}})
+	e.otp.wait()
+	code := sender.codes["vuko@example.com"]
+	if code == "" {
+		t.Fatal("no code issued")
+	}
+
+	// No transaction cookie, no csrf field: the cross-site case.
+	rr := postForm(t, h, "http://x.home.example.com/.ztp/otp/verify", nil, "",
+		url.Values{"email": {"vuko@example.com"}, "code": {code}})
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "ztp_session" && c.Value != "" {
+			t.Fatal("cross-site verify minted a session")
+		}
+	}
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("cross-site verify: got %d, want a restart redirect (303)", rr.Code)
+	}
+
+	// Control: the same code still verifies once the transaction is
+	// present (the rejected attempt did not consume it).
+	rr = postForm(t, h, "http://x.home.example.com/.ztp/otp/verify", txn, token,
+		url.Values{"email": {"vuko@example.com"}, "code": {code}, "rd": {"/"}})
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/" {
+		t.Fatalf("in-transaction verify failed: %d loc=%q", rr.Code, rr.Header().Get("Location"))
 	}
 }
 

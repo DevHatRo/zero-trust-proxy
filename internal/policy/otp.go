@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -68,13 +69,6 @@ func newOTPStore(ttl time.Duration) *otpStore {
 // issue generates and records a fresh code for the address, enforcing
 // the per-address send limit. ok=false means rate-limited.
 func (s *otpStore) issue(email string) (code string, ok bool) {
-	code, err := randomCode()
-	if err != nil {
-		// crypto/rand failure: fail closed, no code.
-		log.Error("access: otp code generation failed: %v", err)
-		return "", false
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -86,6 +80,15 @@ func (s *otpStore) issue(email string) (code string, ok bool) {
 		s.maybeSweep(now)
 	}
 	if e.sends >= otpMaxSends {
+		return "", false
+	}
+	// Generate only after the rate-limit check clears: no wasted entropy
+	// on a refused send, and a crypto/rand failure is not misreported as
+	// rate limiting.
+	code, err := randomCode()
+	if err != nil {
+		// crypto/rand failure: fail closed, no code and no send charged.
+		log.Error("access: otp code generation failed: %v", err)
 		return "", false
 	}
 	e.sends++
@@ -137,16 +140,34 @@ func (s *otpStore) maybeSweep(now time.Time) {
 }
 
 // randomCode returns a crypto-random numeric code of otpCodeDigits.
+// Rejection sampling (drop bytes >= 250, the largest multiple of 10
+// that fits a byte) keeps every digit uniform — a plain v%10 would make
+// digits 0–5 ~4% likelier than 6–9.
 func randomCode() (string, error) {
-	var b [otpCodeDigits]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
 	out := make([]byte, otpCodeDigits)
-	for i, v := range b {
-		out[i] = '0' + v%10
+	var b [1]byte
+	for i := 0; i < otpCodeDigits; {
+		if _, err := rand.Read(b[:]); err != nil {
+			return "", err
+		}
+		if b[0] >= 250 {
+			continue
+		}
+		out[i] = '0' + b[0]%10
+		i++
 	}
 	return string(out), nil
+}
+
+// redactEmail keeps the domain (enough to diagnose a broken mail route)
+// and drops the identifying local part. Logs must not carry the full
+// address: it is PII, and because delivery runs only for eligible
+// addresses, a logged address would disclose exactly who a rule admits.
+func redactEmail(email string) string {
+	if i := strings.LastIndexByte(email, '@'); i >= 0 {
+		return "***" + email[i:]
+	}
+	return "***"
 }
 
 // otpManager binds the store, the sender, and the flow state together.
@@ -181,7 +202,7 @@ func (m *otpManager) dispatch(email, code string, onSent func()) {
 	select {
 	case m.sem <- struct{}{}:
 	default:
-		log.Warn("access: otp delivery capacity reached; dropped code for %s", email)
+		log.Warn("access: otp delivery capacity reached; dropped code for %s", redactEmail(email))
 		return
 	}
 	m.wg.Add(1)
@@ -192,7 +213,7 @@ func (m *otpManager) dispatch(email, code string, onSent func()) {
 		defer cancel()
 		if err := m.sender.SendCode(ctx, email, code); err != nil {
 			// Never surfaced to the client — that would leak eligibility.
-			log.Error("access: otp delivery to %s failed: %v", email, err)
+			log.Error("access: otp delivery to %s failed: %v", redactEmail(email), err)
 			return
 		}
 		if onSent != nil {

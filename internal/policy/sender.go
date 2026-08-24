@@ -3,7 +3,9 @@ package policy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,13 +25,14 @@ import (
 func newCodeSender(cfg serverconfig.EmailOTPConfig) CodeSender {
 	if cfg.SMTP != nil {
 		return &smtpSender{
-			host:     cfg.SMTP.Host,
-			port:     cfg.SMTP.EffectivePort(),
-			username: cfg.SMTP.Username,
-			password: cfg.SMTP.ResolvedPassword(),
-			from:     cfg.From,
-			subject:  cfg.EffectiveSubject(),
-			ttl:      cfg.EffectiveCodeTTL(),
+			host:          cfg.SMTP.Host,
+			port:          cfg.SMTP.EffectivePort(),
+			username:      cfg.SMTP.Username,
+			password:      cfg.SMTP.ResolvedPassword(),
+			from:          cfg.From,
+			subject:       cfg.EffectiveSubject(),
+			ttl:           cfg.EffectiveCodeTTL(),
+			allowInsecure: cfg.SMTP.AllowInsecure,
 		}
 	}
 	return &brevoSender{
@@ -50,6 +53,11 @@ type smtpSender struct {
 	host, username, password, from, subject string
 	port                                    int
 	ttl                                     time.Duration
+	// allowInsecure permits delivery to a server that does not offer
+	// STARTTLS. Default false: the code would otherwise cross the network
+	// in cleartext, and net/smtp's PlainAuth cleartext guard does not
+	// apply when no username is configured.
+	allowInsecure bool
 }
 
 func (s *smtpSender) SendCode(ctx context.Context, to, code string) error {
@@ -80,6 +88,10 @@ func (s *smtpSender) SendCode(ctx context.Context, to, code string) error {
 		if err := c.StartTLS(&tls.Config{ServerName: s.host, MinVersion: tls.VersionTLS12}); err != nil {
 			return fmt.Errorf("smtp starttls: %w", err)
 		}
+	} else if !s.allowInsecure {
+		// No STARTTLS and no opt-out: refuse rather than send the code
+		// (and any credentials) in cleartext.
+		return fmt.Errorf("smtp: server %s does not offer STARTTLS; set access.email_otp.smtp.allow_insecure to permit cleartext delivery", s.host)
 	}
 	if s.username != "" {
 		if err := c.Auth(smtp.PlainAuth("", s.username, s.password, s.host)); err != nil {
@@ -114,10 +126,30 @@ func buildMailMessage(from, to, subject, body string) []byte {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "From: %s\r\n", from)
 	fmt.Fprintf(&b, "To: %s\r\n", to)
+	// RFC 5322 §3.6 mandates a Date; a Message-ID is strongly advised.
+	// Absent either, many MTAs and spam filters penalise or reject the
+	// mail — silent OTP delivery failures in production.
+	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().UTC().Format(time.RFC1123Z))
+	fmt.Fprintf(&b, "Message-ID: %s\r\n", messageID(from))
 	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
 	b.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")
 	b.WriteString(strings.ReplaceAll(body, "\n", "\r\n"))
 	return b.Bytes()
+}
+
+// messageID builds a unique RFC 5322 Message-ID scoped to the sender's
+// domain.
+func messageID(from string) string {
+	domain := "localhost"
+	if i := strings.LastIndexByte(from, '@'); i >= 0 && i+1 < len(from) {
+		domain = from[i+1:]
+	}
+	var r [16]byte
+	if _, err := rand.Read(r[:]); err != nil {
+		// Uniqueness is best-effort; a coarse ID beats none.
+		return fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), domain)
+	}
+	return fmt.Sprintf("<%s@%s>", hex.EncodeToString(r[:]), domain)
 }
 
 // --- Brevo -------------------------------------------------------------

@@ -394,7 +394,9 @@ func (a *AgentsConfig) validate() error {
 // validate checks the email-OTP block (only called when enabled) and
 // resolves env-referenced sender credentials.
 func (e *EmailOTPConfig) validate() error {
-	if e.From == "" || !strings.Contains(e.From, "@") {
+	if e.From == "" || !strings.Contains(e.From, "@") || strings.ContainsAny(e.From, "\r\n") {
+		// CR/LF would inject extra headers into every OTP mail
+		// (buildMailMessage writes "From: %s\r\n" unencoded).
 		return fmt.Errorf("access.email_otp.from: a valid sender address is required")
 	}
 	if e.CodeTTL < 0 {
