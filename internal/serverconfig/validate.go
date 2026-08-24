@@ -41,6 +41,25 @@ func (c *Config) Validate() error {
 // tokenHashRe matches the required service-token hash form.
 var tokenHashRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+// envRefRe matches a whole-value environment reference: "${VAR}".
+var envRefRe = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+
+// ExpandSecret resolves a secret-bearing config value: a "${VAR}" form
+// reads the environment (recommended — keeps the secret out of YAML);
+// anything else is taken literally. An env reference to an unset
+// variable is an error, never an empty secret.
+func ExpandSecret(v string) (string, error) {
+	m := envRefRe.FindStringSubmatch(v)
+	if m == nil {
+		return v, nil
+	}
+	resolved := os.Getenv(m[1])
+	if resolved == "" {
+		return "", fmt.Errorf("environment variable %s is unset", m[1])
+	}
+	return resolved, nil
+}
+
 // validate checks the access block and resolves env-referenced secrets
 // (session secret, provider credentials). A disabled block is not
 // validated — dormant config is allowed, and enabling it is
@@ -58,15 +77,15 @@ func (a *AccessConfig) validate() error {
 
 	// Session secret: required whenever the layer is enabled — the
 	// cookie path must never run unsigned.
-	if a.Session.SecretEnv == "" {
-		return fmt.Errorf("access.session.secret_env required when access is enabled")
+	if a.Session.Secret == "" {
+		return fmt.Errorf("access.session.secret required when access is enabled (inline or \"${VAR}\")")
 	}
-	secret := os.Getenv(a.Session.SecretEnv)
-	if secret == "" {
-		return fmt.Errorf("access.session.secret_env: environment variable %s is unset", a.Session.SecretEnv)
+	secret, err := ExpandSecret(a.Session.Secret)
+	if err != nil {
+		return fmt.Errorf("access.session.secret: %w", err)
 	}
 	if len(secret) < 32 {
-		return fmt.Errorf("access.session.secret_env: %s must be at least 32 bytes (got %d)", a.Session.SecretEnv, len(secret))
+		return fmt.Errorf("access.session.secret must be at least 32 bytes (got %d)", len(secret))
 	}
 	a.Session.secret = []byte(secret)
 

@@ -27,7 +27,7 @@ func testConfig(t *testing.T, mutate func(*serverconfig.AccessConfig)) servercon
 	t.Setenv("ZTP_TEST_SESSION_SECRET", "0123456789abcdef0123456789abcdef")
 	cfg := serverconfig.AccessConfig{
 		Enabled: true,
-		Session: serverconfig.SessionConfig{SecretEnv: "ZTP_TEST_SESSION_SECRET", TTL: time.Hour},
+		Session: serverconfig.SessionConfig{Secret: "${ZTP_TEST_SESSION_SECRET}", TTL: time.Hour},
 		ServiceTokens: []serverconfig.ServiceToken{
 			{Name: "ci-deploy", Hash: hashOf("s3cret-token"), Groups: []string{"ci"}},
 			{Name: "reader", Hash: hashOf("read-only-token"), Groups: []string{"readers"}},

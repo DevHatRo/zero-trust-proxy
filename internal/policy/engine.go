@@ -59,7 +59,7 @@ type Hooks struct {
 func New(cfg serverconfig.AccessConfig, hooks Hooks) (*Engine, error) {
 	e := &Engine{hooks: hooks}
 	e.session = NewSessionManager(
-		cfg.Session.Secret(),
+		cfg.Session.ResolvedSecret(),
 		cfg.Session.EffectiveCookieName(),
 		cfg.Session.EffectiveTTL(),
 	)

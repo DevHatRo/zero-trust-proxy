@@ -342,7 +342,7 @@ func TestAccessValidation(t *testing.T) {
 	good := base()
 	good.Access = AccessConfig{
 		Enabled: true,
-		Session: SessionConfig{SecretEnv: "ZTP_SESSION_SECRET_T"},
+		Session: SessionConfig{Secret: "${ZTP_SESSION_SECRET_T}"},
 		ServiceTokens: []ServiceToken{
 			{Name: "ci", Hash: "sha256:" + strings.Repeat("ab", 32), Groups: []string{"ci"}},
 		},
@@ -357,7 +357,7 @@ func TestAccessValidation(t *testing.T) {
 	if err := good.Validate(); err != nil {
 		t.Fatalf("valid access config rejected: %v", err)
 	}
-	if len(good.Access.Session.Secret()) < 32 {
+	if len(good.Access.Session.ResolvedSecret()) < 32 {
 		t.Fatal("Validate must resolve the session secret")
 	}
 
@@ -365,8 +365,8 @@ func TestAccessValidation(t *testing.T) {
 		name   string
 		mutate func(*Config)
 	}{
-		{"missing secret env name", func(c *Config) { c.Access.Session.SecretEnv = "" }},
-		{"unset secret env", func(c *Config) { c.Access.Session.SecretEnv = "ZTP_DOES_NOT_EXIST" }},
+		{"missing secret", func(c *Config) { c.Access.Session.Secret = "" }},
+		{"unset secret env ref", func(c *Config) { c.Access.Session.Secret = "${ZTP_DOES_NOT_EXIST}" }},
 		{"bad default action", func(c *Config) { c.Access.DefaultAction = "maybe" }},
 		{"plaintext token hash", func(c *Config) { c.Access.ServiceTokens[0].Hash = "hunter2" }},
 		{"duplicate token name", func(c *Config) {
@@ -374,7 +374,7 @@ func TestAccessValidation(t *testing.T) {
 		}},
 		{"identity providers rejected until OIDC ships", func(c *Config) {
 			c.Access.IdentityProviders = []IdentityProvider{{Name: "google", Type: "oidc",
-				Issuer: "https://accounts.google.com", ClientIDEnv: "ZTP_GOOG_ID", ClientSecretEnv: "ZTP_GOOG_SECRET"}}
+				Issuer: "https://accounts.google.com", ClientID: "${ZTP_GOOG_ID}", ClientSecret: "${ZTP_GOOG_SECRET}"}}
 		}},
 		{"identity_provider require rejected until OIDC ships", func(c *Config) {
 			c.Access.Rules[1].Require.IdentityProvider = "google"
@@ -419,7 +419,7 @@ func TestAccessValidation(t *testing.T) {
 	// Short secret rejected.
 	t.Setenv("ZTP_SHORT", "tooshort")
 	short := base()
-	short.Access = AccessConfig{Enabled: true, Session: SessionConfig{SecretEnv: "ZTP_SHORT"}}
+	short.Access = AccessConfig{Enabled: true, Session: SessionConfig{Secret: "${ZTP_SHORT}"}}
 	if err := short.Validate(); err == nil {
 		t.Error("short session secret must be rejected")
 	}
@@ -442,7 +442,7 @@ tls: {mode: none}
 agents: {listen: ":8443", cert_file: c, key_file: k, ca_file: ca}
 access:
   enabled: true
-  session: {secret_env: ZTP_S}
+  session: {secret: "${ZTP_S}"}
   default_action: deny
   rules:
     - name: admin

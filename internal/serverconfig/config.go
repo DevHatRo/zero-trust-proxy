@@ -34,20 +34,21 @@ type AccessConfig struct {
 	Rules         []AccessRule `yaml:"rules,omitempty" json:"rules,omitempty"`
 }
 
-// SessionConfig signs the browser session cookie. The secret is
-// referenced by environment-variable name, never inline, and resolved
-// at validation time.
+// SessionConfig signs the browser session cookie. Secret is either an
+// inline value or an environment reference in the form "${VAR}"
+// (recommended, keeps the secret out of the YAML file); resolved at
+// validation time.
 type SessionConfig struct {
-	SecretEnv  string        `yaml:"secret_env,omitempty" json:"secret_env,omitempty"`
+	Secret     string        `yaml:"secret,omitempty" json:"secret,omitempty"`
 	CookieName string        `yaml:"cookie_name,omitempty" json:"cookie_name,omitempty"` // default ztp_session
 	TTL        time.Duration `yaml:"ttl,omitempty" json:"ttl,omitempty"`                 // default 8h
 
-	secret []byte // resolved from SecretEnv during Validate; never serialized
+	secret []byte // resolved (env-expanded) during Validate; never serialized
 }
 
-// Secret returns the resolved session-signing secret (populated by
-// Validate). Empty until validation has run.
-func (s *SessionConfig) Secret() []byte { return s.secret }
+// ResolvedSecret returns the session-signing secret after env
+// expansion (populated by Validate). Empty until validation has run.
+func (s *SessionConfig) ResolvedSecret() []byte { return s.secret }
 
 // EffectiveCookieName returns the configured cookie name or the default.
 func (s *SessionConfig) EffectiveCookieName() string {
@@ -73,17 +74,17 @@ type ServiceToken struct {
 	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
 }
 
-// IdentityProvider is an OIDC provider. Credentials are env-referenced.
-// The login flow ships in a later increment; until it does, validation
-// rejects a non-empty provider list so the config never claims a
-// capability the proxy cannot deliver.
+// IdentityProvider is an OIDC provider. Credentials support "${VAR}"
+// env expansion. The login flow ships in a later increment; until it
+// does, validation rejects a non-empty provider list so the config
+// never claims a capability the proxy cannot deliver.
 type IdentityProvider struct {
-	Name            string   `yaml:"name" json:"name"`
-	Type            string   `yaml:"type" json:"type"` // oidc
-	Issuer          string   `yaml:"issuer" json:"issuer"`
-	ClientIDEnv     string   `yaml:"client_id_env" json:"client_id_env"`
-	ClientSecretEnv string   `yaml:"client_secret_env" json:"client_secret_env"`
-	Scopes          []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+	Name         string   `yaml:"name" json:"name"`
+	Type         string   `yaml:"type" json:"type"` // oidc
+	Issuer       string   `yaml:"issuer" json:"issuer"`
+	ClientID     string   `yaml:"client_id" json:"client_id"`
+	ClientSecret string   `yaml:"client_secret" json:"client_secret"`
+	Scopes       []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
 }
 
 // AccessRule is one ordered policy rule: match conditions, an action,

@@ -22,7 +22,7 @@ access:
   enabled: true
 
   session:
-    secret_env: ZTP_SESSION_SECRET   # env var, >= 32 bytes; never inline
+    secret: "${ZTP_SESSION_SECRET}"   # env-expanded; >= 32 bytes
     cookie_name: ztp_session         # default
     ttl: 8h                          # default
 
@@ -107,10 +107,12 @@ router independently 404s it as defence-in-depth when disabled.
 
 ## Secrets
 
-All secrets are env-referenced (`*_env`), never inline in YAML.
-`validate` fails if a referenced variable is unset, and the session
-secret must be at least 32 bytes. Rotating the session secret
-invalidates all live sessions.
+Secret-bearing values (`session.secret`, provider credentials) accept
+either an inline value or a whole-value environment reference in the
+form `"${VAR}"` — the env form is recommended so secrets stay out of
+the YAML file. `validate` fails if a referenced variable is unset, and
+the session secret must be at least 32 bytes. Rotating the session
+secret invalidates all live sessions.
 
 ## Hot reload
 

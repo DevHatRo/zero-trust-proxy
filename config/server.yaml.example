@@ -133,7 +133,7 @@ security:
 access:
   enabled: false
   # session:
-  #   secret_env: ZTP_SESSION_SECRET   # >= 32 bytes
+  #   secret: "${ZTP_SESSION_SECRET}"   # env-expanded; >= 32 bytes
   #   ttl: 8h
   # service_tokens:
   #   - name: ci-deploy
