@@ -46,16 +46,20 @@ var envRefRe = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
 
 // ExpandSecret resolves a secret-bearing config value: a "${VAR}" form
 // reads the environment (recommended — keeps the secret out of YAML);
-// anything else is taken literally. An env reference to an unset
-// variable is an error, never an empty secret.
+// anything else is taken literally. An env reference to an unset or
+// empty variable is an error, never an empty secret — the two cases
+// are reported distinctly so the operator fixes the right thing.
 func ExpandSecret(v string) (string, error) {
 	m := envRefRe.FindStringSubmatch(v)
 	if m == nil {
 		return v, nil
 	}
-	resolved := os.Getenv(m[1])
+	resolved, ok := os.LookupEnv(m[1])
+	if !ok {
+		return "", fmt.Errorf("environment variable %s is not set", m[1])
+	}
 	if resolved == "" {
-		return "", fmt.Errorf("environment variable %s is unset", m[1])
+		return "", fmt.Errorf("environment variable %s is set but empty", m[1])
 	}
 	return resolved, nil
 }

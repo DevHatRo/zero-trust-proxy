@@ -473,3 +473,24 @@ access:
 		t.Fatalf("expected multiple-documents rejection, got %v", err)
 	}
 }
+
+func TestExpandSecretDistinguishesUnsetFromEmpty(t *testing.T) {
+	t.Setenv("ZTP_EMPTY_SECRET", "")
+	if _, err := ExpandSecret("${ZTP_EMPTY_SECRET}"); err == nil || !strings.Contains(err.Error(), "set but empty") {
+		t.Fatalf("empty var: got %v, want 'set but empty'", err)
+	}
+	if _, err := ExpandSecret("${ZTP_NEVER_SET_ANYWHERE}"); err == nil || !strings.Contains(err.Error(), "is not set") {
+		t.Fatalf("unset var: got %v, want 'is not set'", err)
+	}
+	t.Setenv("ZTP_REAL_SECRET", "value-123")
+	if v, err := ExpandSecret("${ZTP_REAL_SECRET}"); err != nil || v != "value-123" {
+		t.Fatalf("set var: got (%q,%v)", v, err)
+	}
+	if v, err := ExpandSecret("literal-inline"); err != nil || v != "literal-inline" {
+		t.Fatalf("literal: got (%q,%v)", v, err)
+	}
+	// Partial/embedded forms are literals, not expansions.
+	if v, _ := ExpandSecret("prefix-${X}-suffix"); v != "prefix-${X}-suffix" {
+		t.Fatalf("embedded form must stay literal, got %q", v)
+	}
+}
