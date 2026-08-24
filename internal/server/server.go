@@ -136,6 +136,16 @@ func New(cfg *serverconfig.Config) (*Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("access: %w", err)
 		}
+		if cfg.Access.AllowAgentPolicy {
+			// Resolve a request host to the policy_ref its serving agent
+			// declared, so the engine can honour it (gap-fill only).
+			eng.SetHostPolicyResolver(func(host string) string {
+				if _, svc, ok := agents.LookupService(host); ok && svc != nil {
+					return svc.PolicyRef
+				}
+				return ""
+			})
+		}
 		s.access = eng
 	}
 	return s, nil

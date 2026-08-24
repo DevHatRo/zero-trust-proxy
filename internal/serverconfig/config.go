@@ -32,7 +32,13 @@ type AccessConfig struct {
 	// Defaults to deny when the layer is enabled (zero trust).
 	DefaultAction string         `yaml:"default_action,omitempty" json:"default_action,omitempty"`
 	EmailOTP      EmailOTPConfig `yaml:"email_otp,omitempty" json:"email_otp,omitempty"`
-	Rules         []AccessRule   `yaml:"rules,omitempty" json:"rules,omitempty"`
+	// AllowAgentPolicy lets an agent's per-service policy_ref name a
+	// server rule to apply to its host. Off by default (server rules are
+	// authoritative). Even when on, an agent ref is only consulted where
+	// no server rule matched and can only name an allow rule that carries
+	// an identity requirement — it can never grant unauthenticated access.
+	AllowAgentPolicy bool         `yaml:"allow_agent_policy,omitempty" json:"allow_agent_policy,omitempty"`
+	Rules            []AccessRule `yaml:"rules,omitempty" json:"rules,omitempty"`
 }
 
 // EmailOTPConfig enables Cloudflare-style one-time-code login: a

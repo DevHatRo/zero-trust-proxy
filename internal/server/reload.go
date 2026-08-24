@@ -96,6 +96,8 @@ func diffRestartOnly(old, new *serverconfig.Config) error {
 		return fmt.Errorf("access.identity_providers change requires restart")
 	case !reflect.DeepEqual(old.Access.EmailOTP, new.Access.EmailOTP):
 		return fmt.Errorf("access.email_otp change requires restart")
+	case old.Access.AllowAgentPolicy != new.Access.AllowAgentPolicy:
+		return fmt.Errorf("access.allow_agent_policy change requires restart")
 	}
 	return nil
 }

@@ -182,6 +182,38 @@ Notable subtleties:
   `identity_provider`, `source_cidrs` (matched against the TCP peer
   address, never forwarding headers).
 
+## Per-service policy hints (`allow_agent_policy`)
+
+Rules are **server-authoritative** by default: the proxy decides, and an
+agent has no say. As a convenience, an agent may tag a service with
+`access_policy: <rule-name>` (see the agent docs) to ask that a named
+server rule apply to that service's host — so an operator can define a
+rule once without listing every host in its `when.hosts`.
+
+This is honoured **only** when the server sets `access.allow_agent_policy:
+true` (default `false`). Even then it can only ever **grant** access in a
+gap the server left denied — it can never override a server-authoritative
+decision:
+
+- The agent hint is consulted **only when the request hit the default
+  `deny`** — i.e. no explicit rule matched *and* `default_action` is
+  `deny`. An explicit `allow`/`deny` rule wins over it, and a
+  `default_action: allow` wins over it (an agent cannot restrict a host
+  the operator chose to leave open).
+- The named rule must be an **allow rule that carries an identity
+  `require`**. A public (no-`require`) rule, a `deny` rule, a
+  network-only `require` (satisfiable anonymously), or an unknown name is
+  ignored and logged — an agent can never borrow a rule to grant
+  unauthenticated access.
+- The referenced rule's own **`when` path/method scope is honoured**
+  (only its host clause is treated as this host), then its `require` is
+  evaluated as normal: satisfied → allow; anonymous browser → login;
+  otherwise 403. Outside the rule's path/method scope the request stays
+  at the default deny.
+
+`allow_agent_policy` is restart-only. Leave it off unless you explicitly
+trust agents to reference policies by name.
+
 ## The `/.ztp/` namespace
 
 `/.ztp/*` is proxy-owned: `/.ztp/logout` clears the session,
