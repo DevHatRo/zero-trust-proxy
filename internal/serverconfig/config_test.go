@@ -457,3 +457,19 @@ access:
 		t.Fatalf("error should name the unknown field: %v", err)
 	}
 }
+
+// A stray `---` must not silently discard the rest of the config
+// (e.g. an entire access policy living in the second document).
+func TestParseRejectsMultipleDocuments(t *testing.T) {
+	_, err := Parse([]byte(`
+tls: {mode: none}
+listen: {http: ":80"}
+agents: {listen: ":8443", cert_file: c, key_file: k, ca_file: ca}
+---
+access:
+  enabled: true
+`))
+	if err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("expected multiple-documents rejection, got %v", err)
+	}
+}

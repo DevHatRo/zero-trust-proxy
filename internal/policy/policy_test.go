@@ -397,10 +397,13 @@ func TestTokenLookupScansFullTable(t *testing.T) {
 // the engine must not depend on that) is unsatisfiable — never a free
 // pass for anonymous callers.
 func TestEmptyRequireFailsClosed(t *testing.T) {
-	rules := compileRules([]serverconfig.AccessRule{
+	rules, err := compileRules([]serverconfig.AccessRule{
 		{Name: "broken", When: serverconfig.AccessMatch{Hosts: []string{"h.example.com"}},
 			Action: "allow", Require: &serverconfig.AccessRequire{}},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	snap := &snapshot{rules: rules, tokens: &tokenTable{}}
 	v := snap.evaluate("h.example.com", "/", "GET", nil, &Identity{Source: SourceNone})
 	if v.Decision != Deny {
@@ -440,10 +443,13 @@ func TestZTPNamespaceDotSegments(t *testing.T) {
 // email. Compiled directly — validation rejects emails clauses until
 // OIDC ships, so this is the engine's own fail-closed guarantee.
 func TestBlankEmailEntryFailsClosed(t *testing.T) {
-	rules := compileRules([]serverconfig.AccessRule{
+	rules, err := compileRules([]serverconfig.AccessRule{
 		{Name: "exec-only", When: serverconfig.AccessMatch{Hosts: []string{"admin.example.com"}},
 			Action: "allow", Require: &serverconfig.AccessRequire{Emails: []string{"ceo@example.com", ""}}},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	snap := &snapshot{rules: rules, tokens: &tokenTable{}}
 
 	v := snap.evaluate("admin.example.com", "/secrets", "GET", nil, &Identity{Source: SourceNone})
@@ -457,9 +463,12 @@ func TestBlankEmailEntryFailsClosed(t *testing.T) {
 		t.Fatalf("legitimate email: decision=%v, want Allow", v.Decision)
 	}
 	// Blank group entries are equally inert.
-	rules = compileRules([]serverconfig.AccessRule{
+	rules, err = compileRules([]serverconfig.AccessRule{
 		{Name: "g", Action: "allow", Require: &serverconfig.AccessRequire{Groups: []string{""}}},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	snap = &snapshot{rules: rules, tokens: &tokenTable{}}
 	v = snap.evaluate("x.example.com", "/", "GET", nil, &Identity{Source: SourceServiceToken, Subject: "t", Groups: []string{""}})
 	if v.Decision == Allow {
@@ -486,5 +495,77 @@ func TestMethodMatchingIsCaseNormalized(t *testing.T) {
 	}
 	if rr := send(t, h, "GET", "http://api.example.com/write", "9.9.9.9", nil); rr.Code != 200 {
 		t.Fatalf("GET should pass the POST-only deny: %d", rr.Code)
+	}
+}
+
+// The credential that authenticated to the proxy must never reach the
+// backend; unrelated auth material must pass through untouched.
+func TestConsumedCredentialStripped(t *testing.T) {
+	e := newTestEngine(t, func(c *serverconfig.AccessConfig) {
+		c.Rules = []serverconfig.AccessRule{
+			{Name: "gated", When: serverconfig.AccessMatch{Hosts: []string{"a.example.com"}},
+				Action: "allow", Require: &serverconfig.AccessRequire{Groups: []string{"ci"}}},
+			{Name: "open", When: serverconfig.AccessMatch{Hosts: []string{"open.example.com"}}, Action: "allow"},
+		}
+	})
+	var gotAuth, gotXToken, gotCookies string
+	h := e.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotXToken = r.Header.Get("X-ZTP-Token")
+		gotCookies = r.Header.Get("Cookie")
+		w.WriteHeader(200)
+	}))
+
+	// Bearer token consumed → Authorization stripped.
+	rr := send(t, h, "GET", "http://a.example.com/", "9.9.9.9", func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer s3cret-token")
+	})
+	if rr.Code != 200 || gotAuth != "" {
+		t.Fatalf("bearer: code=%d forwarded Authorization=%q", rr.Code, gotAuth)
+	}
+
+	// X-ZTP-Token consumed → stripped; backend's own Authorization kept.
+	rr = send(t, h, "GET", "http://a.example.com/", "9.9.9.9", func(r *http.Request) {
+		r.Header.Set("X-ZTP-Token", "s3cret-token")
+		r.Header.Set("Authorization", "Basic backend-creds")
+	})
+	if rr.Code != 200 || gotXToken != "" || gotAuth != "Basic backend-creds" {
+		t.Fatalf("xtoken: code=%d X-ZTP-Token=%q Authorization=%q", rr.Code, gotXToken, gotAuth)
+	}
+
+	// Session cookie consumed → only ours removed, backend cookies kept.
+	token, _ := e.session.Mint(&Identity{Source: SourceSession, Subject: "u", Groups: []string{"ci"}})
+	rr = send(t, h, "GET", "http://a.example.com/", "9.9.9.9", func(r *http.Request) {
+		r.AddCookie(&http.Cookie{Name: "ztp_session", Value: token})
+		r.AddCookie(&http.Cookie{Name: "backend_session", Value: "keep-me"})
+	})
+	if rr.Code != 200 {
+		t.Fatalf("session: code=%d", rr.Code)
+	}
+	if strings.Contains(gotCookies, "ztp_session") || !strings.Contains(gotCookies, "backend_session=keep-me") {
+		t.Fatalf("session: forwarded cookies %q", gotCookies)
+	}
+
+	// Unrecognized bearer (backend auth) on a public rule → forwarded.
+	rr = send(t, h, "GET", "http://open.example.com/", "9.9.9.9", func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer backend-only-token")
+	})
+	if rr.Code != 200 || gotAuth != "Bearer backend-only-token" {
+		t.Fatalf("unknown bearer: code=%d Authorization=%q", rr.Code, gotAuth)
+	}
+}
+
+// RFC 7235: the auth-scheme is case-insensitive.
+func TestBearerSchemeCaseInsensitive(t *testing.T) {
+	for _, hdr := range []string{"Bearer tok", "bearer tok", "BEARER tok", "BeArEr tok"} {
+		if tok, ok := bearerToken(hdr, ""); !ok || tok != "tok" {
+			t.Errorf("%q: got (%q,%v)", hdr, tok, ok)
+		}
+	}
+	if _, ok := bearerToken("", "   "); ok {
+		t.Error("whitespace-only X-ZTP-Token must count as absent")
+	}
+	if _, ok := bearerToken("Bearer    ", ""); ok {
+		t.Error("empty bearer value must count as absent")
 	}
 }

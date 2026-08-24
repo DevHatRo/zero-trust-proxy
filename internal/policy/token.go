@@ -62,15 +62,18 @@ func (t *tokenTable) lookup(presented string) (*Identity, bool) {
 }
 
 // bearerToken extracts the presented token from the request headers:
-// `Authorization: Bearer <t>` or `X-ZTP-Token: <t>`.
+// `Authorization: Bearer <t>` or `X-ZTP-Token: <t>`. The Bearer scheme
+// is matched case-insensitively (RFC 7235: auth-scheme is a
+// case-insensitive token) and whitespace-only values count as absent.
 func bearerToken(authorization, xToken string) (string, bool) {
-	if strings.HasPrefix(authorization, "Bearer ") {
-		if t := strings.TrimSpace(authorization[len("Bearer "):]); t != "" {
+	const prefix = "bearer "
+	if len(authorization) >= len(prefix) && strings.EqualFold(authorization[:len(prefix)], prefix) {
+		if t := strings.TrimSpace(authorization[len(prefix):]); t != "" {
 			return t, true
 		}
 	}
-	if xToken != "" {
-		return xToken, true
+	if t := strings.TrimSpace(xToken); t != "" {
+		return t, true
 	}
 	return "", false
 }

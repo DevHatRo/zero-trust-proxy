@@ -81,8 +81,12 @@ func (e *Engine) install(cfg serverconfig.AccessConfig) error {
 	if err != nil {
 		return err
 	}
+	rules, err := compileRules(cfg.Rules)
+	if err != nil {
+		return err
+	}
 	e.snap.Store(&snapshot{
-		rules:        compileRules(cfg.Rules),
+		rules:        rules,
 		tokens:       tokens,
 		defaultAllow: cfg.DefaultAction == "allow", // ""/deny → deny
 	})

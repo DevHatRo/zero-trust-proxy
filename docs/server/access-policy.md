@@ -11,7 +11,7 @@ Disabled by default; an absent block changes nothing. The middleware
 runs after the edge firewall and rate limiter (cheap rejects first)
 and before the router:
 
-```
+```text
 accessLog → metrics → WAF → rateLimit → accessPolicy → router
 ```
 
@@ -80,7 +80,7 @@ clauses AND-ed):
 | `action: deny` | 403 |
 | `action: allow`, no `require` | allowed (public) |
 | `require` satisfied | allowed |
-| `require` fails, caller anonymous, predicate is identity-based | authentication demanded — browsers get the login flow (an explanatory 401 until a provider is configured), APIs get `401` + `WWW-Authenticate` |
+| `require` fails, caller anonymous, predicate is identity-based | authentication demanded — in this release browsers receive an explanatory `401` page (no login flow exists yet); APIs get `401` + `WWW-Authenticate` |
 | `require` fails otherwise | 403 — re-authenticating would not help |
 | no rule matched | `default_action` |
 

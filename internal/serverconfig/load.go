@@ -29,11 +29,23 @@ func Load(path string) (*Config, error) {
 // strictUnmarshal decodes YAML rejecting unknown fields. A misspelled
 // key in a security-relevant block (e.g. `group:` for `groups:` in an
 // access rule) must fail the load, not silently produce a zero value
-// that fails open.
+// that fails open. Exactly one document is allowed: a stray `---`
+// would otherwise silently discard everything after it (including,
+// say, the whole access policy).
 func strictUnmarshal(data []byte, out any) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
-	if err := dec.Decode(out); err != nil && err != io.EOF {
+	if err := dec.Decode(out); err != nil {
+		if err == io.EOF {
+			return nil // empty input: caller keeps defaults
+		}
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("config contains multiple YAML documents; only one is allowed")
+		}
 		return err
 	}
 	return nil

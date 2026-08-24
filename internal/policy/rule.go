@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"net"
 	"strings"
 
@@ -39,7 +40,7 @@ func (r *compiledRequire) identityBased() bool {
 		len(r.emailDomains) > 0 || r.provider != ""
 }
 
-func compileRules(rules []serverconfig.AccessRule) []compiledRule {
+func compileRules(rules []serverconfig.AccessRule) ([]compiledRule, error) {
 	out := make([]compiledRule, 0, len(rules))
 	for _, rc := range rules {
 		r := compiledRule{name: rc.Name, allow: rc.Action == "allow"}
@@ -71,15 +72,22 @@ func compileRules(rules []serverconfig.AccessRule) []compiledRule {
 				req.emailDomains = append(req.emailDomains, strings.ToLower(d))
 			}
 			for _, c := range rc.Require.SourceCIDRs {
-				if _, ipNet, err := net.ParseCIDR(c); err == nil { // validated at config load
-					req.cidrs = append(req.cidrs, ipNet)
+				// Validation also rejects bad CIDRs, but compilation must
+				// not silently drop one — that would delete a network
+				// restriction while the rule's other clauses keep allowing
+				// (fail-open). An error here keeps the previous snapshot
+				// in force on reload.
+				_, ipNet, err := net.ParseCIDR(c)
+				if err != nil {
+					return nil, fmt.Errorf("rule %q: invalid CIDR %q", rc.Name, c)
 				}
+				req.cidrs = append(req.cidrs, ipNet)
 			}
 			r.require = req
 		}
 		out = append(out, r)
 	}
-	return out
+	return out, nil
 }
 
 // matches reports whether the rule applies to the request. Empty

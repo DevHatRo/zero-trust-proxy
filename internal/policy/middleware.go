@@ -33,7 +33,7 @@ func (e *Engine) Wrap(next http.Handler) http.Handler {
 		}
 
 		snap := e.snap.Load()
-		id := e.resolveIdentity(r, snap)
+		id, cred := e.resolveIdentity(r, snap)
 
 		host := hostOnly(r.Host)
 		// Method uppercased: rule keys are normalized at compile time and
@@ -50,6 +50,12 @@ func (e *Engine) Wrap(next http.Handler) http.Handler {
 				ri.Identity = id.Subject
 				ri.IdentitySource = id.Source
 			}
+			// The credential that authenticated to the PROXY must not be
+			// forwarded to the backend, where it could be captured and
+			// replayed against the proxy. Only the consumed credential is
+			// stripped — an unrecognized Authorization header may be the
+			// backend's own auth and passes through untouched.
+			stripConsumedCredential(r, cred, e.session.CookieName())
 			next.ServeHTTP(w, r)
 
 		case RequireAuth:
@@ -83,25 +89,60 @@ func (e *Engine) serveZTP(w http.ResponseWriter, r *http.Request, path string) {
 	}
 }
 
+// credential records which request credential resolved the identity,
+// so exactly that one can be stripped before proxying.
+type credential int
+
+const (
+	credNone credential = iota
+	credSessionCookie
+	credAuthorization
+	credXZTPToken
+)
+
 // resolveIdentity resolves the caller, first hit wins: valid session
 // cookie, then bearer/service token, else anonymous. An invalid cookie
 // or unknown token silently resolves to anonymous — the policy
 // decision, not the resolution step, produces the client-visible
 // outcome.
-func (e *Engine) resolveIdentity(r *http.Request, snap *snapshot) *Identity {
+func (e *Engine) resolveIdentity(r *http.Request, snap *snapshot) (*Identity, credential) {
 	if c, err := r.Cookie(e.session.CookieName()); err == nil && c.Value != "" {
 		if id, err := e.session.Verify(c.Value); err == nil {
-			return id
+			return id, credSessionCookie
 		}
 		log.Debug("access: invalid session cookie from %s", r.RemoteAddr)
 	}
 	if token, ok := bearerToken(r.Header.Get("Authorization"), r.Header.Get("X-ZTP-Token")); ok {
 		if id, ok := snap.tokens.lookup(token); ok {
-			return id
+			// Attribute the credential to the header it actually came from.
+			if _, fromAuth := bearerToken(r.Header.Get("Authorization"), ""); fromAuth {
+				return id, credAuthorization
+			}
+			return id, credXZTPToken
 		}
 		log.Debug("access: unknown service token from %s", r.RemoteAddr)
 	}
-	return &Identity{Source: SourceNone}
+	return &Identity{Source: SourceNone}, credNone
+}
+
+// stripConsumedCredential removes the proxy credential from the
+// outbound request while leaving unrelated auth material (backend
+// cookies, a backend's own Authorization header) intact.
+func stripConsumedCredential(r *http.Request, cred credential, sessionCookie string) {
+	switch cred {
+	case credAuthorization:
+		r.Header.Del("Authorization")
+	case credXZTPToken:
+		r.Header.Del("X-ZTP-Token")
+	case credSessionCookie:
+		cookies := r.Cookies()
+		r.Header.Del("Cookie")
+		for _, c := range cookies {
+			if c.Name != sessionCookie {
+				r.AddCookie(c)
+			}
+		}
+	}
 }
 
 // requireAuth answers an anonymous caller that hit an identity-based
