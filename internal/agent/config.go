@@ -56,17 +56,17 @@ type LoggingConfig struct {
 // (`config/server.yaml`); per-service redirect/listen-on flags from
 // older versions are no-ops and have been removed.
 type ServiceConfig struct {
-	ID             string                `yaml:"id" json:"id"`
-	Name           string                `yaml:"name" json:"name"`
-	Hostname       string                `yaml:"hostname,omitempty" json:"hostname,omitempty"` // Backward compatibility - single hostname
-	Hosts          []string              `yaml:"hosts,omitempty" json:"hosts,omitempty"`       // New: multiple hostnames support
-	Protocol       string                `yaml:"protocol" json:"protocol"`
-	WebSocket      bool                  `yaml:"websocket,omitempty" json:"websocket,omitempty"`
-	Timeout        time.Duration         `yaml:"timeout,omitempty" json:"timeout,omitempty"` // Per-service request timeout override; 0 = use router default
-	Upstreams      []UpstreamConfig      `yaml:"upstreams" json:"upstreams"`
-	LoadBalancing  *LoadBalancingConfig  `yaml:"load_balancing,omitempty" json:"load_balancing,omitempty"`
-	Routes         []RouteConfig         `yaml:"routes,omitempty" json:"routes,omitempty"`
-	TLS            *TLSConfig            `yaml:"tls,omitempty" json:"tls,omitempty"`
+	ID            string               `yaml:"id" json:"id"`
+	Name          string               `yaml:"name" json:"name"`
+	Hostname      string               `yaml:"hostname,omitempty" json:"hostname,omitempty"` // Backward compatibility - single hostname
+	Hosts         []string             `yaml:"hosts,omitempty" json:"hosts,omitempty"`       // New: multiple hostnames support
+	Protocol      string               `yaml:"protocol" json:"protocol"`
+	WebSocket     bool                 `yaml:"websocket,omitempty" json:"websocket,omitempty"`
+	Timeout       time.Duration        `yaml:"timeout,omitempty" json:"timeout,omitempty"` // Per-service request timeout override; 0 = use router default
+	Upstreams     []UpstreamConfig     `yaml:"upstreams" json:"upstreams"`
+	LoadBalancing *LoadBalancingConfig `yaml:"load_balancing,omitempty" json:"load_balancing,omitempty"`
+	Routes        []RouteConfig        `yaml:"routes,omitempty" json:"routes,omitempty"`
+	TLS           *TLSConfig           `yaml:"tls,omitempty" json:"tls,omitempty"`
 	// AccessPolicy names a server-defined access rule to apply to this
 	// service's host. It is only honoured when the server sets
 	// access.allow_agent_policy: true; otherwise server-side rules are

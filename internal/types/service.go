@@ -12,24 +12,24 @@ import (
 // service. Encoded as a Go duration string (e.g. "30s", "5m") on the
 // wire and in YAML.
 type ServiceConfig struct {
-	Hostname   string        `json:"hostname" yaml:"hostname"`
-	Backend    string        `json:"backend" yaml:"backend"`
-	Protocol   string        `json:"protocol" yaml:"protocol"`
-	WebSocket  bool          `json:"websocket,omitempty" yaml:"websocket,omitempty"`
-	Timeout    time.Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	Hostname  string        `json:"hostname" yaml:"hostname"`
+	Backend   string        `json:"backend" yaml:"backend"`
+	Protocol  string        `json:"protocol" yaml:"protocol"`
+	WebSocket bool          `json:"websocket,omitempty" yaml:"websocket,omitempty"`
+	Timeout   time.Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	// TCPPort is the public port the server binds for this TCP service.
 	// 0 means assign any free port; the server echoes the actual port
 	// in service_add_response. Only used when Protocol == "tcp".
-	TCPPort    int           `json:"tcp_port,omitempty" yaml:"tcp_port,omitempty"`
+	TCPPort int `json:"tcp_port,omitempty" yaml:"tcp_port,omitempty"`
 	// TLSOffload, when true, makes the server terminate client TLS and
 	// forward cleartext to the agent. Default false = passthrough.
-	TLSOffload bool          `json:"tls_offload,omitempty" yaml:"tls_offload,omitempty"`
+	TLSOffload bool `json:"tls_offload,omitempty" yaml:"tls_offload,omitempty"`
 	// PolicyRef names a server-defined access rule the agent asks to be
 	// applied to this service's host. Advisory only: the server honours
 	// it exclusively when access.allow_agent_policy is true, and even
 	// then only to fill a gap where no server rule already matched.
 	// Never authorization-authoritative on its own.
-	PolicyRef  string        `json:"policy_ref,omitempty" yaml:"policy_ref,omitempty"`
+	PolicyRef string `json:"policy_ref,omitempty" yaml:"policy_ref,omitempty"`
 }
 
 // ValidationError represents a configuration validation error

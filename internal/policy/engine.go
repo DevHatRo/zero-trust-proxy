@@ -48,7 +48,7 @@ type Engine struct {
 	session          *SessionManager
 	otp              *otpManager  // nil when email_otp is disabled
 	oidc             *oidcManager // nil when no identity_providers are configured
-	allowAgentPolicy bool // honour agent-provided policy_ref (restart-only)
+	allowAgentPolicy bool         // honour agent-provided policy_ref (restart-only)
 	// hostPolicy resolves a request host to its agent-provided policy_ref.
 	// Atomic because SetHostPolicyResolver is an exported setter; the
 	// request path (decide) reads it concurrently.

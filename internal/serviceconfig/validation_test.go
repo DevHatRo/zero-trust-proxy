@@ -266,4 +266,3 @@ func BenchmarkValidator_ValidateServiceConfig(b *testing.B) {
 		validator.ValidateServiceConfig(config)
 	}
 }
-
