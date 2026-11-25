@@ -25,9 +25,9 @@ type MessageSender interface {
 // Manager owns all public TCP listeners. It is safe for concurrent use.
 type Manager struct {
 	mu         sync.Mutex
-	services   map[string]*tcpService  // hostname → service
-	portToHost map[int]string          // bound port → hostname (conflict guard)
-	conns      map[string]*connEntry   // msgID → active client connection
+	services   map[string]*tcpService // hostname → service
+	portToHost map[int]string         // bound port → hostname (conflict guard)
+	conns      map[string]*connEntry  // msgID → active client connection
 	connsMu    sync.RWMutex
 	pending    map[string]*pendingConn // msgID → waiting for tcp_connect_ack
 	pendingMu  sync.Mutex

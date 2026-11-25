@@ -28,9 +28,9 @@ import (
 // session is minted. Only the confidential auth-code flow is supported.
 
 const (
-	oidcMetaTTL   = time.Hour       // discovery document cache lifetime
-	oidcJWKSTTL   = time.Hour       // JWKS cache lifetime
-	oidcHTTPLimit = 1 << 20         // 1 MiB cap on IdP response bodies
+	oidcMetaTTL   = time.Hour        // discovery document cache lifetime
+	oidcJWKSTTL   = time.Hour        // JWKS cache lifetime
+	oidcHTTPLimit = 1 << 20          // 1 MiB cap on IdP response bodies
 	oidcHTTPTO    = 10 * time.Second // per-call timeout for IdP requests
 )
 

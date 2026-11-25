@@ -20,14 +20,14 @@ jobs:
     name: Build App
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
-          go-version: "1.27"
+          go-version-file: go.mod
           cache: true
 
       - name: Update Go dependencies
@@ -62,7 +62,7 @@ jobs:
           - component: agent
             dockerfile: ./cmd/agent/Dockerfile
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -151,12 +151,12 @@ jobs:
           path: bin/
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             bin/*
           draft: false
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false # release-please writes the notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
