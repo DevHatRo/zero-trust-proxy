@@ -291,11 +291,10 @@ func TestLogWithFieldsConsoleFormat(t *testing.T) {
 // TestDebugWithFields tests logging with fields at the debug level
 func TestDebugWithFields(t *testing.T) {
 	// Reset default logger for this test
+	once.Do(initDefaultLogger) // savedLogger must be non-nil: once stays done after this test
 	savedLogger := defaultLogger
-	savedOnce := once
 	defer func() {
 		defaultLogger = savedLogger
-		once = savedOnce
 	}()
 
 	var buf bytes.Buffer
@@ -357,11 +356,10 @@ func TestLogLevelFiltering(t *testing.T) {
 // TestSetComponent tests setting the component for logging
 func TestSetComponent(t *testing.T) {
 	// Reset default logger for this test
+	once.Do(initDefaultLogger) // savedLogger must be non-nil: once stays done after this test
 	savedLogger := defaultLogger
-	savedOnce := once
 	defer func() {
 		defaultLogger = savedLogger
-		once = savedOnce
 	}()
 
 	var buf bytes.Buffer
@@ -447,11 +445,10 @@ func BenchmarkJSONLoggingWithFields(b *testing.B) {
 // TestWithComponent tests creating logger instances with specific component names
 func TestWithComponent(t *testing.T) {
 	// Reset default logger for this test
+	once.Do(initDefaultLogger) // savedLogger must be non-nil: once stays done after this test
 	savedLogger := defaultLogger
-	savedOnce := once
 	defer func() {
 		defaultLogger = savedLogger
-		once = savedOnce
 	}()
 
 	var buf bytes.Buffer
