@@ -1,67 +1,57 @@
-# Simplified Go linting configuration compatible with older Go versions
+version: "2"
 run:
-  timeout: 5m
   tests: true
-  skip-dirs:
-    - vendor
-    - testdata
-
 output:
   formats:
-    - format: line-number
+    text:
       path: stdout
-  sort-results: true
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-  
-  gocyclo:
-    min-complexity: 15
-  
-  govet:
-    enable-all: true
-  
-  staticcheck:
-    checks: ["all"]
-  
-  unused:
-    check-exported: false
-  
-  misspell:
-    locale: US
-
+      colors: false
 linters:
-  disable-all: true
+  default: none
   enable:
-    # Essential linters that work with older Go versions
-    - errcheck      # Check for unchecked errors
-    - gosimple      # Simplify Go code
-    - govet         # Go vet examiner
-    - ineffassign   # Detect ineffectual assignments
-    - staticcheck   # Advanced static analysis
-    - unused        # Find unused code
-    - typecheck     # Type-check Go code
-    
-    # Code quality
-    - gocyclo       # Cyclomatic complexity
-    - gofmt         # Check whether code was gofmt-ed
-    - goimports     # Check import formatting
-    
-    # Style
-    - misspell      # Find commonly misspelled English words
-    - unparam       # Find unused function parameters
-    - unconvert     # Remove unnecessary type conversions
-
+    - errcheck
+    - gocyclo
+    - govet
+    - ineffassign
+    - misspell
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    gocyclo:
+      min-complexity: 15
+    govet:
+      enable-all: true
+    misspell:
+      locale: US
+    staticcheck:
+      checks:
+        - all
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - unparam
+          - unused
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
-  
-  exclude-rules:
-    # Allow unused code in test files
-    - path: _test\.go
-      linters:
-        - unused
-        - unparam
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
