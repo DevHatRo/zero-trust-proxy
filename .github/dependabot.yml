@@ -1,0 +1,43 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      gomod-minor-patch:
+        update-types: [minor, patch]
+      gomod-major:
+        update-types: [major]
+
+  - package-ecosystem: docker
+    directories:
+      - /cmd/agent
+      - /cmd/zero-trust-proxy
+    schedule:
+      interval: weekly
+    groups:
+      docker-minor-patch:
+        update-types: [minor, patch]
+      docker-major:
+        update-types: [major]
+
+  - package-ecosystem: docker-compose
+    directory: /examples
+    schedule:
+      interval: weekly
+    groups:
+      docker-compose-minor-patch:
+        update-types: [minor, patch]
+      docker-compose-major:
+        update-types: [major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions-minor-patch:
+        update-types: [minor, patch]
+      github-actions-major:
+        update-types: [major]
