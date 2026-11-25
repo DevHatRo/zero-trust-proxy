@@ -1,11 +1,11 @@
-# syntax=docker/dockerfile:1.6
+# syntax=docker/dockerfile:1
 #
 # Runtime image for the zero-trust-proxy server.
 #
 # Build prerequisite: run `./scripts/build.sh` so that
 # `bin/zero-trust-proxy-server-linux-${TARGETARCH}` exists.
 
-FROM debian:12-slim
+FROM debian:13-slim
 
 ARG TARGETARCH
 

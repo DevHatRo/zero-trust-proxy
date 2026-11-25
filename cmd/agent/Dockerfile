@@ -1,11 +1,11 @@
-# syntax=docker/dockerfile:1.6
+# syntax=docker/dockerfile:1
 #
 # Runtime image for the zero-trust-proxy agent.
 #
 # Build prerequisites: run `./scripts/build.sh` so that
 # `bin/zero-trust-proxy-agent-linux-${TARGETARCH}` exists.
 
-FROM debian:12-slim
+FROM debian:13-slim
 
 ARG TARGETARCH
 
